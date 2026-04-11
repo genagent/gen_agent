@@ -36,6 +36,15 @@ defmodule GenAgent.Server do
       halted: false,
       self_chain: nil,
       mailbox: :queue.new(),
+      # Events delivered via `GenAgent.notify/2` that arrived while
+      # the agent was in `:processing` are buffered here instead of
+      # having their `handle_event/2` callback invoked immediately.
+      # Without this deferral, state mutations from `handle_event`
+      # that happen during an in-flight turn are silently overwritten
+      # when the task's `handle_response/3` runs with the snapshot
+      # state from turn dispatch. The buffer is drained synchronously
+      # at turn completion, before the agent transitions to `:idle`.
+      pending_events: :queue.new(),
       tell_results: %{},
       tell_result_order: :queue.new()
     ]
@@ -274,12 +283,25 @@ defmodule GenAgent.Server do
 
   # ---------------------------------------------------------------------------
   # notify -- external event dispatched to handle_event/2
+  #
+  # When the agent is in :idle, the event is processed immediately.
+  # When the agent is in :processing, the event is buffered into
+  # pending_events and processed synchronously at turn completion,
+  # BEFORE transitioning to :idle. This prevents state mutations
+  # from handle_event callbacks from being silently overwritten by
+  # the in-flight task's handle_response result.
   # ---------------------------------------------------------------------------
 
-  def handle_event(:cast, {:notify, event}, state, %Data{} = data) do
+  def handle_event(:cast, {:notify, event}, :processing, %Data{} = data) do
+    emit_event_received(data.name, event)
+    pending = :queue.in(event, data.pending_events)
+    {:keep_state, %{data | pending_events: pending}}
+  end
+
+  def handle_event(:cast, {:notify, event}, :idle, %Data{} = data) do
     emit_event_received(data.name, event)
 
-    case data.agent_module.handle_event(event, data.agent_state) do
+    case safely_handle_event(data.agent_module, event, data.agent_state) do
       {:noreply, new_agent_state} ->
         {:keep_state, %{data | agent_state: new_agent_state}}
 
@@ -287,13 +309,13 @@ defmodule GenAgent.Server do
         data = %{data | agent_state: new_agent_state}
         request_ref = make_ref()
 
-        if state == :idle and not data.halted do
-          data = dispatch(data, request_ref, :event, prompt)
-          {:next_state, :processing, data}
-        else
+        if data.halted do
           mailbox = :queue.in({request_ref, :event, prompt}, data.mailbox)
           emit_mailbox_queued(data.name, :queue.len(mailbox))
           {:keep_state, %{data | mailbox: mailbox}}
+        else
+          data = dispatch(data, request_ref, :event, prompt)
+          {:next_state, :processing, data}
         end
 
       {:halt, new_agent_state} ->
@@ -476,6 +498,56 @@ defmodule GenAgent.Server do
     :ok
   end
 
+  defp safely_handle_event(module, event, state) do
+    module.handle_event(event, state)
+  rescue
+    e ->
+      require Logger
+      Logger.error("GenAgent handle_event/2 raised: #{Exception.message(e)}")
+      {:noreply, state}
+  catch
+    kind, reason ->
+      require Logger
+      Logger.error("GenAgent handle_event/2 threw #{kind}: #{inspect(reason)}")
+      {:noreply, state}
+  end
+
+  # Drain pending_events synchronously (called from finish_turn /
+  # finish_error before transitioning to :idle). Each buffered event
+  # is processed against the current data.agent_state. Events that
+  # return {:prompt, ..., state} enqueue the prompt to the mailbox so
+  # it will be dispatched after the upcoming :idle transition. Events
+  # that return {:halt, state} set halted: true but drain continues
+  # (subsequent events still get their handle_event called so their
+  # state mutations are not lost).
+  defp drain_pending_events(%Data{} = data) do
+    case :queue.out(data.pending_events) do
+      {:empty, _} ->
+        data
+
+      {{:value, event}, rest} ->
+        data = %{data | pending_events: rest}
+
+        data =
+          case safely_handle_event(data.agent_module, event, data.agent_state) do
+            {:noreply, new_state} ->
+              %{data | agent_state: new_state}
+
+            {:prompt, prompt, new_state} ->
+              request_ref = make_ref()
+              mailbox = :queue.in({request_ref, :event, prompt}, data.mailbox)
+              emit_mailbox_queued(data.name, :queue.len(mailbox))
+              %{data | agent_state: new_state, mailbox: mailbox}
+
+            {:halt, new_state} ->
+              emit_halted(data.name)
+              %{data | agent_state: new_state, halted: true}
+          end
+
+        drain_pending_events(data)
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Turn outcome -> caller delivery
   # ---------------------------------------------------------------------------
@@ -492,6 +564,7 @@ defmodule GenAgent.Server do
             current_request: nil
         }
 
+        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       {:prompt, next_prompt, final_state} when is_binary(next_prompt) ->
@@ -503,6 +576,7 @@ defmodule GenAgent.Server do
             self_chain: next_prompt
         }
 
+        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       {:halt, final_state} ->
@@ -515,6 +589,7 @@ defmodule GenAgent.Server do
         }
 
         emit_halted(data.name)
+        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
     end
   end
@@ -530,6 +605,7 @@ defmodule GenAgent.Server do
          ) do
       {:noreply, final_state} ->
         data = %{data | agent_state: final_state, current_request: nil}
+        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       {:prompt, next_prompt, final_state} when is_binary(next_prompt) ->
@@ -540,6 +616,7 @@ defmodule GenAgent.Server do
             self_chain: next_prompt
         }
 
+        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       {:halt, final_state} ->
@@ -551,6 +628,7 @@ defmodule GenAgent.Server do
         }
 
         emit_halted(data.name)
+        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
     end
   end
