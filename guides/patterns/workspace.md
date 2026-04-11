@@ -269,7 +269,7 @@ what happens," `terminate_agent` is where that goes.
   instead of `git init`. The workspace shares the object store
   with the source repo, so the agent branch can be pushed to a
   remote and turned into a PR. The [Workspace helper
-  module](https://github.com/joshrotenberg/gen_agent) (once
+  module](https://github.com/genagent/gen_agent) (once
   extracted) has `create_worktree/3` and `remove_worktree/2`
   wrapping this.
 - **Tool-use agent.** Swap the backend to `gen_agent_claude`
