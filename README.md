@@ -21,10 +21,11 @@ semantics of turns.
 ```elixir
 def deps do
   [
-    {:gen_agent, "~> 0.1.0"},
+    {:gen_agent, "~> 0.2.0"},
     # Plus at least one backend:
     {:gen_agent_claude, "~> 0.1.0"},
-    {:gen_agent_codex, "~> 0.1.0"}
+    {:gen_agent_codex, "~> 0.1.0"},
+    {:gen_agent_anthropic, "~> 0.1.0"}
   ]
 end
 ```
@@ -107,6 +108,30 @@ idle <--- handle_response --- processing (turn done)
 - **Watchdog** -- a `:state_timeout` kills any turn that runs longer than
   the configured deadline (default 10 minutes). Configurable per agent.
 
+## Lifecycle hooks
+
+In addition to the core callbacks, v0.2 adds four optional lifecycle
+hooks for fine-grained control over what happens around each turn and
+around the agent's full run:
+
+| Hook | When it fires | Typical use |
+|---|---|---|
+| `pre_run/1` | Once, after `init_agent/1`, before the first turn | Slow async setup: clone a repo, create a worktree, fetch secrets |
+| `pre_turn/2` | Before each prompt dispatch | Prompt augmentation, rate limiting, `:skip`/`:halt` as a gate |
+| `post_turn/3` | After each turn, post-decision | State-mutating side effects: commit per turn, record usage |
+| `post_run/1` | On clean `{:halt, state}` from any callback | Completion actions: open a PR, post a summary |
+
+All four are optional with default no-op implementations. The guiding
+principle is **telemetry first, callbacks for state mutation** --
+observational use cases (log tokens, emit metrics) should use the
+existing telemetry events; callbacks exist specifically for hooks that
+need to mutate `agent_state` or block the next transition.
+
+See the [Workspace pattern guide][workspace-guide] for a complete
+example exercising all four hooks in sequence around a git workspace.
+
+[workspace-guide]: https://hexdocs.pm/gen_agent/workspace.html
+
 ## Backends
 
 GenAgent ships with a `GenAgent.Backend` behaviour and no built-in backend.
@@ -116,6 +141,7 @@ Pick one of the sibling packages or write your own:
 |---|---|---|
 | Claude (Anthropic) | `gen_agent_claude` | `claude` CLI via `claude_wrapper` |
 | Codex (OpenAI) | `gen_agent_codex` | `codex` CLI via `codex_wrapper` |
+| Anthropic HTTP | `gen_agent_anthropic` | direct HTTP API via `req` |
 
 A backend owns its session lifecycle, translates the LLM-specific event
 stream into the normalized `GenAgent.Event` values the state machine
@@ -161,6 +187,39 @@ Each prompt turn runs as a Task under the shared `TaskSupervisor`. A
 crashed task delivers `:DOWN` to the owning agent, which turns it into an
 `{:error, {:task_crashed, reason}}` response for the caller -- it does not
 take down the agent process.
+
+## Patterns
+
+Ten common topologies are documented as ex_doc guides shipped with
+the package. Each guide is a complete worked example you can read,
+copy, and adapt -- they are **not** installed as public API modules:
+
+- **[Switchboard][sb]** -- human-managed named agent fleet with
+  non-blocking send/poll/inbox, the base for manager-driven UIs
+- **[Research][rs]** -- one agent self-chaining through phases
+- **[Debate][db]** -- two agents pushing each other via cross-notify
+- **[Pipeline][pl]** -- linear stage chain, one-way notify
+- **[Supervisor][sv]** -- coordinator + dynamic workers (fan-out/in)
+- **[Pool][pool]** -- reusable worker pool with round-robin dispatch
+- **[Watcher][wc]** -- reactive event-driven agent, idle until triggered
+- **[Checkpointer][cp]** -- human-in-the-loop review workflow
+- **[Retry][rt]** -- handle_error self-chain for transient failures
+- **[Workspace][ws]** -- all four lifecycle hooks around a git workspace
+
+Start with the [patterns overview][overview] for a "choose your
+pattern" decision tree.
+
+[overview]: https://hexdocs.pm/gen_agent/overview.html
+[sb]: https://hexdocs.pm/gen_agent/switchboard.html
+[rs]: https://hexdocs.pm/gen_agent/research.html
+[db]: https://hexdocs.pm/gen_agent/debate.html
+[pl]: https://hexdocs.pm/gen_agent/pipeline.html
+[sv]: https://hexdocs.pm/gen_agent/supervisor.html
+[pool]: https://hexdocs.pm/gen_agent/pool.html
+[wc]: https://hexdocs.pm/gen_agent/watcher.html
+[cp]: https://hexdocs.pm/gen_agent/checkpointer.html
+[rt]: https://hexdocs.pm/gen_agent/retry.html
+[ws]: https://hexdocs.pm/gen_agent/workspace.html
 
 ## Telemetry
 
