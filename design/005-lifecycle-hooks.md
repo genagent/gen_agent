@@ -1,6 +1,6 @@
-# Design Note 001: Lifecycle Hooks
+# Design Note 005: Lifecycle Hooks
 
-Status: draft
+Status: Implemented (PR #2)
 Target: gen_agent v0.2
 Author: jr + claude
 
@@ -322,27 +322,6 @@ def post_run(_state), do: :ok
 No existing agent breaks. No existing callback shape changes. Server
 state adds nothing visible; internally adds `pre_run_done: boolean` to
 `Data` and a new `{next_event, :internal, :pre_run}` at init time.
-
-## Implementation sketch
-
-1. Add four callbacks to `lib/gen_agent.ex` behaviour + default impls
-   in `__using__`.
-2. Add `pre_run_done: false` to `server.ex` `Data` struct.
-3. In `init/1`, post `{:next_event, :internal, :pre_run}` before the
-   first state transition.
-4. New `handle_event(:internal, :pre_run, :idle, data)` clause.
-5. In `handle_event(:internal, :process_next, :idle, ...)`, call
-   `pre_turn` before dispatching to the backend task. Honor `:skip`
-   and `:halt` returns.
-6. In `finish_turn/5` and `finish_error/3`, call `post_turn` between
-   `handle_response`/`handle_error` and the idle transition.
-7. When transitioning to halted (via `{:halt, state}` from any
-   callback), call `post_run` before emitting `[:gen_agent, :halted]`.
-8. Wrap all four in `safely_*` helpers matching the existing
-   `safely_handle_event` pattern.
-9. Scenario tests (see playground NOTES.md) for each hook firing in
-   the expected order across normal, error, interrupt, and crash
-   paths.
 
 ## Non-goals
 
