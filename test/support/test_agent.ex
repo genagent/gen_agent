@@ -58,6 +58,16 @@ defmodule GenAgent.Support.TestAgent do
     notify_pid = Keyword.get(opts, :notify_pid)
     extra = Keyword.get(opts, :extra, %{})
 
+    # Lifecycle hook handlers -- each is an optional function stashed in
+    # `extra` under its hook name. Tests set them via
+    # `extra: %{pre_run: fn state -> ... end}`.
+    extra =
+      extra
+      |> maybe_put_extra(:pre_run, Keyword.get(opts, :pre_run))
+      |> maybe_put_extra(:pre_turn, Keyword.get(opts, :pre_turn))
+      |> maybe_put_extra(:post_turn, Keyword.get(opts, :post_turn))
+      |> maybe_put_extra(:post_run, Keyword.get(opts, :post_run))
+
     state = %State{
       responder: responder,
       error_handler: error_handler,
@@ -103,8 +113,51 @@ defmodule GenAgent.Support.TestAgent do
     :ok
   end
 
+  @impl true
+  def pre_run(%State{} = state) do
+    maybe_notify(state, :pre_run, state)
+
+    case Map.get(state.extra, :pre_run) do
+      nil -> {:ok, state}
+      fun when is_function(fun, 1) -> fun.(state)
+    end
+  end
+
+  @impl true
+  def pre_turn(prompt, %State{} = state) do
+    maybe_notify(state, :pre_turn, {prompt, state})
+
+    case Map.get(state.extra, :pre_turn) do
+      nil -> {:ok, prompt, state}
+      fun when is_function(fun, 2) -> fun.(prompt, state)
+    end
+  end
+
+  @impl true
+  def post_turn(outcome, ref, %State{} = state) do
+    maybe_notify(state, :post_turn, {outcome, ref})
+
+    case Map.get(state.extra, :post_turn) do
+      nil -> {:ok, state}
+      fun when is_function(fun, 3) -> fun.(outcome, ref, state)
+    end
+  end
+
+  @impl true
+  def post_run(%State{} = state) do
+    maybe_notify(state, :post_run, state)
+
+    case Map.get(state.extra, :post_run) do
+      nil -> :ok
+      fun when is_function(fun, 1) -> fun.(state)
+    end
+  end
+
   defp maybe_put(list, _key, nil), do: list
   defp maybe_put(list, key, value), do: Keyword.put(list, key, value)
+
+  defp maybe_put_extra(extra, _key, nil), do: extra
+  defp maybe_put_extra(extra, key, value), do: Map.put(extra, key, value)
 
   defp maybe_notify(%State{notify_pid: nil}, _, _), do: :ok
 
