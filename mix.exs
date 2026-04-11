@@ -45,7 +45,25 @@ defmodule GenAgent.MixProject do
       main: "GenAgent",
       source_url: @source_url,
       source_ref: "v#{@version}",
-      extras: ["README.md", "CHANGELOG.md", "LICENSE"],
+      extras: [
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE",
+        "guides/patterns/overview.md": [title: "Patterns Overview"],
+        "guides/patterns/switchboard.md": [title: "Switchboard"],
+        "guides/patterns/research.md": [title: "Research"],
+        "guides/patterns/debate.md": [title: "Debate"],
+        "guides/patterns/pipeline.md": [title: "Pipeline"],
+        "guides/patterns/supervisor.md": [title: "Supervisor"],
+        "guides/patterns/pool.md": [title: "Pool"],
+        "guides/patterns/watcher.md": [title: "Watcher"],
+        "guides/patterns/checkpointer.md": [title: "Checkpointer"],
+        "guides/patterns/retry.md": [title: "Retry"],
+        "guides/patterns/workspace.md": [title: "Workspace"]
+      ],
+      groups_for_extras: [
+        Patterns: ~r"guides/patterns/.*"
+      ],
       groups_for_modules: [
         Core: [
           GenAgent,
@@ -61,7 +79,7 @@ defmodule GenAgent.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib mix.exs README.md CHANGELOG.md LICENSE .formatter.exs),
+      files: ~w(lib guides mix.exs README.md CHANGELOG.md LICENSE .formatter.exs),
       maintainers: ["Josh Rotenberg"]
     ]
   end
