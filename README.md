@@ -1,6 +1,6 @@
 # GenAgent
 
-[![CI](https://github.com/joshrotenberg/gen_agent/actions/workflows/ci.yml/badge.svg)](https://github.com/joshrotenberg/gen_agent/actions/workflows/ci.yml)
+[![CI](https://github.com/genagent/gen_agent/actions/workflows/ci.yml/badge.svg)](https://github.com/genagent/gen_agent/actions/workflows/ci.yml)
 [![Hex.pm](https://img.shields.io/hexpm/v/gen_agent.svg)](https://hex.pm/packages/gen_agent)
 [![Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/gen_agent)
 

@@ -2,7 +2,7 @@ defmodule GenAgent.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/joshrotenberg/gen_agent"
+  @source_url "https://github.com/genagent/gen_agent"
 
   def project do
     [
