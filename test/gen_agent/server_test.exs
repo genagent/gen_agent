@@ -666,4 +666,227 @@ defmodule GenAgent.ServerTest do
       assert response.text == "ok after error"
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Notify deferral during :processing
+  #
+  # Regression tests for the bug where `handle_event` state mutations
+  # that happened while a prompt turn was in flight were overwritten
+  # by the task's `handle_response` return value. The fix buffers
+  # notifies during :processing into `pending_events` and drains them
+  # synchronously in `finish_turn` / `finish_error` before the
+  # transition to :idle.
+  # ---------------------------------------------------------------------------
+
+  describe "notify deferral during :processing" do
+    defp slow_result(text, delay_ms) do
+      fn _prompt ->
+        Stream.resource(
+          fn -> :start end,
+          fn
+            :start ->
+              Process.sleep(delay_ms)
+              {[Event.new(:result, %{text: text})], :done}
+
+            :done ->
+              {:halt, :done}
+          end,
+          fn _ -> :ok end
+        )
+      end
+    end
+
+    test "handle_event mutations during an in-flight turn are preserved",
+         %{task_sup: task_sup} do
+      # The event_handler records every event into state.extra.events.
+      # Without deferral, notifies sent while the turn is running
+      # would have their state mutations overwritten by
+      # handle_response's return value.
+      event_handler = fn _event, state ->
+        count = Map.get(state.extra, :events, 0)
+        {:noreply, %{state | extra: Map.put(state.extra, :events, count + 1)}}
+      end
+
+      pid =
+        start_server(
+          task_sup,
+          [slow_result("done", 200)],
+          event_handler: event_handler,
+          extra: %{events: 0}
+        )
+
+      # Kick off a slow turn so we have a :processing window.
+      task = Task.async(fn -> ask(pid, "slow") end)
+      Process.sleep(30)
+      assert status(pid).state == :processing
+
+      # Fire 5 notifies while the turn is in flight.
+      for i <- 1..5 do
+        :gen_statem.cast(pid, {:notify, {:ping, i}})
+      end
+
+      # Turn completes, drain happens, all 5 events should have run.
+      {:ok, _} = Task.await(task)
+      Process.sleep(50)
+
+      assert status(pid).agent_state.extra.events == 5
+    end
+
+    test "notify events that arrived during :processing are processed in arrival order",
+         %{task_sup: task_sup} do
+      event_handler = fn event, state ->
+        log = Map.get(state.extra, :log, [])
+        {:noreply, %{state | extra: Map.put(state.extra, :log, log ++ [event])}}
+      end
+
+      pid =
+        start_server(
+          task_sup,
+          [slow_result("ok", 150)],
+          event_handler: event_handler,
+          extra: %{log: []}
+        )
+
+      task = Task.async(fn -> ask(pid, "go") end)
+      Process.sleep(30)
+
+      for i <- 1..4 do
+        :gen_statem.cast(pid, {:notify, {:ev, i}})
+      end
+
+      {:ok, _} = Task.await(task)
+      Process.sleep(50)
+
+      assert status(pid).agent_state.extra.log == [{:ev, 1}, {:ev, 2}, {:ev, 3}, {:ev, 4}]
+    end
+
+    test "a buffered notify can return {:prompt, ...} and the prompt runs after the current turn",
+         %{task_sup: task_sup} do
+      event_handler = fn
+        {:do_followup, text}, state ->
+          {:prompt, text, state}
+
+        _other, state ->
+          {:noreply, state}
+      end
+
+      pid =
+        start_server(
+          task_sup,
+          [
+            slow_result("first", 150),
+            [Event.new(:result, %{text: "followup"})]
+          ],
+          event_handler: event_handler
+        )
+
+      task = Task.async(fn -> ask(pid, "first") end)
+      Process.sleep(30)
+
+      # Fire a notify that wants to dispatch a new prompt. It should
+      # be buffered, drained after the current turn finishes, then
+      # enqueued to the mailbox and dispatched via :process_next.
+      :gen_statem.cast(pid, {:notify, {:do_followup, "second"}})
+
+      {:ok, first} = Task.await(task)
+      assert first.text == "first"
+
+      Process.sleep(300)
+
+      # The followup prompt should have run, so the responses list
+      # includes both turns.
+      texts =
+        status(pid).agent_state.responses
+        |> Enum.map(fn {_ref, resp} -> resp.text end)
+
+      assert "first" in texts
+      assert "followup" in texts
+    end
+
+    test "a buffered notify can return {:halt, ...} and the agent halts after the current turn",
+         %{task_sup: task_sup} do
+      event_handler = fn :shutdown, state -> {:halt, state} end
+
+      pid =
+        start_server(
+          task_sup,
+          [slow_result("ok", 150)],
+          event_handler: event_handler
+        )
+
+      task = Task.async(fn -> ask(pid, "go") end)
+      Process.sleep(30)
+
+      :gen_statem.cast(pid, {:notify, :shutdown})
+
+      {:ok, _} = Task.await(task)
+      Process.sleep(50)
+
+      assert status(pid).halted
+    end
+
+    test "notifies during :idle are still processed immediately",
+         %{task_sup: task_sup} do
+      # Sanity: the deferral only applies during :processing. When
+      # the agent is idle and a notify arrives, handle_event should
+      # run synchronously as before.
+      event_handler = fn event, state ->
+        log = Map.get(state.extra, :log, [])
+        {:noreply, %{state | extra: Map.put(state.extra, :log, log ++ [event])}}
+      end
+
+      pid =
+        start_server(
+          task_sup,
+          [],
+          event_handler: event_handler,
+          extra: %{log: []}
+        )
+
+      :gen_statem.cast(pid, {:notify, :first})
+      :gen_statem.cast(pid, {:notify, :second})
+      Process.sleep(50)
+
+      assert status(pid).agent_state.extra.log == [:first, :second]
+    end
+
+    test "notifies that arrived during a failed turn are still drained via finish_error",
+         %{task_sup: task_sup} do
+      event_handler = fn _event, state ->
+        count = Map.get(state.extra, :events, 0)
+        {:noreply, %{state | extra: Map.put(state.extra, :events, count + 1)}}
+      end
+
+      # A slow stream that raises -- exercises the finish_error path.
+      slow_raising = fn _prompt ->
+        Stream.resource(
+          fn -> :s end,
+          fn
+            :s ->
+              Process.sleep(150)
+              raise "boom"
+          end,
+          fn _ -> :ok end
+        )
+      end
+
+      pid =
+        start_server(
+          task_sup,
+          [slow_raising],
+          event_handler: event_handler,
+          extra: %{events: 0}
+        )
+
+      task = Task.async(fn -> ask(pid, "go") end)
+      Process.sleep(30)
+
+      for _ <- 1..3, do: :gen_statem.cast(pid, {:notify, :ping})
+
+      assert {:error, {:task_crashed, _}} = Task.await(task)
+      Process.sleep(50)
+
+      assert status(pid).agent_state.extra.events == 3
+    end
+  end
 end
