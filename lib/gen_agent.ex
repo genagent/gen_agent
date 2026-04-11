@@ -105,13 +105,21 @@ defmodule GenAgent do
 
     * `c:init_agent/1` -- set up backend options and initial agent state.
     * `c:handle_response/3` -- a turn completed, decide what to do next.
+    * `c:handle_error/3` (optional) -- a turn failed, decide what to do next.
     * `c:handle_event/2` (optional) -- an external event arrived via `notify/2`.
     * `c:handle_stream_event/2` (optional) -- a backend event arrived mid-turn.
       Runs inside the prompt task, not the agent process.
     * `c:terminate_agent/2` (optional) -- the agent is shutting down.
 
+  Lifecycle hooks (all optional):
+
+    * `c:pre_run/1` -- one-time setup after `init_agent`, before the first turn.
+    * `c:pre_turn/2` -- before each dispatch. Can rewrite the prompt, skip, or halt.
+    * `c:post_turn/3` -- after each turn, post-decision. For state-mutating side effects.
+    * `c:post_run/1` -- on clean `{:halt, state}` from any callback. For completion side effects.
+
   The `use GenAgent` macro provides default implementations of the optional
-  callbacks.
+  callbacks and lifecycle hooks.
 
   ## Public API
 
@@ -167,6 +175,15 @@ defmodule GenAgent do
   @type callback_return ::
           {:noreply, agent_state()}
           | {:prompt, String.t(), agent_state()}
+          | {:halt, agent_state()}
+
+  @typedoc """
+  Return value of `c:pre_turn/2`. The hook can pass the prompt through
+  (optionally rewritten), skip the turn, or halt the agent.
+  """
+  @type pre_turn_return ::
+          {:ok, prompt :: String.t(), agent_state()}
+          | {:skip, agent_state()}
           | {:halt, agent_state()}
 
   @doc """
@@ -230,11 +247,115 @@ defmodule GenAgent do
   """
   @callback terminate_agent(reason :: term(), agent_state()) :: term()
 
+  @doc """
+  One-time setup hook, fires after `c:init_agent/1` and before the
+  first turn. Optional.
+
+  Runs in the agent process, so it blocks the first turn until it
+  returns -- but does NOT block `start_agent/2` from returning to the
+  caller. This is the right home for slow async setup that would
+  otherwise freeze the starter: cloning a repo, creating a worktree,
+  spinning up a sandbox, fetching secrets.
+
+  Return `{:ok, state}` to continue, or `{:error, reason}` to halt the
+  agent before any turn runs. On error, `c:terminate_agent/2` is called
+  with `{:pre_run_failed, reason}`.
+
+  Crashes are wrapped: the agent halts with
+  `{:pre_run_crashed, exception}` and `c:terminate_agent/2` is called
+  with that reason.
+
+  Default implementation: `{:ok, state}`.
+  """
+  @callback pre_run(agent_state()) ::
+              {:ok, agent_state()} | {:error, reason :: term()}
+
+  @doc """
+  Per-turn pre-dispatch hook. Optional.
+
+  Fires before each prompt is dispatched to the backend, inside the
+  agent process. Can observe, mutate state, rewrite the prompt (for
+  augmentation or templating), skip the turn with `:skip`, or halt the
+  agent entirely with `:halt`.
+
+  Use cases: prompt templating (inject context), rate limiting (sleep
+  on a budget), gating (halt if an external signal says stop).
+
+  When the prompt is rewritten, `[:gen_agent, :prompt, :start]`
+  telemetry carries both the original and rewritten prompt plus a
+  `rewritten: true` flag so the transformation is traceable.
+
+  Crashes are caught: the turn is skipped, a warning is logged, and
+  the agent returns to `:idle`. Users who want strict crash semantics
+  can re-raise from inside a different callback.
+
+  Default implementation: `{:ok, prompt, state}`.
+  """
+  @callback pre_turn(prompt :: String.t(), agent_state()) :: pre_turn_return()
+
+  @doc """
+  Per-turn post-dispatch hook. Optional.
+
+  Fires after each turn, AFTER `c:handle_response/3` or
+  `c:handle_error/3` has returned its decision. The hook sees the
+  post-decision state. Runs regardless of which decision callback ran
+  or what it returned.
+
+  The outcome is `{:ok, response}` for a successful turn or
+  `{:error, reason}` for a failed one -- the same data delivered to
+  the decision callbacks. The hook cannot override the decision
+  callback's transition (`{:noreply, ...}`, `{:prompt, ...}`,
+  `{:halt, ...}`); it only updates state.
+
+  Use cases: commit-per-turn (stateful side effect), persist a turn
+  record, update a per-turn metric that needs to live on agent state.
+  For pure observation, prefer telemetry handlers on
+  `[:gen_agent, :prompt, :stop]`.
+
+  Crashes are caught: a warning is logged and the server continues
+  with the transition the decision callback chose. The turn is not
+  unwound.
+
+  Default implementation: `{:ok, state}`.
+  """
+  @callback post_turn(
+              outcome :: {:ok, Response.t()} | {:error, reason :: term()},
+              request_ref :: reference(),
+              agent_state()
+            ) :: {:ok, agent_state()}
+
+  @doc """
+  Clean-completion hook. Optional.
+
+  Fires when any callback (`c:handle_response/3`, `c:handle_error/3`,
+  `c:handle_event/2`, `c:pre_turn/2`, `c:post_turn/3`) returns
+  `{:halt, state}`. Runs before the agent is marked halted and before
+  the `[:gen_agent, :halted]` telemetry event is emitted.
+
+  Does NOT fire on crashes, `stop/1`, supervisor shutdown, or any
+  abnormal exit -- `c:terminate_agent/2` covers those paths.
+
+  Use cases: create a PR, post a completion summary, mark a task done
+  in an external tracker. The semantic distinction from
+  `c:terminate_agent/2` is "completion" vs "termination."
+
+  Crashes are caught: a warning is logged and the halt transition
+  still completes normally. A failing last-chance hook does not keep a
+  dead agent alive.
+
+  Default implementation: `:ok`.
+  """
+  @callback post_run(agent_state()) :: :ok
+
   @optional_callbacks [
     handle_error: 3,
     handle_event: 2,
     handle_stream_event: 2,
-    terminate_agent: 2
+    terminate_agent: 2,
+    pre_run: 1,
+    pre_turn: 2,
+    post_turn: 3,
+    post_run: 1
   ]
 
   # ---------------------------------------------------------------------------
@@ -258,10 +379,26 @@ defmodule GenAgent do
       @impl GenAgent
       def terminate_agent(_reason, _state), do: :ok
 
+      @impl GenAgent
+      def pre_run(state), do: {:ok, state}
+
+      @impl GenAgent
+      def pre_turn(prompt, state), do: {:ok, prompt, state}
+
+      @impl GenAgent
+      def post_turn(_outcome, _ref, state), do: {:ok, state}
+
+      @impl GenAgent
+      def post_run(_state), do: :ok
+
       defoverridable handle_error: 3,
                      handle_event: 2,
                      handle_stream_event: 2,
-                     terminate_agent: 2
+                     terminate_agent: 2,
+                     pre_run: 1,
+                     pre_turn: 2,
+                     post_turn: 3,
+                     post_run: 1
     end
   end
 
