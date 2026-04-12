@@ -31,6 +31,7 @@ HTTP, and the in-memory Mock backend.
 | [Supervisor](supervisor.md)     | Coordinator + dynamic worker pool         | `start_agent/2` from inside a callback, fan-out/fan-in   |
 | [Pool](pool.md)                 | Reusable worker pool, round-robin         | Multi-turn workers, `tell/2` mailbox queueing            |
 | [Watcher](watcher.md)           | Reactive event-driven agent               | `handle_event` filtering, idle-until-triggered           |
+| [Heartbeat](heartbeat.md)       | Time-driven periodic agent                | Synthetic `:tick` events, per-tick state inspection      |
 | [Checkpointer](checkpointer.md) | Human-in-the-loop review workflow         | Idle-with-phase-marker pause primitive                   |
 | [Retry](retry.md)               | `handle_error` self-chain retry loop      | `handle_error` returning `{:prompt, ..., state}`         |
 | [Workspace](workspace.md)       | Single agent + temp git workspace         | All four v0.2 lifecycle hooks                            |
@@ -62,6 +63,11 @@ one of these. A rough decision tree:
 
 - **An agent should sit idle until events arrive (CI failures, file
   changes, webhooks).** Start with **[Watcher](watcher.md)**.
+
+- **An agent should wake up on a fixed interval to poll, summarize,
+  or check in.** Start with **[Heartbeat](heartbeat.md)**. It's
+  Watcher with the clock as the event source -- the filter lives on
+  agent state instead of event content.
 
 - **An agent should do something, then pause for human review, then
   continue based on the review decision.** Start with

@@ -57,6 +57,7 @@ defmodule GenAgent.MixProject do
         "guides/patterns/supervisor.md": [title: "Supervisor"],
         "guides/patterns/pool.md": [title: "Pool"],
         "guides/patterns/watcher.md": [title: "Watcher"],
+        "guides/patterns/heartbeat.md": [title: "Heartbeat"],
         "guides/patterns/checkpointer.md": [title: "Checkpointer"],
         "guides/patterns/retry.md": [title: "Retry"],
         "guides/patterns/workspace.md": [title: "Workspace"]
