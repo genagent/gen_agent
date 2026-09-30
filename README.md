@@ -208,6 +208,8 @@ for details.
 | `resume/1` | Unhalt an agent and drain its mailbox. |
 | `status/2` | Read the agent's current state. |
 | `stop/1` | Terminate the agent. |
+| `child_spec/2` | Build an agent child spec for a caller-owned supervisor. |
+| `stop/2` | Terminate an agent under a caller-owned supervisor. |
 | `whereis/1` | Look up an agent's pid. |
 
 Names resolve through a `Registry`, so callers address agents by name
@@ -226,7 +228,42 @@ GenAgent.Supervisor
     <your agents under here>
 ```
 
-Each prompt turn runs as a Task under the shared `TaskSupervisor`. A
+To own agent and prompt-task lifetimes in your application, start a
+`Task.Supervisor` before a `DynamicSupervisor` in your supervision tree:
+
+```elixir
+children = [
+  {Task.Supervisor, name: MyApp.AgentTasks},
+  {DynamicSupervisor, name: MyApp.Agents, strategy: :one_for_one}
+]
+
+{:ok, _owner} = Supervisor.start_link(children, strategy: :rest_for_one)
+
+spec =
+  GenAgent.child_spec(MyAgent,
+    name: "worker-1",
+    backend: MyBackend,
+    task_supervisor: MyApp.AgentTasks
+  )
+
+{:ok, _agent} = DynamicSupervisor.start_child(MyApp.Agents, spec)
+{:ok, response} = GenAgent.ask("worker-1", "Hello")
+:ok = GenAgent.stop("worker-1", MyApp.Agents)
+```
+
+`child_spec/2` requires an explicit, running task supervisor; it never
+silently uses the global one. Both globally and caller-owned agents use
+`GenAgent.Registry`, so names must be unique across them and normal
+name-based calls work for either. `stop/1` targets only the global agent
+supervisor; pass the caller's `DynamicSupervisor` to `stop/2`.
+The agent child is temporary and is never automatically replayed after
+a crash. With `:rest_for_one`, failure of the task supervisor also stops
+the agent supervisor. On ordinary shutdown, the agent supervisor stops
+first so its agents can cancel in-flight tasks while their task supervisor
+is still running. An application must reconstruct state and consumed work
+from its own durable records; supervision alone does not provide recovery.
+
+Each prompt turn runs as a Task under its selected `Task.Supervisor`. A
 crashed task delivers `:DOWN` to the owning agent, which turns it into an
 `{:error, {:task_crashed, reason}}` response for the caller -- it does not
 take down the agent process.
