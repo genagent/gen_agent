@@ -468,7 +468,8 @@ defmodule GenAgent.LifecycleHooksTest do
 
       assert {:ok, _} = ask(pid, "hello")
 
-      assert_receive {:tel_start, meta}, 500
+      name = status(pid).name
+      assert_receive {:tel_start, %{agent: ^name} = meta}, 500
       assert meta.prompt == "[rewritten] hello"
       assert meta.original_prompt == "hello"
       assert meta.rewritten == true
@@ -492,7 +493,8 @@ defmodule GenAgent.LifecycleHooksTest do
       pid = start_server(task_sup, [result_events("ok")])
       assert {:ok, _} = ask(pid, "hello")
 
-      assert_receive {:tel_start, meta}, 500
+      name = status(pid).name
+      assert_receive {:tel_start, %{agent: ^name} = meta}, 500
       assert meta.rewritten == false
       assert meta.prompt == "hello"
       assert meta.original_prompt == "hello"
@@ -517,7 +519,8 @@ defmodule GenAgent.LifecycleHooksTest do
         start_server(task_sup, [result_events("done")], responder: responder)
 
       assert {:ok, _} = ask(pid, "go")
-      assert_receive {:tel_halted, meta}, 500
+      name = status(pid).name
+      assert_receive {:tel_halted, %{agent: ^name} = meta}, 500
       assert %TestAgent.State{} = meta.agent_state
     end
   end

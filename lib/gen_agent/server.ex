@@ -315,6 +315,33 @@ defmodule GenAgent.Server do
     {:keep_state_and_data, [{:reply, from, status}]}
   end
 
+  def handle_event({:call, from}, :runtime_snapshot, state, %Data{} = data) do
+    current_request =
+      case data.current_request do
+        nil ->
+          nil
+
+        current ->
+          %{
+            ref: current.request_ref,
+            origin: request_origin(current.kind),
+            elapsed_ms: max(System.monotonic_time(:millisecond) - current.started_at, 0),
+            watchdog_ms: data.watchdog_ms
+          }
+      end
+
+    snapshot = %{
+      phase: state,
+      halted: data.halted,
+      pending_prompts: :queue.len(data.mailbox),
+      pending_notifications: :queue.len(data.pending_events),
+      self_chain_pending: not is_nil(data.self_chain),
+      current_request: current_request
+    }
+
+    {:keep_state_and_data, [{:reply, from, snapshot}]}
+  end
+
   # ---------------------------------------------------------------------------
   # notify -- external event dispatched to handle_event/2
   #
@@ -451,6 +478,9 @@ defmodule GenAgent.Server do
   end
 
   def handle_event(:info, _msg, _state, _data), do: :keep_state_and_data
+
+  defp request_origin({:ask, _from}), do: :ask
+  defp request_origin(kind) when kind in [:tell, :event, :self_chain], do: kind
 
   defp handle_task_result({:ok, response, new_session, new_agent_state}, current, data) do
     emit_prompt_stop(data.name, current.request_ref, response.duration_ms, new_agent_state)
