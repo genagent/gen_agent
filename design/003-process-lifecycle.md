@@ -20,10 +20,18 @@ Trapping exits converts the shutdown into
 `{:EXIT, parent, :shutdown}` -- which `:gen_statem` handles by
 calling `terminate/3` before the process dies. That's the fix.
 
-Cost: trapping exits means crashes from linked processes become
-messages instead of auto-propagating. We have none of those at the
-moment (the prompt task is `async_nolink`), so the cost is zero in
-practice, but it's worth knowing.
+Prompt tasks use `Task.Supervisor.async/2`, linking each task to
+its owning agent as well as the shared task supervisor. The link
+stops the task when its agent dies abruptly, including `:kill`,
+which bypasses `terminate/3`. Trapping exits keeps task failures
+from killing the agent: task `:EXIT` messages are ignored, while
+the monitor's `:DOWN` reports the failure through `handle_error/3`.
+A task that exits without returning a result is a failed turn even
+if its exit reason is `:normal`.
+
+This ownership covers the BEAM prompt task. It does not establish
+that provider subprocesses or remote requests have stopped; the
+backend and its transport remain responsible for those resources.
 
 ## `restart: :temporary`
 
@@ -65,6 +73,10 @@ signal. The process stays alive because:
 - `post_run/1` needs to run on the halted state (design 005).
 - The manager may want to read final state via `status/1`.
 - `resume/1` can unhalt and drain the queued mailbox.
+
+Repeated halt decisions while already halted do not rerun
+`post_run/1` or emit another halted event. After `resume/1`, a new
+halt transition runs the completion hook again.
 
 Using `stop/1` to "finish" an agent would throw away the final
 state before anyone observed it.

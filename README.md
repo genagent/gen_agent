@@ -21,11 +21,12 @@ semantics of turns.
 ```elixir
 def deps do
   [
-    {:gen_agent, "~> 0.2.0"},
+    {:gen_agent, "~> 0.2.0"}, # x-release-please-version
     # Plus at least one backend:
     {:gen_agent_claude, "~> 0.1.0"},
     {:gen_agent_codex, "~> 0.1.0"},
-    {:gen_agent_anthropic, "~> 0.1.0"}
+    {:gen_agent_anthropic, "~> 0.1.0"},
+    {:gen_agent_openai, "~> 0.1.0"}
   ]
 end
 ```
@@ -84,6 +85,45 @@ GenAgent.notify("my-coder", {:ci_failed, "test_auth"})
 GenAgent.stop("my-coder")
 ```
 
+## One interface for Claude and Codex
+
+Use the same callback module and `GenAgent` API for both providers. Select
+the backend when starting each agent:
+
+```elixir
+defmodule MyApp.Assistant do
+  use GenAgent
+
+  @impl true
+  def init_agent(opts) do
+    {:ok, [cwd: Keyword.fetch!(opts, :cwd)], %{}}
+  end
+
+  @impl true
+  def handle_response(_ref, _response, state), do: {:noreply, state}
+end
+
+for {name, backend} <- [
+      {"claude", GenAgent.Backends.Claude},
+      {"codex", GenAgent.Backends.Codex}
+    ] do
+  {:ok, _pid} = GenAgent.start_agent(MyApp.Assistant,
+    name: name, backend: backend, cwd: "/path/to/project"
+  )
+end
+
+{:ok, response} = GenAgent.ask("claude", "Explain this project")
+{:ok, ref} = GenAgent.tell("codex", "Explain this project")
+GenAgent.poll("codex", ref) # {:ok, :pending} while queued or running
+```
+
+Either agent supports `ask`, `tell`, and `poll`; the interaction style is
+independent of the provider. Install both backend packages and configure
+their CLIs before starting them. Backend-specific options and capabilities
+can differ: return the appropriate options from `init_agent/1` when adding
+model settings, instructions, or permissions. Each agent keeps its own
+provider session.
+
 ## State model
 
 An agent is a state machine with two states:
@@ -102,9 +142,10 @@ idle <--- handle_response --- processing (turn done)
 - **Self-chaining** -- `handle_response/3` can return `{:prompt, text, state}`
   to immediately dispatch another turn without going through the mailbox.
   Useful for multi-step work that the agent drives itself.
-- **Halting** -- any callback can return `{:halt, state}` to go idle but
-  freeze the mailbox. A halted agent ignores queued prompts until
-  `GenAgent.resume/1` is called.
+- **Halting** -- `handle_response/3`, `handle_error/3`, `handle_event/2`,
+  or `pre_turn/2` can return `{:halt, state}` to go idle but freeze the
+  mailbox. A halted agent ignores queued prompts until `GenAgent.resume/1`
+  is called.
 - **Watchdog** -- a `:state_timeout` kills any turn that runs longer than
   the configured deadline (default 10 minutes). Configurable per agent.
 
@@ -119,7 +160,7 @@ around the agent's full run:
 | `pre_run/1` | Once, after `init_agent/1`, before the first turn | Slow async setup: clone a repo, create a worktree, fetch secrets |
 | `pre_turn/2` | Before each prompt dispatch | Prompt augmentation, rate limiting, `:skip`/`:halt` as a gate |
 | `post_turn/3` | After each turn, post-decision | State-mutating side effects: commit per turn, record usage |
-| `post_run/1` | On clean `{:halt, state}` from any callback | Completion actions: open a PR, post a summary |
+| `post_run/1` | On clean `{:halt, state}` from a decision callback or `pre_turn/2` | Completion actions: open a PR, post a summary |
 
 All four are optional with default no-op implementations. The guiding
 principle is **telemetry first, callbacks for state mutation** --
@@ -142,6 +183,7 @@ Pick one of the sibling packages or write your own:
 | Claude (Anthropic) | `gen_agent_claude` | `claude` CLI via `claude_wrapper` |
 | Codex (OpenAI) | `gen_agent_codex` | `codex` CLI via `codex_wrapper` |
 | Anthropic HTTP | `gen_agent_anthropic` | direct HTTP API via `req` |
+| OpenAI HTTP | `gen_agent_openai` | Responses API via `req` |
 
 A backend owns its session lifecycle, translates the LLM-specific event
 stream into the normalized `GenAgent.Event` values the state machine
@@ -168,8 +210,9 @@ for details.
 | `stop/1` | Terminate the agent. |
 | `whereis/1` | Look up an agent's pid. |
 
-Names resolve through a `Registry`. Callers hold names (any term), never
-pids, so agents can be restarted without breaking callers.
+Names resolve through a `Registry`, so callers address agents by name
+(any term). Agents use `restart: :temporary`: a crashed or stopped agent
+must be started explicitly, and its previous state is not restored.
 
 ## Supervision
 
@@ -188,9 +231,16 @@ crashed task delivers `:DOWN` to the owning agent, which turns it into an
 `{:error, {:task_crashed, reason}}` response for the caller -- it does not
 take down the agent process.
 
+The prompt task belongs to its agent: it is stopped when the agent exits,
+including abrupt exits that bypass termination callbacks. Interruption and
+the watchdog also stop the active prompt task. Stopping a BEAM task does
+not establish that a provider's subprocess or remote request has stopped;
+external cancellation and resource cleanup belong to the backend and its
+transport.
+
 ## Patterns
 
-Ten common topologies are documented as ex_doc guides shipped with
+Eleven common topologies are documented as ex_doc guides shipped with
 the package. Each guide is a complete worked example you can read,
 copy, and adapt -- they are **not** installed as public API modules:
 
@@ -202,6 +252,7 @@ copy, and adapt -- they are **not** installed as public API modules:
 - **[Supervisor][sv]** -- coordinator + dynamic workers (fan-out/in)
 - **[Pool][pool]** -- reusable worker pool with round-robin dispatch
 - **[Watcher][wc]** -- reactive event-driven agent, idle until triggered
+- **[Heartbeat][hb]** -- periodic agent driven by timer events
 - **[Checkpointer][cp]** -- human-in-the-loop review workflow
 - **[Retry][rt]** -- handle_error self-chain for transient failures
 - **[Workspace][ws]** -- all four lifecycle hooks around a git workspace
@@ -217,6 +268,7 @@ pattern" decision tree.
 [sv]: https://hexdocs.pm/gen_agent/supervisor.html
 [pool]: https://hexdocs.pm/gen_agent/pool.html
 [wc]: https://hexdocs.pm/gen_agent/watcher.html
+[hb]: https://hexdocs.pm/gen_agent/heartbeat.html
 [cp]: https://hexdocs.pm/gen_agent/checkpointer.html
 [rt]: https://hexdocs.pm/gen_agent/retry.html
 [ws]: https://hexdocs.pm/gen_agent/workspace.html

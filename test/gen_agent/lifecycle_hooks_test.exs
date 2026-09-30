@@ -353,6 +353,91 @@ defmodule GenAgent.LifecycleHooksTest do
 
       assert status(pid).halted == true
     end
+
+    test "repeated halt events preserve state and only fire again after resume",
+         %{task_sup: task_sup} do
+      parent = self()
+
+      pid =
+        start_server(task_sup, [],
+          event_handler: fn _event, state -> {:halt, state} end,
+          post_run: fn _state -> send(parent, :post_run_fired) end
+        )
+
+      name = status(pid).name
+      handler_id = "halt-once-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:gen_agent, :halted],
+        fn _event, _measurements, meta, _config ->
+          if meta.agent == name, do: send(parent, :halted_event)
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      notify(pid, :first)
+      notify(pid, :second)
+      assert %{halted: true, agent_state: %{events: [:first, :second]}} = status(pid)
+      assert_received :post_run_fired
+      assert_received :halted_event
+      refute_received :post_run_fired
+      refute_received :halted_event
+
+      :gen_statem.cast(pid, :resume)
+      notify(pid, :third)
+      assert %{halted: true, agent_state: %{events: [:first, :second, :third]}} = status(pid)
+      assert_received :post_run_fired
+      assert_received :halted_event
+      refute_received :post_run_fired
+      refute_received :halted_event
+    end
+
+    for outcome <- [:response, :error] do
+      @tag halt_outcome: outcome
+      test "buffered halt events do not duplicate post_run after a #{outcome} halt",
+           %{task_sup: task_sup, halt_outcome: outcome} do
+        parent = self()
+
+        script = fn _prompt ->
+          send(parent, {:turn_blocked, self()})
+
+          receive do
+            :complete ->
+              case outcome do
+                :response -> result_events("done")
+                :error -> [Event.new(:error, %{reason: :failed})]
+              end
+          end
+        end
+
+        pid =
+          start_server(task_sup, [script],
+            responder: fn _ref, _response, state -> {:halt, state} end,
+            error_handler: fn _ref, _reason, state -> {:halt, state} end,
+            event_handler: fn _event, state -> {:halt, state} end,
+            post_run: fn _state -> send(parent, :post_run_fired) end
+          )
+
+        caller = Task.async(fn -> ask(pid, "go") end)
+        assert_receive {:turn_blocked, task_pid}
+        notify(pid, :first)
+        notify(pid, :second)
+        assert status(pid).state == :processing
+        send(task_pid, :complete)
+
+        case outcome do
+          :response -> assert {:ok, %{text: "done"}} = Task.await(caller)
+          :error -> assert {:error, :failed} = Task.await(caller)
+        end
+
+        assert %{halted: true, agent_state: %{events: [:first, :second]}} = status(pid)
+        assert_received :post_run_fired
+        refute_received :post_run_fired
+      end
+    end
   end
 
   # ---------------------------------------------------------------------------

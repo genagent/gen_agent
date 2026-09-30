@@ -58,6 +58,18 @@ defmodule GenAgent.IntegrationTest do
     end
   end
 
+  defmodule MinimalAgent do
+    @behaviour GenAgent
+
+    @impl true
+    def init_agent(opts) do
+      {:ok, [scripts: Keyword.fetch!(opts, :scripts)], []}
+    end
+
+    @impl true
+    def handle_response(_ref, response, state), do: {:noreply, [response.text | state]}
+  end
+
   defp unique_name(prefix) do
     "#{prefix}-#{System.unique_integer([:positive])}"
   end
@@ -292,6 +304,45 @@ defmodule GenAgent.IntegrationTest do
     end
   end
 
+  describe "optional callbacks without use GenAgent" do
+    defp start_minimal(scripts) do
+      name = unique_name("minimal")
+
+      {:ok, _pid} =
+        GenAgent.start_agent(MinimalAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          scripts: scripts
+        )
+
+      on_exit(fn -> GenAgent.stop(name) end)
+      name
+    end
+
+    test "a module implementing only required callbacks completes turns" do
+      name =
+        start_minimal([
+          [Event.new(:text, %{text: "hello"}), Event.new(:result, %{text: "hello"})],
+          {:error, :unavailable},
+          [Event.new(:result, %{text: "again"})]
+        ])
+
+      assert {:ok, %{text: "hello"}} = GenAgent.ask(name, "first")
+      assert {:error, :unavailable} = GenAgent.ask(name, "second")
+      assert {:ok, %{text: "again"}} = GenAgent.ask(name, "third")
+      assert GenAgent.status(name).agent_state == ["again", "hello"]
+    end
+
+    test "an omitted handle_event callback ignores notifications without logging errors" do
+      name = start_minimal([])
+
+      assert ExUnit.CaptureLog.capture_log(fn ->
+               assert :ok = GenAgent.notify(name, :unused)
+               assert %{state: :idle, agent_state: []} = GenAgent.status(name)
+             end) == ""
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Supervised shutdown -- regression tests for the trap_exit fix
   # ---------------------------------------------------------------------------
@@ -313,18 +364,22 @@ defmodule GenAgent.IntegrationTest do
       def handle_response(_ref, _response, state), do: {:noreply, state}
     end
 
-    # Produces an event stream that blocks forever so the prompt task
-    # stays in-flight until we kill it.
-    defp blocking_script do
-      fn _prompt ->
-        Stream.resource(
-          fn -> :go end,
-          fn state ->
-            Process.sleep(10_000)
-            {[], state}
-          end,
-          fn _ -> :ok end
-        )
+    # The task announces its own pid at the exact blocking point. This
+    # avoids depending on scheduling delays or other agents' shared tasks.
+    defp blocking_script(phase) do
+      parent = self()
+
+      block = fn ->
+        send(parent, {:prompt_blocked, self(), phase})
+
+        receive do
+          :continue -> [Event.new(:result, %{text: "released"})]
+        end
+      end
+
+      case phase do
+        :prompt -> fn _prompt -> block.() end
+        :stream -> fn _prompt -> Stream.flat_map([:turn], fn _ -> block.() end) end
       end
     end
 
@@ -350,41 +405,48 @@ defmodule GenAgent.IntegrationTest do
     end
 
     test "GenAgent.stop/1 kills the in-flight task via terminate/3" do
-      name = unique_name("inflight")
-
-      {:ok, _pid} =
-        GenAgent.start_agent(SlowScriptAgent,
-          name: name,
-          backend: GenAgent.Backends.Mock,
-          scripts: [blocking_script()]
-        )
-
-      # Send a prompt that hangs indefinitely in the backend stream.
+      name = start_simple([blocking_script(:stream)])
       {:ok, _ref} = GenAgent.tell(name, "hang forever")
 
-      wait_until(fn ->
-        GenAgent.status(name).state == :processing
-      end)
-
-      # Locate the in-flight task pid via the agent's current_request.
-      # The task is a child of GenAgent.TaskSupervisor.
-      task_pids_before = Task.Supervisor.children(GenAgent.TaskSupervisor)
-      assert task_pids_before != []
+      assert_receive {:prompt_blocked, task_pid, :stream}
+      task_monitor = Process.monitor(task_pid)
 
       :ok = GenAgent.stop(name)
 
-      # After stop, the agent is gone AND the in-flight task is dead.
+      assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, :killed}
       wait_until(fn -> is_nil(GenAgent.whereis(name)) end)
+    end
 
-      Process.sleep(50)
+    for phase <- [:prompt, :stream] do
+      test "killing an agent cancels its task blocked in #{phase} and preserves other agents" do
+        phase = unquote(phase)
+        other_name = start_simple([blocking_script(:stream), [Event.new(:result, %{text: "ok"})]])
+        {:ok, other_ref} = GenAgent.tell(other_name, "unrelated turn")
+        assert_receive {:prompt_blocked, other_task_pid, :stream}
 
-      # Any task that was running before stop should now be dead.
-      alive_after =
-        Enum.filter(task_pids_before, &Process.alive?/1)
+        name = start_simple([blocking_script(phase)])
+        agent_pid = GenAgent.whereis(name)
+        agent_monitor = Process.monitor(agent_pid)
+        {:ok, _ref} = GenAgent.tell(name, "blocked turn")
+        assert_receive {:prompt_blocked, task_pid, ^phase}
+        task_monitor = Process.monitor(task_pid)
 
-      assert alive_after == [],
-             "in-flight task survived GenAgent.stop -- " <>
-               "terminate/3 / cleanup_task did not run"
+        Process.exit(agent_pid, :kill)
+
+        assert_receive {:DOWN, ^agent_monitor, :process, ^agent_pid, :killed}
+        assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, :killed}
+        wait_until(fn -> is_nil(GenAgent.whereis(name)) end)
+
+        assert Process.alive?(other_task_pid)
+        assert {:ok, :pending} = GenAgent.poll(other_name, other_ref)
+        send(other_task_pid, :continue)
+        assert {:ok, %{text: "ok"}} = GenAgent.ask(other_name, "next turn")
+        assert {:ok, :completed, %{text: "released"}} = GenAgent.poll(other_name, other_ref)
+
+        # Neither agent nor task is restarted by the shared supervisors.
+        refute task_pid in Task.Supervisor.children(GenAgent.TaskSupervisor)
+        assert GenAgent.whereis(name) == nil
+      end
     end
 
     test "killed agents do not auto-restart (restart: :temporary)" do

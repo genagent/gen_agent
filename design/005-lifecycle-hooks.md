@@ -155,8 +155,13 @@ buffered notifies are drained.
 ```
 
 Runs when the agent reaches a terminal state cleanly. Specifically:
-any callback (`handle_response`, `handle_error`, `handle_event`,
-`pre_turn`, `post_turn`) returns `{:halt, state}`.
+one of `handle_response`, `handle_error`, `handle_event`, or
+`pre_turn` returns `{:halt, state}`. `post_turn` only returns state
+and cannot choose a halt transition.
+
+The hook fires once per transition into halted state. Repeated
+halt decisions while already halted do not repeat completion side
+effects; `resume/1` permits a later halt to fire the hook again.
 
 Does NOT run on crashes, `GenAgent.stop/1`, supervisor shutdown, or
 abnormal exits -- `terminate_agent/2` covers those.
