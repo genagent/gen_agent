@@ -29,7 +29,9 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
 
       - uses: erlef/setup-beam@v1
         with:
@@ -38,6 +40,15 @@ jobs:
 
       - name: Install dependencies
         run: mix deps.get
+
+      - name: Audit dependencies
+        run: mix hex.audit
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Run tests
+        run: mix test
 
       - name: Publish
         env:

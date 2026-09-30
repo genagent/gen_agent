@@ -16,10 +16,12 @@ defmodule GenAgent do
 
       def deps do
         [
-          {:gen_agent, "~> 0.1.0"},
+          {:gen_agent, "~> 0.2.0"}, # x-release-please-version
           # Plus at least one backend:
           {:gen_agent_claude, "~> 0.1.0"},
-          {:gen_agent_codex, "~> 0.1.0"}
+          {:gen_agent_codex, "~> 0.1.0"},
+          {:gen_agent_anthropic, "~> 0.1.0"},
+          {:gen_agent_openai, "~> 0.1.0"}
         ]
       end
 
@@ -83,9 +85,9 @@ defmodule GenAgent do
   to immediately dispatch another turn without a caller, useful for
   multi-step work that the agent drives itself.
 
-  Halting: any callback can return `{:halt, state}` to go idle but freeze
-  the mailbox. A halted agent ignores queued prompts until `resume/1` is
-  called.
+  Halting: `c:handle_response/3`, `c:handle_error/3`, `c:handle_event/2`,
+  or `c:pre_turn/2` can return `{:halt, state}` to go idle but freeze the
+  mailbox. A halted agent ignores queued prompts until `resume/1` is called.
 
   ## Backends
 
@@ -97,6 +99,10 @@ defmodule GenAgent do
       wraps the Anthropic `claude` CLI via `ClaudeWrapper`.
     * `GenAgent.Backends.Codex` (package: `gen_agent_codex`) --
       wraps the OpenAI `codex` CLI via `CodexWrapper`.
+    * `GenAgent.Backends.Anthropic` (package: `gen_agent_anthropic`) --
+      calls the Anthropic HTTP API via `Req`.
+    * `GenAgent.Backends.OpenAI` (package: `gen_agent_openai`) --
+      calls the OpenAI Responses API via `Req`.
 
   A backend owns its session lifecycle, translates events, and carries any
   state it needs (session id, message history) in an opaque session term.
@@ -116,10 +122,25 @@ defmodule GenAgent do
     * `c:pre_run/1` -- one-time setup after `init_agent`, before the first turn.
     * `c:pre_turn/2` -- before each dispatch. Can rewrite the prompt, skip, or halt.
     * `c:post_turn/3` -- after each turn, post-decision. For state-mutating side effects.
-    * `c:post_run/1` -- on clean `{:halt, state}` from any callback. For completion side effects.
+    * `c:post_run/1` -- on clean `{:halt, state}` from a decision callback or
+      `c:pre_turn/2`. For completion side effects.
 
   The `use GenAgent` macro provides default implementations of the optional
   callbacks and lifecycle hooks.
+
+  ## Process lifecycle
+
+  Agents use `restart: :temporary`. A crashed or stopped agent must be
+  started explicitly; GenAgent does not restore its previous state.
+
+  Each turn runs in a supervised prompt task. Task failures are delivered
+  to `c:handle_error/3` without taking down the agent. When the agent exits,
+  its active prompt task is stopped, including when an abrupt exit bypasses
+  termination callbacks.
+
+  Stopping the BEAM task does not establish that a provider's subprocess
+  or remote request has stopped. The backend and its transport own external
+  cancellation and resource cleanup.
 
   ## Public API
 
@@ -327,10 +348,14 @@ defmodule GenAgent do
   @doc """
   Clean-completion hook. Optional.
 
-  Fires when any callback (`c:handle_response/3`, `c:handle_error/3`,
-  `c:handle_event/2`, `c:pre_turn/2`, `c:post_turn/3`) returns
+  Fires when `c:handle_response/3`, `c:handle_error/3`,
+  `c:handle_event/2`, or `c:pre_turn/2` returns
   `{:halt, state}`. Runs before the agent is marked halted and before
   the `[:gen_agent, :halted]` telemetry event is emitted.
+
+  Runs once per transition to halted. Further halt decisions while the
+  agent is already halted do not rerun the hook. After `resume/1`, a new
+  halt transition runs it again.
 
   Does NOT fire on crashes, `stop/1`, supervisor shutdown, or any
   abnormal exit -- `c:terminate_agent/2` covers those paths.
@@ -426,6 +451,9 @@ defmodule GenAgent do
   Any other option is forwarded to `c:init_agent/1`. GenAgent-level
   knobs (like `:watchdog_ms`) are recognized and stripped before
   forwarding.
+
+  The child uses `restart: :temporary`. If it exits, call `start_agent/2`
+  explicitly to create another agent; its previous state is not restored.
   """
   @spec start_agent(module(), keyword()) :: DynamicSupervisor.on_start_child()
   def start_agent(module, opts) when is_atom(module) and is_list(opts) do

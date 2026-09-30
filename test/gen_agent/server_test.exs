@@ -380,6 +380,32 @@ defmodule GenAgent.ServerTest do
       assert {:error, {:task_crashed, _}} = ask(pid, "go")
       assert status(pid).state == :idle
     end
+
+    test "a task exiting normally without a result reports an error and drains queued work",
+         %{task_sup: task_sup} do
+      parent = self()
+
+      exits_normally = fn _prompt ->
+        send(parent, {:task_started, self()})
+
+        receive do
+          :exit_normally -> exit(:normal)
+        end
+      end
+
+      pid = start_server(task_sup, [exits_normally, result_events("next")], notify_pid: parent)
+      {:ok, ref} = tell(pid, "exit")
+      assert_receive {:task_started, task_pid}
+      {:ok, next_ref} = tell(pid, "next")
+      assert status(pid).queued == 1
+      send(task_pid, :exit_normally)
+
+      assert_receive {:test_agent, :handle_error, {^ref, {:task_crashed, :normal}}}
+      assert {:error, {:task_crashed, :normal}} = poll(pid, ref)
+      assert_receive {:test_agent, :handle_response, {^next_ref, %{text: "next"}}}
+      assert {:ok, :completed, %{text: "next"}} = poll(pid, next_ref)
+      assert status(pid).state == :idle
+    end
   end
 
   # ---------------------------------------------------------------------------

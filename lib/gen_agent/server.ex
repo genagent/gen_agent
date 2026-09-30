@@ -413,7 +413,7 @@ defmodule GenAgent.Server do
         :processing,
         %Data{current_request: current} = data
       )
-      when is_reference(ref) and reason != :normal and is_map(current) do
+      when is_reference(ref) and is_map(current) do
     case current do
       %{task_ref: ^ref} ->
         emit_prompt_error(
@@ -495,8 +495,12 @@ defmodule GenAgent.Server do
     agent_state = data.agent_state
     task_supervisor = data.task_supervisor
 
+    # Link the task to its owning agent as well as the shared supervisor.
+    # Even an untrappable agent exit must take its in-flight turn down.
+    # The agent traps exits, so task failures still flow through :DOWN
+    # and handle_error/3 without crashing the agent or other agents.
     task =
-      Task.Supervisor.async_nolink(task_supervisor, fn ->
+      Task.Supervisor.async(task_supervisor, fn ->
         run_prompt(backend, backend_session, module, agent_state, prompt)
       end)
 
@@ -531,7 +535,7 @@ defmodule GenAgent.Server do
 
     {reversed_events, agent_state, terminal} =
       Enum.reduce_while(stream, initial, fn %Event{} = event, {events, state, _terminal} ->
-        state = module.handle_stream_event(event, state)
+        state = maybe_handle_stream_event(module, event, state)
         events = [event | events]
 
         if Event.terminal?(event) do
@@ -564,6 +568,14 @@ defmodule GenAgent.Server do
     end
   end
 
+  defp maybe_handle_stream_event(module, event, state) do
+    if function_exported?(module, :handle_stream_event, 2) do
+      module.handle_stream_event(event, state)
+    else
+      state
+    end
+  end
+
   defp maybe_update_session(backend, session, data) do
     if function_exported?(backend, :update_session, 2) do
       backend.update_session(session, data)
@@ -579,7 +591,11 @@ defmodule GenAgent.Server do
   end
 
   defp safely_handle_event(module, event, state) do
-    module.handle_event(event, state)
+    if function_exported?(module, :handle_event, 2) do
+      module.handle_event(event, state)
+    else
+      {:noreply, state}
+    end
   rescue
     e ->
       require Logger
@@ -692,6 +708,8 @@ defmodule GenAgent.Server do
   # state, then emits the :halted telemetry event, then returns data
   # with halted: true. All clean-halt sites funnel through here so
   # post_run has exactly one call site.
+  defp transition_to_halted(%Data{halted: true} = data), do: data
+
   defp transition_to_halted(%Data{} = data) do
     :ok = safely_post_run(data.agent_module, data.agent_state)
     emit_halted(data.name, data.agent_state)

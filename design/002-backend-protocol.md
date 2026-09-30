@@ -6,7 +6,7 @@ the codebase.
 
 ## Shape
 
-`GenAgent.Backend` is a behaviour with four required callbacks and
+`GenAgent.Backend` is a behaviour with three required callbacks and
 two optional:
 
 - `start_session/1` -- once at agent boot.
@@ -16,8 +16,8 @@ two optional:
 - `update_session/2` (optional) -- fold terminal-event data back into
   the session (e.g. capture the session id Claude assigns on first
   response).
-- `resume_session/2` (optional) -- future persistence feature; v0.1
-  does not call it.
+- `resume_session/2` (optional) -- reserved for persistence; GenAgent
+  does not currently call it.
 
 The session is an **opaque term** owned by the backend. The state
 machine stores it, passes it back on every call, and replaces it
@@ -86,6 +86,11 @@ terminal event part of the stream keeps backend code single-path.
   and delivers it to `handle_error/3`.
 - `start_session/1` is synchronous and blocks `start_agent/2`. Slow
   setup should go in `pre_run/1` (design note 005), not here.
-- `terminate_session/1` runs from `terminate/3` in the server, which
-  means it fires on every path including crashes. It must be
-  idempotent and must not raise.
+- `terminate_session/1` runs from `terminate/3` in the server on
+  shutdown and crashes that invoke that callback. Abrupt exits such
+  as `:kill` bypass it. Cleanup must be idempotent and must not raise.
+- The prompt task belongs to the agent and is stopped when its owner
+  exits, including abrupt exits. This bounds the BEAM task's lifetime;
+  it does not establish that provider subprocesses or remote requests
+  have stopped. Those resources remain the backend and transport's
+  responsibility.

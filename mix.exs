@@ -17,7 +17,7 @@ defmodule GenAgent.MixProject do
       name: "GenAgent",
       description:
         "A behaviour and supervision framework for long-running LLM agent processes, modeled as OTP state machines.",
-      dialyzer: [plt_file: {:no_warn, "_build/dev/dialyxir_#{System.otp_release()}.plt"}]
+      dialyzer: [plt_local_path: "priv/plts", plt_core_path: "priv/plts"]
     ]
   end
 

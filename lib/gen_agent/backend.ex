@@ -11,7 +11,8 @@ defmodule GenAgent.Backend do
 
   The state machine owns backend lifecycle. It calls `start_session/1`
   once when the agent boots, `prompt/2` on each turn, and
-  `terminate_session/1` on shutdown.
+  `terminate_session/1` from its termination callback. These three callbacks
+  are required; `update_session/2` and `resume_session/2` are optional.
 
   ## Session values
 
@@ -38,6 +39,17 @@ defmodule GenAgent.Backend do
 
   Streams may be lazy. A lazy stream that blocks until fresh events
   arrive is the expected shape for backends that wrap long-running CLIs.
+
+  ## Cancellation and cleanup
+
+  GenAgent stops the active prompt task on interruption, watchdog timeout,
+  or agent exit, including abrupt exits that bypass termination callbacks.
+  Backends must not rely on `terminate_session/1` or a stream finalizer
+  running after such an exit.
+
+  Stopping a BEAM task does not establish that a provider's subprocess or
+  remote request has stopped. The backend and its transport are responsible
+  for external cancellation and resource cleanup.
   """
 
   alias GenAgent.Event
@@ -85,8 +97,8 @@ defmodule GenAgent.Backend do
   @doc """
   Resume a previously-persisted session by id.
 
-  Optional. Used by future persistence features to reattach to a
-  session across restarts. v0.1 does not call this.
+  Optional. Reserved for reattaching to a session across restarts.
+  GenAgent does not currently call this callback or persist sessions.
   """
   @callback resume_session(session_id :: String.t(), opts :: keyword()) ::
               {:ok, session()} | {:error, term()}
@@ -94,8 +106,10 @@ defmodule GenAgent.Backend do
   @doc """
   Tear down a session.
 
-  Called when the agent is shutting down cleanly. Backends should
-  release any resources held by the session here.
+  Called from the agent's termination callback on shutdown and crashes
+  that run that callback. Abrupt exits such as `:kill` bypass it. Backends
+  should release any resources held by the session here and make cleanup
+  idempotent.
   """
   @callback terminate_session(session()) :: :ok
 
