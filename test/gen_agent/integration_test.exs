@@ -94,6 +94,23 @@ defmodule GenAgent.IntegrationTest do
     name
   end
 
+  defp start_caller_tree do
+    {:ok, root} =
+      Supervisor.start_link(
+        [Task.Supervisor, {DynamicSupervisor, strategy: :one_for_one}],
+        strategy: :rest_for_one
+      )
+
+    Process.unlink(root)
+
+    on_exit(fn ->
+      if Process.alive?(root), do: Supervisor.stop(root)
+    end)
+
+    children = Map.new(Supervisor.which_children(root), fn {id, pid, _, _} -> {id, pid} end)
+    {root, Map.fetch!(children, Task.Supervisor), Map.fetch!(children, DynamicSupervisor)}
+  end
+
   # ---------------------------------------------------------------------------
   # Lifecycle
   # ---------------------------------------------------------------------------
@@ -130,6 +147,148 @@ defmodule GenAgent.IntegrationTest do
 
     test "returns {:error, :not_found} for unknown names" do
       assert {:error, :not_found} = GenAgent.stop("nope-#{System.unique_integer()}")
+    end
+  end
+
+  describe "caller-owned supervision" do
+    test "requires an explicit task supervisor and preserves temporary children" do
+      assert_raise KeyError, fn ->
+        GenAgent.child_spec(SimpleAgent,
+          name: unique_name("missing-tasks"),
+          backend: GenAgent.Backends.Mock
+        )
+      end
+
+      {_, task_supervisor, agent_supervisor} = start_caller_tree()
+      name = unique_name("owned")
+
+      spec =
+        GenAgent.child_spec(SimpleAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          task_supervisor: task_supervisor,
+          scripts: [[Event.new(:result, %{text: "owned"})]]
+        )
+
+      assert spec.restart == :temporary
+      assert {:ok, pid} = DynamicSupervisor.start_child(agent_supervisor, spec)
+      assert GenAgent.whereis(name) == pid
+      assert {:ok, %{text: "owned"}} = GenAgent.ask(name, "hi")
+      assert {:error, :not_found} = GenAgent.stop(name)
+      assert :ok = GenAgent.stop(name, agent_supervisor)
+      wait_until(fn -> GenAgent.whereis(name) == nil end)
+    end
+
+    test "stopping and restarting the caller's tree removes its idle and busy agents" do
+      {root, task_supervisor, agent_supervisor} = start_caller_tree()
+      global_name = start_simple([[Event.new(:result, %{text: "global"})]])
+      idle_name = unique_name("owned-idle")
+      busy_name = unique_name("owned-busy")
+
+      for {name, scripts} <- [
+            {idle_name, []},
+            {busy_name, [blocking_script(:stream)]}
+          ] do
+        spec =
+          GenAgent.child_spec(SimpleAgent,
+            name: name,
+            backend: GenAgent.Backends.Mock,
+            task_supervisor: task_supervisor,
+            scripts: scripts
+          )
+
+        assert {:ok, _pid} = DynamicSupervisor.start_child(agent_supervisor, spec)
+      end
+
+      idle_pid = GenAgent.whereis(idle_name)
+      busy_pid = GenAgent.whereis(busy_name)
+      idle_monitor = Process.monitor(idle_pid)
+      busy_monitor = Process.monitor(busy_pid)
+
+      assert {:ok, _ref} = GenAgent.tell(busy_name, "hold")
+      assert_receive {:prompt_blocked, task_pid, :stream}
+      task_monitor = Process.monitor(task_pid)
+      assert task_pid in Task.Supervisor.children(task_supervisor)
+      refute task_pid in Task.Supervisor.children(GenAgent.TaskSupervisor)
+
+      assert :ok = Supervisor.stop(root)
+      assert_receive {:DOWN, ^idle_monitor, :process, ^idle_pid, _}
+      assert_receive {:DOWN, ^busy_monitor, :process, ^busy_pid, _}
+      assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, _}
+
+      wait_until(fn ->
+        GenAgent.whereis(idle_name) == nil and GenAgent.whereis(busy_name) == nil
+      end)
+
+      assert {:ok, %{text: "global"}} = GenAgent.ask(global_name, "still here")
+
+      {_, new_tasks, new_agents} = start_caller_tree()
+
+      spec =
+        GenAgent.child_spec(SimpleAgent,
+          name: busy_name,
+          backend: GenAgent.Backends.Mock,
+          task_supervisor: new_tasks,
+          scripts: [[Event.new(:result, %{text: "restarted"})]]
+        )
+
+      assert {:ok, _pid} = DynamicSupervisor.start_child(new_agents, spec)
+      assert {:ok, %{text: "restarted"}} = GenAgent.ask(busy_name, "again")
+    end
+
+    test "task-supervisor failure stops caller-owned agents before replacement" do
+      {root, task_supervisor, agent_supervisor} = start_caller_tree()
+      name = unique_name("owned-task-failure")
+
+      spec =
+        GenAgent.child_spec(SimpleAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          task_supervisor: task_supervisor,
+          scripts: []
+        )
+
+      assert {:ok, agent_pid} = DynamicSupervisor.start_child(agent_supervisor, spec)
+      agent_monitor = Process.monitor(agent_pid)
+      Process.exit(task_supervisor, :kill)
+
+      assert_receive {:DOWN, ^agent_monitor, :process, ^agent_pid, _}
+      wait_until(fn -> GenAgent.whereis(name) == nil end)
+
+      wait_until(fn ->
+        children = Map.new(Supervisor.which_children(root), fn {id, pid, _, _} -> {id, pid} end)
+
+        is_pid(children[Task.Supervisor]) and children[Task.Supervisor] != task_supervisor and
+          is_pid(children[DynamicSupervisor]) and
+          children[DynamicSupervisor] != agent_supervisor
+      end)
+    end
+
+    for phase <- [:prompt, :stream] do
+      test "abrupt exit cancels a caller-owned task blocked in #{phase}" do
+        phase = unquote(phase)
+        {_, task_supervisor, agent_supervisor} = start_caller_tree()
+        name = unique_name("owned-kill")
+
+        spec =
+          GenAgent.child_spec(SimpleAgent,
+            name: name,
+            backend: GenAgent.Backends.Mock,
+            task_supervisor: task_supervisor,
+            scripts: [blocking_script(phase)]
+          )
+
+        assert {:ok, agent_pid} = DynamicSupervisor.start_child(agent_supervisor, spec)
+        assert {:ok, _ref} = GenAgent.tell(name, "hold")
+        assert_receive {:prompt_blocked, task_pid, ^phase}
+        task_monitor = Process.monitor(task_pid)
+
+        Process.exit(agent_pid, :kill)
+
+        assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, :killed}
+        wait_until(fn -> GenAgent.whereis(name) == nil end)
+        refute task_pid in Task.Supervisor.children(task_supervisor)
+      end
     end
   end
 

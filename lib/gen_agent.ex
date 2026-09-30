@@ -457,6 +457,37 @@ defmodule GenAgent do
   """
   @spec start_agent(module(), keyword()) :: DynamicSupervisor.on_start_child()
   def start_agent(module, opts) when is_atom(module) and is_list(opts) do
+    DynamicSupervisor.start_child(
+      GenAgent.AgentSupervisor,
+      agent_child_spec(module, opts, GenAgent.TaskSupervisor)
+    )
+  end
+
+  @doc """
+  Build a temporary agent child spec for a caller-owned supervisor.
+
+  Requires `:name`, `:backend`, and `:task_supervisor`. The selected
+  `Task.Supervisor` must already be running; prompt tasks never fall back
+  to `GenAgent.TaskSupervisor`. Other options have the same meaning as in
+  `start_agent/2`.
+
+  Start the spec with `DynamicSupervisor.start_child/2`. The agent is
+  registered in `GenAgent.Registry`, so the regular name-based APIs work.
+  Names must be unique across both caller-owned and global agents. Use
+  `stop/2` with the owning supervisor to stop an individual agent.
+
+  Put the task supervisor before the agent supervisor in the caller's
+  supervision tree so agents shut down before their prompt-task supervisor.
+  Use `:rest_for_one` if loss of the task supervisor should also stop the
+  agents. See the README for an example.
+  """
+  @spec child_spec(module(), keyword()) :: Supervisor.child_spec()
+  def child_spec(module, opts) when is_atom(module) and is_list(opts) do
+    task_supervisor = Keyword.fetch!(opts, :task_supervisor)
+    agent_child_spec(module, Keyword.delete(opts, :task_supervisor), task_supervisor)
+  end
+
+  defp agent_child_spec(module, opts, task_supervisor) do
     name = Keyword.fetch!(opts, :name)
     backend = Keyword.fetch!(opts, :backend)
 
@@ -468,14 +499,14 @@ defmodule GenAgent do
         name: name,
         backend: backend,
         module: module,
-        task_supervisor: GenAgent.TaskSupervisor,
+        task_supervisor: task_supervisor,
         init_opts: init_opts,
         register: via(name)
       ]
       |> maybe_put(:watchdog_ms, Keyword.get(server_opts, :watchdog_ms))
       |> maybe_put(:max_tell_results, Keyword.get(server_opts, :max_tell_results))
 
-    DynamicSupervisor.start_child(GenAgent.AgentSupervisor, {GenAgent.Server, child_opts})
+    GenAgent.Server.child_spec(child_opts)
   end
 
   @doc """
@@ -588,14 +619,16 @@ defmodule GenAgent do
   @doc """
   Stop an agent.
 
-  Terminates the agent process cleanly via its DynamicSupervisor.
+  Terminates the agent process cleanly via its owning `DynamicSupervisor`.
+  Pass the supervisor as the second argument for an agent started with
+  `child_spec/2`; the default is `GenAgent.AgentSupervisor`.
   Returns `:ok` or `{:error, :not_found}`.
   """
-  @spec stop(name()) :: :ok | {:error, :not_found}
-  def stop(name) do
+  @spec stop(name(), GenServer.server()) :: :ok | {:error, :not_found}
+  def stop(name, supervisor \\ GenAgent.AgentSupervisor) do
     case whereis(name) do
       nil -> {:error, :not_found}
-      pid -> DynamicSupervisor.terminate_child(GenAgent.AgentSupervisor, pid)
+      pid -> DynamicSupervisor.terminate_child(supervisor, pid)
     end
   end
 
