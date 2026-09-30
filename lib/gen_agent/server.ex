@@ -370,6 +370,26 @@ defmodule GenAgent.Server do
 
   def handle_event(:cast, :interrupt, _state, _data), do: :keep_state_and_data
 
+  def handle_event(
+        {:call, from},
+        {:interrupt_request, expected_ref},
+        :processing,
+        %Data{current_request: %{request_ref: current_ref} = current} = data
+      )
+      when expected_ref == current_ref do
+    cleanup_task(current)
+    {:next_state, state, data, actions} = finish_error(data, current, :interrupted)
+    {:next_state, state, data, [{:reply, from, {:ok, :accepted}} | actions]}
+  end
+
+  def handle_event({:call, from}, {:interrupt_request, _ref}, :processing, %Data{} = data) do
+    {:keep_state, data, [{:reply, from, {:error, :not_current}}]}
+  end
+
+  def handle_event({:call, from}, {:interrupt_request, _ref}, _state, %Data{} = data) do
+    {:keep_state, data, [{:reply, from, {:error, :idle}}]}
+  end
+
   # ---------------------------------------------------------------------------
   # resume -- unhalt and re-trigger drain
   # ---------------------------------------------------------------------------
