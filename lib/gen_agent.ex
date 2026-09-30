@@ -595,6 +595,28 @@ defmodule GenAgent do
   end
 
   @doc """
+  Interrupt the active turn only if its request reference matches `ref`.
+
+  Returns `{:ok, :accepted}` when the agent has cancelled that turn,
+  `{:error, :not_current}` when another turn is active, or
+  `{:error, :idle}` when no turn is active. A queued request is not
+  interruptible through this API. Unlike `interrupt/1`, this operation
+  is acknowledged by the agent and cannot cancel a successor turn after
+  the observed request finishes. It is also safe against a replacement
+  agent registered under the same name, because request references are
+  unique.
+
+  The acknowledgement describes the agent's decision and BEAM task
+  cancellation. It does not establish provider or OS process settlement.
+  The default call timeout is `:infinity`.
+  """
+  @spec interrupt_request(name(), request_ref(), timeout()) ::
+          {:ok, :accepted} | {:error, :not_current | :idle}
+  def interrupt_request(name, ref, timeout \\ @default_call_timeout) when is_reference(ref) do
+    :gen_statem.call(via(name), {:interrupt_request, ref}, timeout)
+  end
+
+  @doc """
   Resume a halted agent.
 
   Clears the `halted` flag and re-drains the mailbox. No-op if the

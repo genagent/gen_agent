@@ -205,6 +205,7 @@ for details.
 | `poll/3` | Check on a previously-issued `tell/3`. |
 | `notify/2` | Push an external event into `handle_event/2`. |
 | `interrupt/1` | Cancel an in-flight turn. |
+| `interrupt_request/3` | Acknowledge cancellation only if the active request ref matches. |
 | `resume/1` | Unhalt an agent and drain its mailbox. |
 | `status/2` | Read the agent's current state. |
 | `stop/1` | Terminate the agent. |
