@@ -437,9 +437,9 @@ defmodule GenAgent.Server do
     finish_turn(data, current, response, new_session, new_agent_state)
   end
 
-  defp handle_task_result({:error, reason, new_session}, current, data) do
-    emit_prompt_error(data.name, current.request_ref, reason, data.agent_state)
-    data = %{data | backend_session: new_session}
+  defp handle_task_result({:error, reason, new_session, new_agent_state}, current, data) do
+    emit_prompt_error(data.name, current.request_ref, reason, new_agent_state)
+    data = %{data | backend_session: new_session, agent_state: new_agent_state}
     finish_error(data, current, reason)
   end
 
@@ -526,7 +526,7 @@ defmodule GenAgent.Server do
         consume_stream(stream, backend, backend_session, module, agent_state, started)
 
       {:error, reason} ->
-        {:error, reason, backend_session}
+        {:error, reason, backend_session, agent_state}
     end
   end
 
@@ -550,10 +550,10 @@ defmodule GenAgent.Server do
 
     case terminal do
       nil ->
-        {:error, :no_terminal_event, backend_session}
+        {:error, :no_terminal_event, backend_session, agent_state}
 
       %Event{kind: :error, data: data} ->
-        {:error, Map.get(data, :reason, :unknown), backend_session}
+        {:error, Map.get(data, :reason, :unknown), backend_session, agent_state}
 
       %Event{kind: :result, data: data} ->
         backend_session = maybe_update_session(backend, backend_session, data)

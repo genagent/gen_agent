@@ -259,7 +259,13 @@ defmodule GenAgent do
 
   Runs inside the task that is driving the prompt, not the agent process.
   Returns the updated agent state, which is threaded through subsequent
-  stream events and then into `c:handle_response/3`.
+  stream events. On normal stream completion, including a terminal
+  `:error` event or EOF without a terminal event, the final state is
+  passed to `c:handle_response/3` or `c:handle_error/3` and then
+  `c:post_turn/3`. A task crash, interruption, or watchdog kill cannot
+  recover task-local callback state; those paths use the agent state
+  from before stream consumption. Callback state is volatile and is not
+  a durable record of provider activity.
   """
   @callback handle_stream_event(Event.t(), agent_state()) :: agent_state()
 
