@@ -119,7 +119,7 @@ defmodule GenAgent.InterruptRequestTest do
 
     assert :ok = GenAgent.stop(name)
     assert_receive {:DOWN, ^old_task_monitor, :process, ^old_task, :killed}
-    assert GenAgent.whereis(name) == nil
+    wait_until(fn -> GenAgent.whereis(name) == nil end)
 
     start_agent([blocked_turn(:b)], name)
     assert {:ok, new_ref} = GenAgent.tell(name, "B")
@@ -132,5 +132,18 @@ defmodule GenAgent.InterruptRequestTest do
     send(new_task, {:release, :b})
     assert_receive {:completed, ^new_ref}
     assert {:ok, :completed, %{text: "b"}} = GenAgent.poll(name, new_ref)
+  end
+
+  defp wait_until(fun, attempts \\ 200)
+
+  defp wait_until(_fun, 0), do: flunk("condition did not become true")
+
+  defp wait_until(fun, attempts) do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(5)
+      wait_until(fun, attempts - 1)
+    end
   end
 end
