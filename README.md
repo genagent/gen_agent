@@ -208,6 +208,7 @@ for details.
 | `interrupt_request/3` | Acknowledge cancellation only if the active request ref matches. |
 | `resume/1` | Unhalt an agent and drain its mailbox. |
 | `status/2` | Read the agent's current state. |
+| `runtime_snapshot/2` | Read bounded runtime metadata and pending-input counts. |
 | `stop/1` | Terminate the agent. |
 | `child_spec/2` | Build an agent child spec for a caller-owned supervisor. |
 | `stop/2` | Terminate an agent under a caller-owned supervisor. |
@@ -216,6 +217,14 @@ for details.
 Names resolve through a `Registry`, so callers address agents by name
 (any term). Agents use `restart: :temporary`: a crashed or stopped agent
 must be started explicitly, and its previous state is not restored.
+
+`runtime_snapshot/2` reports the coordinator's current phase, halted
+flag, queued prompt and buffered notification counts, pending self-chain,
+and active request ref, origin and elapsed/watchdog time. It contains no
+prompt, callback state, backend session or event payload. It is a
+point-in-time observation, not durable state or permission to dispatch.
+The older `status/2` API remains available; its `agent_state` is the
+server's latest retained state, not a live read of an in-flight task.
 
 ## Supervision
 

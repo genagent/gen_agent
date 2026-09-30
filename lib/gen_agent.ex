@@ -631,6 +631,11 @@ defmodule GenAgent do
 
   @doc """
   Read an agent's current status.
+
+  This compatibility API includes the full callback-maintained
+  `agent_state`. While a turn is processing, that value is the server's
+  latest retained state, not a live read of state inside the prompt task.
+  Use `runtime_snapshot/2` for a bounded metadata-only view.
   """
   @spec status(name(), timeout()) :: %{
           state: :idle | :processing,
@@ -642,6 +647,46 @@ defmodule GenAgent do
         }
   def status(name, timeout \\ @default_call_timeout) do
     :gen_statem.call(via(name), :status, timeout)
+  end
+
+  @typedoc "Bounded, metadata-only observation of one agent's runtime state."
+  @type runtime_snapshot :: %{
+          phase: :idle | :processing,
+          halted: boolean(),
+          pending_prompts: non_neg_integer(),
+          pending_notifications: non_neg_integer(),
+          self_chain_pending: boolean(),
+          current_request:
+            nil
+            | %{
+                ref: request_ref(),
+                origin: :ask | :tell | :event | :self_chain,
+                elapsed_ms: non_neg_integer(),
+                watchdog_ms: non_neg_integer() | :infinity
+              }
+        }
+
+  @doc """
+  Read a bounded, metadata-only runtime snapshot of an agent.
+
+  `pending_prompts` counts the prompt mailbox; `pending_notifications`
+  counts notifications buffered during a turn; `self_chain_pending`
+  reports a separately held callback-generated follow-up prompt.
+  `current_request` is `nil` when idle and otherwise contains the
+  volatile request ref, its origin (`:event` and `:self_chain` are
+  callback-origin turns), elapsed monotonic milliseconds since dispatch,
+  and the configured watchdog duration. It excludes prompts, caller
+  identities, callback state, backend sessions, events, and queued
+  payloads. Elapsed time is an observation, not an exact countdown to
+  the watchdog firing.
+
+  The snapshot is a point-in-time view of this BEAM coordinator, not
+  durable application state, admission authority, or proof that external
+  provider work has settled. The default call timeout is `:infinity`.
+  """
+  @spec runtime_snapshot(name(), timeout()) :: runtime_snapshot()
+  def runtime_snapshot(name, timeout \\ @default_call_timeout) do
+    :gen_statem.call(via(name), :runtime_snapshot, timeout)
   end
 
   @doc """
