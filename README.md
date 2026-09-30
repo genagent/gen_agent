@@ -226,6 +226,28 @@ point-in-time observation, not durable state or permission to dispatch.
 The older `status/2` API remains available; its `agent_state` is the
 server's latest retained state, not a live read of an in-flight task.
 
+## Event capture bounds
+
+Successful responses contain a complete normalized event list. To keep
+that list and cached `tell/3` results bounded, each turn retains at most
+1,000 events and 1,048,576 bytes of event terms by default. Override
+these positive-integer limits with `:max_events_per_turn` and
+`:max_event_bytes_per_turn` in `start_agent/2` or `child_spec/2`. Byte
+usage is the sum of `:erlang.external_size/1` for accepted events, so a
+single oversized terminal event is rejected too.
+
+An event that exceeds either limit ends the turn with
+`{:error, {:event_capture_overflow, diagnostics}}`. The diagnostics
+contain the limit type, configured limits, retained counts/bytes, and
+the rejected event's kind and size, but no event payload. There is no
+truncated success response. Stream callbacks run for accepted events;
+the rejected event is not passed to `handle_stream_event/2`. A terminal
+`:error` reason is preserved when that event fits; if its event exceeds
+the limit, the overflow diagnostic records its kind without retaining
+its potentially oversized reason. The stream enumerable is halted, but
+settlement of provider subprocesses or remote work remains the backend's
+responsibility.
+
 ## Supervision
 
 The package starts a fixed supervision tree on application boot:
