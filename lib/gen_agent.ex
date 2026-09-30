@@ -145,14 +145,18 @@ defmodule GenAgent do
   ## Public API
 
     * `start_agent/2` -- start an agent under the supervision tree.
+    * `child_spec/2` -- build a child spec for caller-owned supervision.
     * `ask/3` -- synchronous prompt, blocks until the turn finishes.
     * `tell/3` -- async prompt, returns a ref for `poll/3`.
     * `poll/3` -- check on a previously-issued `tell/3`.
     * `notify/2` -- push an external event into `c:handle_event/2`.
     * `interrupt/1` -- cancel an in-flight turn.
+    * `interrupt_request/3` -- acknowledge cancellation for a matching request ref.
     * `resume/1` -- unhalt an agent and drain its mailbox.
     * `status/2` -- read the agent's current state.
+    * `runtime_snapshot/2` -- read bounded runtime metadata.
     * `stop/1` -- terminate the agent.
+    * `stop/2` -- terminate an agent under its caller-owned supervisor.
     * `whereis/1` -- look up an agent's pid.
 
   ## Data types
@@ -454,6 +458,15 @@ defmodule GenAgent do
     * `:name` -- the name the agent will register under in `GenAgent.Registry`.
     * `:backend` -- the backend module implementing `GenAgent.Backend`.
 
+  Event evidence is bounded by `:max_events_per_turn` (default `1_000`)
+  and `:max_event_bytes_per_turn` (default `1_048_576`), measured as the
+  sum of `:erlang.external_size/1` for each retained `GenAgent.Event`.
+  Both limits must be positive integers. Reaching either limit before a
+  terminal event fits fails the turn with
+  `{:event_capture_overflow, diagnostics}`. No incomplete success response
+  is returned. Accepted stream callbacks keep their state; the rejected
+  event is not delivered to `c:handle_stream_event/2`.
+
   Any other option is forwarded to `c:init_agent/1`. GenAgent-level
   knobs (like `:watchdog_ms`) are recognized and stripped before
   forwarding.
@@ -498,7 +511,14 @@ defmodule GenAgent do
     backend = Keyword.fetch!(opts, :backend)
 
     {server_opts, init_opts} =
-      Keyword.split(opts, [:name, :backend, :watchdog_ms, :max_tell_results])
+      Keyword.split(opts, [
+        :name,
+        :backend,
+        :watchdog_ms,
+        :max_tell_results,
+        :max_events_per_turn,
+        :max_event_bytes_per_turn
+      ])
 
     child_opts =
       [
@@ -511,6 +531,8 @@ defmodule GenAgent do
       ]
       |> maybe_put(:watchdog_ms, Keyword.get(server_opts, :watchdog_ms))
       |> maybe_put(:max_tell_results, Keyword.get(server_opts, :max_tell_results))
+      |> maybe_put(:max_events_per_turn, Keyword.get(server_opts, :max_events_per_turn))
+      |> maybe_put(:max_event_bytes_per_turn, Keyword.get(server_opts, :max_event_bytes_per_turn))
 
     GenAgent.Server.child_spec(child_opts)
   end

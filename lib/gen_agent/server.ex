@@ -19,6 +19,8 @@ defmodule GenAgent.Server do
 
   @default_watchdog_ms :timer.minutes(10)
   @default_max_tell_results 100
+  @default_max_events_per_turn 1_000
+  @default_max_event_bytes_per_turn 1_048_576
 
   defmodule Data do
     @moduledoc false
@@ -33,6 +35,8 @@ defmodule GenAgent.Server do
       :current_request,
       :watchdog_ms,
       :max_tell_results,
+      :max_events_per_turn,
+      :max_event_bytes_per_turn,
       halted: false,
       # Flipped to true after `c:GenAgent.pre_run/1` has run successfully.
       # No prompts are dispatched before pre_run completes -- since pre_run
@@ -106,6 +110,13 @@ defmodule GenAgent.Server do
     init_opts = Keyword.get(opts, :init_opts, [])
     watchdog_ms = Keyword.get(opts, :watchdog_ms, @default_watchdog_ms)
     max_tell_results = Keyword.get(opts, :max_tell_results, @default_max_tell_results)
+    max_events_per_turn = Keyword.get(opts, :max_events_per_turn, @default_max_events_per_turn)
+
+    max_event_bytes_per_turn =
+      Keyword.get(opts, :max_event_bytes_per_turn, @default_max_event_bytes_per_turn)
+
+    validate_capture_limit!(max_events_per_turn, :max_events_per_turn)
+    validate_capture_limit!(max_event_bytes_per_turn, :max_event_bytes_per_turn)
 
     with {:ok, backend_opts, agent_state} <- module.init_agent(init_opts),
          {:ok, backend_session} <- backend.start_session(backend_opts) do
@@ -117,7 +128,9 @@ defmodule GenAgent.Server do
         agent_module: module,
         agent_state: agent_state,
         watchdog_ms: watchdog_ms,
-        max_tell_results: max_tell_results
+        max_tell_results: max_tell_results,
+        max_events_per_turn: max_events_per_turn,
+        max_event_bytes_per_turn: max_event_bytes_per_turn
       }
 
       emit_state_change(name, nil, :idle)
@@ -544,6 +557,8 @@ defmodule GenAgent.Server do
     module = data.agent_module
     agent_state = data.agent_state
     task_supervisor = data.task_supervisor
+    max_events_per_turn = data.max_events_per_turn
+    max_event_bytes_per_turn = data.max_event_bytes_per_turn
 
     # Link the task to its owning agent as well as the shared supervisor.
     # Even an untrappable agent exit must take its in-flight turn down.
@@ -551,7 +566,15 @@ defmodule GenAgent.Server do
     # and handle_error/3 without crashing the agent or other agents.
     task =
       Task.Supervisor.async(task_supervisor, fn ->
-        run_prompt(backend, backend_session, module, agent_state, prompt)
+        run_prompt(
+          backend,
+          backend_session,
+          module,
+          agent_state,
+          prompt,
+          max_events_per_turn,
+          max_event_bytes_per_turn
+        )
       end)
 
     emit_prompt_start(data.name, request_ref, prompt, original_prompt, agent_state)
@@ -568,54 +591,122 @@ defmodule GenAgent.Server do
     %{data | current_request: current}
   end
 
-  defp run_prompt(backend, backend_session, module, agent_state, prompt) do
+  defp run_prompt(
+         backend,
+         backend_session,
+         module,
+         agent_state,
+         prompt,
+         max_events_per_turn,
+         max_event_bytes_per_turn
+       ) do
     started = System.monotonic_time(:millisecond)
 
     case backend.prompt(backend_session, prompt) do
       {:ok, stream, backend_session} ->
-        consume_stream(stream, backend, backend_session, module, agent_state, started)
+        consume_stream(
+          stream,
+          backend,
+          backend_session,
+          module,
+          agent_state,
+          started,
+          max_events_per_turn,
+          max_event_bytes_per_turn
+        )
 
       {:error, reason} ->
         {:error, reason, backend_session, agent_state}
     end
   end
 
-  defp consume_stream(stream, backend, backend_session, module, agent_state, started) do
-    initial = {[], agent_state, nil}
+  defp consume_stream(
+         stream,
+         backend,
+         backend_session,
+         module,
+         agent_state,
+         started,
+         max_events,
+         max_bytes
+       ) do
+    initial = {:ok, [], agent_state, 0, 0, nil}
 
-    {reversed_events, agent_state, terminal} =
-      Enum.reduce_while(stream, initial, fn %Event{} = event, {events, state, _terminal} ->
-        state = maybe_handle_stream_event(module, event, state)
-        events = [event | events]
-
-        if Event.terminal?(event) do
-          {:halt, {events, state, event}}
-        else
-          {:cont, {events, state, nil}}
-        end
+    result =
+      Enum.reduce_while(stream, initial, fn event, accumulator ->
+        capture_event(event, accumulator, module, max_events, max_bytes)
       end)
 
-    events = Enum.reverse(reversed_events)
-    duration_ms = System.monotonic_time(:millisecond) - started
+    case result do
+      {:overflow, limit, state, count, bytes, kind, event_bytes} ->
+        reason =
+          {:event_capture_overflow,
+           %{
+             limit: limit,
+             max_events: max_events,
+             max_bytes: max_bytes,
+             retained_events: count,
+             retained_bytes: bytes,
+             rejected_event_kind: kind,
+             rejected_event_bytes: event_bytes
+           }}
 
-    case terminal do
-      nil ->
-        {:error, :no_terminal_event, backend_session, agent_state}
+        {:error, reason, backend_session, state}
 
-      %Event{kind: :error, data: data} ->
-        {:error, Map.get(data, :reason, :unknown), backend_session, agent_state}
-
-      %Event{kind: :result, data: data} ->
-        backend_session = maybe_update_session(backend, backend_session, data)
-
-        response =
-          Response.from_events(events,
-            duration_ms: duration_ms,
-            session_id: Map.get(data, :session_id)
-          )
-
-        {:ok, response, backend_session, agent_state}
+      {:ok, reversed_events, state, _count, _bytes, terminal} ->
+        finish_stream(reversed_events, terminal, backend, backend_session, state, started)
     end
+  end
+
+  defp capture_event(
+         %Event{} = event,
+         {:ok, events, state, count, bytes, _terminal},
+         module,
+         max_events,
+         max_bytes
+       ) do
+    event_bytes = :erlang.external_size(event)
+
+    cond do
+      count >= max_events ->
+        {:halt, {:overflow, :events, state, count, bytes, event.kind, event_bytes}}
+
+      event_bytes > max_bytes - bytes ->
+        {:halt, {:overflow, :bytes, state, count, bytes, event.kind, event_bytes}}
+
+      true ->
+        state = maybe_handle_stream_event(module, event, state)
+        terminal = if Event.terminal?(event), do: event, else: nil
+        accepted = {:ok, [event | events], state, count + 1, bytes + event_bytes, terminal}
+
+        if terminal, do: {:halt, accepted}, else: {:cont, accepted}
+    end
+  end
+
+  defp finish_stream(_events, nil, _backend, backend_session, agent_state, _started) do
+    {:error, :no_terminal_event, backend_session, agent_state}
+  end
+
+  defp finish_stream(_events, %Event{kind: :error, data: data}, _backend, session, state, _) do
+    {:error, Map.get(data, :reason, :unknown), session, state}
+  end
+
+  defp finish_stream(events, %Event{kind: :result, data: data}, backend, session, state, started) do
+    session = maybe_update_session(backend, session, data)
+
+    response =
+      Response.from_events(Enum.reverse(events),
+        duration_ms: System.monotonic_time(:millisecond) - started,
+        session_id: Map.get(data, :session_id)
+      )
+
+    {:ok, response, session, state}
+  end
+
+  defp validate_capture_limit!(value, _name) when is_integer(value) and value > 0, do: :ok
+
+  defp validate_capture_limit!(value, name) do
+    raise ArgumentError, "#{name} must be a positive integer, got: #{inspect(value)}"
   end
 
   defp maybe_handle_stream_event(module, event, state) do

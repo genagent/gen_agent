@@ -6,7 +6,10 @@ defmodule GenAgent.Response do
   (`:result` or `:error`) arrives from the backend. It carries:
 
     * `:text` -- the full assembled assistant text for the turn.
-    * `:events` -- the complete event log for the turn, in arrival order.
+    * `:events` -- the complete retained event log for a successful turn,
+      in arrival order. A turn exceeding configured capture limits fails
+      with `{:event_capture_overflow, diagnostics}` instead of returning a
+      response with silently missing events.
     * `:usage` -- token usage if the backend reported any, otherwise `nil`.
     * `:duration_ms` -- wall-clock time from prompt dispatch to terminal event.
     * `:session_id` -- the backend's session identifier, if any.
