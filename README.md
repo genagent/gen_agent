@@ -211,6 +211,7 @@ for details.
 | `start_agent/2` | Start an agent under the supervision tree. |
 | `ask/3` | Synchronous prompt. Blocks until the turn finishes. |
 | `tell/3` | Async prompt. Returns a ref for `poll/3`. |
+| `tell_with_completion/4` | Async prompt with a request-scoped completion message. |
 | `poll/3` | Check on a previously-issued `tell/3`. |
 | `notify/2` | Push an external event into `handle_event/2`. |
 | `notify_ack/3` | Wait for an in-memory notification admission result. |
@@ -235,6 +236,42 @@ prompt, callback state, backend session or event payload. It is a
 point-in-time observation, not durable state or permission to dispatch.
 The older `status/2` API remains available; its `agent_state` is the
 server's latest retained state, not a live read of an in-flight task.
+
+## Request completion messages
+
+Use `tell_with_completion/4` when a caller needs the exact request ref
+and an asynchronous terminal outcome:
+
+```elixir
+{:ok, ref} = GenAgent.tell_with_completion("my-coder", "Run the tests")
+
+receive do
+  {:gen_agent, :completion, "my-coder", ^ref, {:ok, response}} ->
+    IO.puts(response.text)
+
+  {:gen_agent, :completion, "my-coder", ^ref, {:error, reason}} ->
+    IO.inspect(reason)
+end
+```
+
+The optional third argument selects a recipient pid; it defaults to the
+caller. The agent registers that recipient when it accepts the request,
+so a fast response or `pre_turn/2` skip can send the completion before
+the call returns. Match on the ref, which also works with
+`interrupt_request/3`. Pending-queue overload returns an error without
+a ref or completion message. Accepted queued requests deliver after
+their turn; backend errors, gate skip/halt/invalid, interruption, and
+watchdog expiry deliver error outcomes. The message is sent after turn
+decision and `post_turn/3` callbacks, at most once for each accepted
+request. Existing `tell/3` and `poll/3` behavior stays unchanged.
+
+Delivery does not depend on the bounded poll-result cache. It is an
+in-memory BEAM send, not durable delivery: a dead recipient loses its
+message, and agent death before a terminal outcome leaves the request
+uncertain. Monitor the agent if its death matters; a replacement under
+the same name uses new refs. A crashing decision callback stops the
+agent before completion. Neither a completion nor an agent monitor
+proves that an external provider process has settled.
 
 ## Pending input bounds
 

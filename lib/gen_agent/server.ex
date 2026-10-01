@@ -299,6 +299,33 @@ defmodule GenAgent.Server do
     queue_tell(data, from, prompt)
   end
 
+  def handle_event(
+        {:call, from},
+        {:tell_with_completion, prompt, recipient},
+        :idle,
+        %Data{halted: false} = data
+      ) do
+    request_ref = make_ref()
+
+    case try_dispatch(data, request_ref, {:tell, recipient}, prompt) do
+      {:next_state, :processing, data} ->
+        {:next_state, :processing, data, [{:reply, from, {:ok, request_ref}}]}
+
+      {:keep_state, data, actions} ->
+        {:keep_state, data, [{:reply, from, {:ok, request_ref}} | actions]}
+    end
+  end
+
+  def handle_event(
+        {:call, from},
+        {:tell_with_completion, prompt, recipient},
+        state,
+        %Data{} = data
+      )
+      when state in [:idle, :processing] do
+    queue_tell(data, from, prompt, recipient)
+  end
+
   # poll -- check status of a previously-tell'd request
   # ---------------------------------------------------------------------------
 
@@ -493,6 +520,7 @@ defmodule GenAgent.Server do
   def handle_event(:info, _msg, _state, _data), do: :keep_state_and_data
 
   defp request_origin({:ask, _from}), do: :ask
+  defp request_origin({:tell, _recipient}), do: :tell
   defp request_origin(kind) when kind in [:tell, :event, :self_chain], do: kind
 
   defp handle_task_result({:ok, response, new_session, new_agent_state}, current, data) do
@@ -514,10 +542,11 @@ defmodule GenAgent.Server do
     end
   end
 
-  defp queue_tell(data, from, prompt) do
+  defp queue_tell(data, from, prompt, recipient \\ nil) do
     request_ref = make_ref()
+    kind = if is_nil(recipient), do: :tell, else: {:tell, recipient}
 
-    case enqueue_prompt(data, request_ref, :tell, prompt) do
+    case enqueue_prompt(data, request_ref, kind, prompt) do
       {:ok, queued} ->
         {:keep_state, queued, [{:reply, from, {:ok, request_ref}}]}
 
@@ -1124,8 +1153,6 @@ defmodule GenAgent.Server do
   # ---------------------------------------------------------------------------
 
   defp finish_turn(data, current, response, new_session, new_agent_state) do
-    {data, reply_actions} = record_success(data, current, response)
-
     decision =
       data.agent_module.handle_response(current.request_ref, response, new_agent_state)
 
@@ -1141,6 +1168,8 @@ defmodule GenAgent.Server do
         current.request_ref,
         decision_state
       )
+
+    {data, reply_actions} = record_success(data, current, response)
 
     data = %{
       data
@@ -1173,8 +1202,6 @@ defmodule GenAgent.Server do
   defp decision_to_transition({:halt, state}), do: {:halt, state}
 
   defp finish_error(data, current, reason) do
-    {data, reply_actions} = record_error(data, current, reason)
-
     decision =
       safely_handle_error(
         data.agent_module,
@@ -1192,6 +1219,8 @@ defmodule GenAgent.Server do
         current.request_ref,
         decision_state
       )
+
+    {data, reply_actions} = record_error(data, current, reason)
 
     data = %{data | agent_state: hooked_state, current_request: nil}
 
@@ -1235,6 +1264,12 @@ defmodule GenAgent.Server do
     {store_tell_result(data, ref, {:ok, response}), []}
   end
 
+  defp record_success(%Data{} = data, %{kind: {:tell, recipient}, request_ref: ref}, response) do
+    outcome = {:ok, response}
+    send(recipient, {:gen_agent, :completion, data.name, ref, outcome})
+    {store_tell_result(data, ref, outcome), []}
+  end
+
   defp record_success(%Data{} = data, %{kind: kind}, _response)
        when kind in [:self_chain, :event] do
     {data, []}
@@ -1246,6 +1281,12 @@ defmodule GenAgent.Server do
 
   defp record_error(%Data{} = data, %{kind: :tell, request_ref: ref}, reason) do
     {store_tell_result(data, ref, {:error, reason}), []}
+  end
+
+  defp record_error(%Data{} = data, %{kind: {:tell, recipient}, request_ref: ref}, reason) do
+    outcome = {:error, reason}
+    send(recipient, {:gen_agent, :completion, data.name, ref, outcome})
+    {store_tell_result(data, ref, outcome), []}
   end
 
   defp record_error(%Data{} = data, %{kind: kind}, _reason)
