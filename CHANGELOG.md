@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/genagent/gen_agent/compare/v0.3.1...v0.4.0) (2026-10-01)
+
+
+### Features
+
+* add metric-safe turn telemetry ([#79](https://github.com/genagent/gen_agent/issues/79)) ([ef064e0](https://github.com/genagent/gen_agent/commit/ef064e042d33e95095317c43c2e69f76d137cf09))
+
 ## [0.3.1](https://github.com/genagent/gen_agent/compare/v0.3.0...v0.3.1) (2026-10-01)
 
 
