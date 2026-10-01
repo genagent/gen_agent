@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.2.1...gen_agent_openai-v0.2.2) (2026-10-01)
+
+
+### Bug Fixes
+
+* allow adapters to use gen_agent 0.4 ([#81](https://github.com/genagent/gen_agent/issues/81)) ([b78fada](https://github.com/genagent/gen_agent/commit/b78fadacf1221c8270239470637d8d88802f6a8d))
+
 ## [0.2.1](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.2.0...gen_agent_openai-v0.2.1) (2026-10-01)
 
 
