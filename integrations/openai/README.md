@@ -138,6 +138,10 @@ every turn after the first.
   When set, requests a specific reasoning effort for o1/o3/o4/gpt-5.
 - `:max_output_tokens` -- cap on output tokens per turn. Defaults
   to `nil` (model default).
+- `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
+  to `60_000`. The 60-second default can be short for long reasoning turns.
+- `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults
+  to `nil` (Req's default).
 - `:http_fn` -- a 1-arity function
   `(request_map) -> {:ok, response_map} | {:error, term}`
   that replaces the default `Req`-backed HTTP call. Intended for
