@@ -8,6 +8,8 @@ defmodule GenAgentEnsemble.Server do
     :strategy_mod,
     :strategy_state,
     :session_name,
+    :session_started_at,
+    :halted,
     :agent_tree,
     :task_supervisor,
     :agent_supervisor,
@@ -17,10 +19,14 @@ defmodule GenAgentEnsemble.Server do
     :monitors,
     # tokens awaiting reply, %{token => {:tell, nil} | {:ask, from}}
     :pending,
+    # %{token => %{started_at: integer, kind: :ask | :tell, dispatches: integer}}
+    :token_contexts,
     # completed tell results, %{token => {:ok, response} | {:error, reason}}
     :completed,
-    # refs we've dispatched, %{gen_agent_ref => {agent_name, run_token}}
-    :in_flight
+    # %{gen_agent_ref => {agent_name, run_token}}
+    :in_flight,
+    # %{gen_agent_ref => {started_at, ordinal}}
+    :dispatch_contexts
   ]
 
   # --- public API (called via GenAgentEnsemble shim) ---
@@ -74,18 +80,24 @@ defmodule GenAgentEnsemble.Server do
         strategy_mod: strategy_mod,
         strategy_state: strategy_state,
         session_name: session_name,
+        session_started_at: nil,
+        halted: false,
         agent_tree: agent_tree,
         task_supervisor: task_supervisor,
         agent_supervisor: agent_supervisor,
         agents: MapSet.new(),
         monitors: %{},
         pending: %{},
+        token_contexts: %{},
         completed: %{},
-        in_flight: %{}
+        in_flight: %{},
+        dispatch_contexts: %{}
       }
 
       case apply_start_specs(state, start_specs) do
         {:ok, state} ->
+          state = %{state | session_started_at: System.monotonic_time()}
+          emit(:session, :start, %{system_time: System.system_time()}, session_meta(state))
           {:ok, state}
 
         {:error, reason} ->
@@ -109,7 +121,7 @@ defmodule GenAgentEnsemble.Server do
   @impl true
   def handle_call({:tell, prompt, opts}, _from, state) do
     token = mint_token()
-    state = put_in(state.pending[token], {:tell, nil})
+    state = start_token(state, token, :tell, {:tell, nil})
 
     {ops, strategy_state} =
       call_strategy(state.strategy_mod, :handle_tell, [prompt, opts, token, state.strategy_state])
@@ -120,7 +132,7 @@ defmodule GenAgentEnsemble.Server do
 
   def handle_call({:ask, prompt, opts}, from, state) do
     token = mint_token()
-    state = put_in(state.pending[token], {:ask, from})
+    state = start_token(state, token, :ask, {:ask, from})
 
     {ops, strategy_state} =
       call_strategy(state.strategy_mod, :handle_ask, [prompt, opts, token, state.strategy_state])
@@ -198,7 +210,9 @@ defmodule GenAgentEnsemble.Server do
         {:noreply, state}
 
       {{bare_agent, token}, rest} ->
-        state = %{state | in_flight: rest}
+        {{started_at, ordinal}, contexts} = Map.pop(state.dispatch_contexts, ref)
+        state = %{state | in_flight: rest, dispatch_contexts: contexts}
+        emit_dispatch(state, :stop, bare_agent, token, ref, started_at, ordinal)
         {:noreply, handle_prompt_response(state, bare_agent, token, response)}
     end
   end
@@ -209,7 +223,13 @@ defmodule GenAgentEnsemble.Server do
         {:noreply, state}
 
       {{bare_agent, token}, rest} ->
-        state = %{state | in_flight: rest}
+        {{started_at, ordinal}, contexts} = Map.pop(state.dispatch_contexts, ref)
+        state = %{state | in_flight: rest, dispatch_contexts: contexts}
+
+        emit_dispatch(state, :error, bare_agent, token, ref, started_at, ordinal,
+          reason_kind: reason_kind(reason)
+        )
+
         {:noreply, handle_prompt_error(state, bare_agent, token, reason)}
     end
   end
@@ -220,11 +240,14 @@ defmodule GenAgentEnsemble.Server do
         {:noreply, state}
 
       {agent, monitors} ->
+        emit_dropped_dispatches(state, agent, :agent_down)
+
         state = %{
           state
           | monitors: monitors,
             agents: MapSet.delete(state.agents, agent),
-            in_flight: drop_in_flight_for(state.in_flight, agent)
+            in_flight: drop_in_flight_for(state.in_flight, agent),
+            dispatch_contexts: drop_dispatch_contexts_for(state, agent)
         }
 
         state =
@@ -246,6 +269,17 @@ defmodule GenAgentEnsemble.Server do
   end
 
   def handle_info({:halt_session, reason}, state) do
+    state = %{state | halted: true}
+
+    emit(
+      :session,
+      :halt,
+      %{duration_ms: elapsed_ms(state.session_started_at)},
+      session_meta(state)
+      |> Map.put(:outcome, :halted)
+      |> Map.put(:reason_kind, :strategy_halt)
+    )
+
     # Close any still-pending tokens with the halt reason so callers unblock.
     pending_tokens = Map.keys(state.pending)
 
@@ -302,7 +336,19 @@ defmodule GenAgentEnsemble.Server do
   end
 
   @impl true
-  def terminate(_reason, state) do
+  def terminate(reason, state) do
+    emit_unfinished_work(state)
+    outcome = if state.halted, do: :halted, else: if(reason == :normal, do: :ok, else: :error)
+
+    emit(
+      :session,
+      :stop,
+      %{duration_ms: elapsed_ms(state.session_started_at)},
+      session_meta(state)
+      |> Map.put(:outcome, outcome)
+      |> Map.put(:reason_kind, reason_kind(reason))
+    )
+
     _ = catch_exit(fn -> Supervisor.stop(state.agent_tree) end)
     :ok
   end
@@ -394,6 +440,7 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp apply_op({:stop, name}, state) do
+    emit_dropped_dispatches(state, name, :agent_stopped)
     _ = catch_exit(fn -> GenAgent.stop(namespaced(state, name), state.agent_supervisor) end)
     monitors = drop_monitors_for(state.monitors, name)
 
@@ -402,7 +449,8 @@ defmodule GenAgentEnsemble.Server do
        state
        | agents: MapSet.delete(state.agents, name),
          monitors: monitors,
-         in_flight: drop_in_flight_for(state.in_flight, name)
+         in_flight: drop_in_flight_for(state.in_flight, name),
+         dispatch_contexts: drop_dispatch_contexts_for(state, name)
      }}
   end
 
@@ -438,9 +486,27 @@ defmodule GenAgentEnsemble.Server do
   defp dispatch(state, name, prompt, token) do
     case GenAgent.tell_with_completion(namespaced(state, name), prompt, self()) do
       {:ok, ref} ->
-        {:ok, %{state | in_flight: Map.put(state.in_flight, ref, {name, token})}}
+        {ordinal, state} = next_dispatch(state, token)
+        started_at = System.monotonic_time()
+        emit_dispatch(state, :start, name, token, ref, started_at, ordinal)
+
+        {:ok,
+         %{
+           state
+           | in_flight: Map.put(state.in_flight, ref, {name, token}),
+             dispatch_contexts: Map.put(state.dispatch_contexts, ref, {started_at, ordinal})
+         }}
 
       {:error, reason} ->
+        emit(
+          :dispatch,
+          :rejected,
+          %{},
+          dispatch_meta(state, name, token, nil, nil)
+          |> Map.put(:outcome, :rejected)
+          |> Map.put(:reason_kind, reason_kind(reason))
+        )
+
         {:error, reason}
     end
   end
@@ -451,10 +517,12 @@ defmodule GenAgentEnsemble.Server do
         {:error, {:unknown_token, token}}
 
       {{:ask, from}, pending} ->
+        state = finish_token(state, token, result)
         GenServer.reply(from, result)
         {:ok, %{state | pending: pending}}
 
       {{:tell, _}, pending} ->
+        state = finish_token(state, token, result)
         completed = Map.put(state.completed, token, result)
         {:ok, %{state | pending: pending, completed: completed}}
     end
@@ -469,6 +537,134 @@ defmodule GenAgentEnsemble.Server do
   defp drop_in_flight_for(in_flight, agent_name) do
     Map.reject(in_flight, fn {_ref, {name, _token}} -> name == agent_name end)
   end
+
+  defp drop_dispatch_contexts_for(state, agent_name) do
+    Enum.reduce(state.in_flight, state.dispatch_contexts, fn {ref, {name, _token}}, acc ->
+      if name == agent_name, do: Map.delete(acc, ref), else: acc
+    end)
+  end
+
+  defp emit_dropped_dispatches(state, agent, reason_kind) do
+    Enum.each(state.in_flight, fn {ref, {name, token}} ->
+      if name == agent do
+        {started_at, ordinal} = Map.fetch!(state.dispatch_contexts, ref)
+
+        emit_dispatch(state, :error, name, token, ref, started_at, ordinal,
+          reason_kind: reason_kind
+        )
+      end
+    end)
+  end
+
+  defp emit_unfinished_work(state) do
+    Enum.each(state.in_flight, fn {ref, {agent, token}} ->
+      {started_at, ordinal} = Map.fetch!(state.dispatch_contexts, ref)
+
+      emit_dispatch(state, :error, agent, token, ref, started_at, ordinal,
+        reason_kind: :session_stopped
+      )
+    end)
+
+    Enum.each(state.token_contexts, fn {token, context} ->
+      emit(
+        :token,
+        :error,
+        %{duration_ms: elapsed_ms(context.started_at)},
+        token_meta(state, token)
+        |> Map.put(:outcome, :error)
+        |> Map.put(:reason_kind, :session_stopped)
+      )
+    end)
+  end
+
+  defp start_token(state, token, kind, pending) do
+    started_at = System.monotonic_time()
+    context = %{started_at: started_at, kind: kind, dispatches: 0}
+
+    state = %{
+      state
+      | pending: Map.put(state.pending, token, pending),
+        token_contexts: Map.put(state.token_contexts, token, context)
+    }
+
+    emit(:token, :start, %{system_time: System.system_time()}, token_meta(state, token))
+    state
+  end
+
+  defp finish_token(state, token, result) do
+    context = Map.fetch!(state.token_contexts, token)
+    event = if match?({:ok, _}, result), do: :stop, else: :error
+
+    metadata =
+      Map.put(token_meta(state, token), :outcome, if(event == :stop, do: :ok, else: :error))
+
+    metadata =
+      case result do
+        {:error, reason} -> Map.put(metadata, :reason_kind, reason_kind(reason))
+        _ -> metadata
+      end
+
+    emit(:token, event, %{duration_ms: elapsed_ms(context.started_at)}, metadata)
+    %{state | token_contexts: Map.delete(state.token_contexts, token)}
+  end
+
+  defp next_dispatch(state, nil), do: {nil, state}
+
+  defp next_dispatch(state, token) do
+    context = Map.fetch!(state.token_contexts, token)
+    ordinal = context.dispatches
+    context = %{context | dispatches: ordinal + 1}
+    {ordinal, %{state | token_contexts: Map.put(state.token_contexts, token, context)}}
+  end
+
+  defp emit_dispatch(state, event, agent, token, ref, started_at, ordinal, extra \\ []) do
+    measurements =
+      if event == :start,
+        do: %{system_time: System.system_time()},
+        else: %{duration_ms: elapsed_ms(started_at)}
+
+    emit(
+      :dispatch,
+      event,
+      measurements,
+      dispatch_meta(state, agent, token, ref, ordinal)
+      |> Map.merge(Map.new(extra))
+      |> Map.put(:outcome, dispatch_outcome(event))
+    )
+  end
+
+  defp dispatch_outcome(:start), do: :pending
+  defp dispatch_outcome(:stop), do: :ok
+  defp dispatch_outcome(:error), do: :error
+
+  defp session_meta(state),
+    do: %{session: state.session_name, strategy: state.strategy_mod}
+
+  defp token_meta(state, token) do
+    context = Map.fetch!(state.token_contexts, token)
+    Map.merge(session_meta(state), %{token: token, kind: context.kind})
+  end
+
+  defp dispatch_meta(state, agent, token, ref, ordinal) do
+    Map.merge(session_meta(state), %{token: token, agent: agent, ref: ref, ordinal: ordinal})
+  end
+
+  defp emit(scope, event, measurements, metadata),
+    do: :telemetry.execute([:gen_agent_ensemble, scope, event], measurements, metadata)
+
+  defp elapsed_ms(started_at),
+    do: System.convert_time_unit(System.monotonic_time() - started_at, :native, :millisecond)
+
+  defp reason_kind(:normal), do: :normal
+  defp reason_kind(:timeout), do: :timeout
+  defp reason_kind(:interrupted), do: :interrupted
+  defp reason_kind({:overloaded, _}), do: :overloaded
+  defp reason_kind({:halted, _}), do: :halted
+  defp reason_kind({:dispatch_rejected, _, _}), do: :dispatch_rejected
+  defp reason_kind({:worker_down, _, _}), do: :worker_down
+  defp reason_kind({:unknown_agent, _}), do: :unknown_agent
+  defp reason_kind(:no_agent_specified), do: :no_agent_specified
+  defp reason_kind(_reason), do: :backend_or_strategy_error
 
   # --- helpers ---
 

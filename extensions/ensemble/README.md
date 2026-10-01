@@ -210,6 +210,15 @@ For real projects you'll typically write your own callback module
 with richer state and prompt-engineered behaviour -- Simple is the
 shortest path to "working ensemble in 10 lines of config."
 
+## Telemetry
+
+Ensemble emits observational session, token, and dispatch events. A
+dispatch's agent name and ordinal identify Pipeline stages and Supervisor
+branches; its turn reference links to core GenAgent telemetry. Events do
+not include prompts or responses. See `GenAgentEnsemble.Telemetry` for the
+event contract and cardinality guidance. Completion delivery does not rely
+on telemetry handlers.
+
 ## Development
 
 From `extensions/ensemble` in the GenAgent checkout:
