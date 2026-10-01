@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/genagent/gen_agent/compare/v0.3.0...v0.3.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* **ensemble:** publish GenAgent 0.3 compatibility ([#51](https://github.com/genagent/gen_agent/issues/51)) ([89b7a23](https://github.com/genagent/gen_agent/commit/89b7a233fad9ce658bb5493ccd3595d38d86dfdc))
+
 ## [0.3.0](https://github.com/genagent/gen_agent/compare/v0.2.2...v0.3.0) (2026-10-01)
 
 
