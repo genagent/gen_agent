@@ -1,0 +1,235 @@
+# gen_agent_ensemble
+
+[![CI](https://github.com/genagent/gen_agent/actions/workflows/ci.yml/badge.svg)](https://github.com/genagent/gen_agent/actions/workflows/ci.yml)
+[![Hex.pm](https://img.shields.io/hexpm/v/gen_agent_ensemble.svg)](https://hex.pm/packages/gen_agent_ensemble)
+[![Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/gen_agent_ensemble)
+
+Multi-agent orchestration strategies for
+[GenAgent](https://hex.pm/packages/gen_agent). Where `GenAgent`
+gives you one process per LLM session, `gen_agent_ensemble` gives
+you one process per *logical* session that owns N sub-agents under
+a strategy. Single-agent is the degenerate `Solo` case.
+
+This library is both:
+
+- **A library** consumed by applications (MCP servers, LiveView
+  apps, scripts) that need multi-agent orchestration.
+- **A platform** for Elixir power users. Declare ensembles in
+  `config/config.exs`, run `iex -S mix`, and your ensembles are
+  live as named processes you can drive directly.
+
+## Strategies (shipped)
+
+| Strategy      | Topology                                 | Module                                      |
+|---------------|------------------------------------------|---------------------------------------------|
+| Solo          | One agent, passthrough                   | `GenAgentEnsemble.Strategies.Solo`          |
+| Switchboard   | Named fleet, caller-routed               | `GenAgentEnsemble.Strategies.Switchboard`   |
+| Pool          | N reusable workers, FIFO queue           | `GenAgentEnsemble.Strategies.Pool`          |
+| Pipeline      | Linear stage chain                       | `GenAgentEnsemble.Strategies.Pipeline`      |
+| Supervisor    | Coordinator + dynamic worker fan-out     | `GenAgentEnsemble.Strategies.Supervisor`    |
+| Debate        | Two agents alternate until convergence   | `GenAgentEnsemble.Strategies.Debate`        |
+| Consensus     | N peer agents vote with structured verdict | `GenAgentEnsemble.Strategies.Consensus`  |
+
+See the [strategy workflow guides](guides/workflows/overview.md)
+for the shape of each strategy, canonical iex workflows, and
+per-strategy gotchas.
+
+## Install
+
+```elixir
+def deps do
+  [
+    {:gen_agent_ensemble, "~> 0.1"},
+    # Plus at least one backend:
+    {:gen_agent_anthropic, "~> 0.2"},
+    # and/or:
+    {:gen_agent_claude, "~> 0.1"},
+    {:gen_agent_openai, "~> 0.1"},
+    {:gen_agent_codex, "~> 0.1"}
+  ]
+end
+```
+
+## Quickstart (zero-setup demo)
+
+A fresh clone ships with one ensemble pre-enabled: `"echo"`. It
+uses `GenAgentEnsemble.Backends.Echo` -- no API keys, no external
+services, every prompt echoed back with an `"echo: "` prefix.
+Every other ensemble in `config/config.exs` is commented out as
+a template you can enable after wiring up real credentials.
+
+Start iex. The repo ships a `.iex.exs` that aliases
+`GenAgentEnsemble.IEx` to `E` -- a module that delegates the core
+API (`list/0`, `ask/2`, `tell/2`, ...) and adds REPL-flavoured
+helpers on top:
+
+```sh
+iex -S mix
+```
+
+```elixir
+iex> E.list()
+["echo"]
+iex> E.ask!("echo", "hello there")
+"echo: hello there"
+```
+
+Once that feels right, uncomment one of the commented templates
+in `config/config.exs` (Solo, Pool, Switchboard, Pipeline,
+Supervisor, Debate, or Consensus), set the appropriate env var
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`), and restart iex.
+
+## Real backend example
+
+```elixir
+config :gen_agent_ensemble,
+  ensembles: [
+    [
+      name: "solo",
+      strategy: GenAgentEnsemble.Strategies.Solo,
+      opts: [
+        agent:
+          {"w", GenAgentEnsemble.Agents.Simple,
+           backend: GenAgent.Backends.Anthropic,
+           system: "You are a pragmatic Elixir reviewer.",
+           model: "claude-sonnet-4-6"}
+      ]
+    ]
+  ]
+```
+
+Programmatic use:
+
+```elixir
+iex> E.ask!("solo", "What's wrong with `Enum.map(list, &(&1 + 1))`?") |> IO.puts()
+# Nothing is wrong with it -- valid idiomatic Elixir...
+```
+
+Async fan-out with a Pool (declare it in config too):
+
+```elixir
+iex> {:ok, t1} = E.tell("qa-pool", "question one")
+iex> {:ok, t2} = E.tell("qa-pool", "question two")
+iex> E.status("qa-pool")
+iex> E.drain("qa-pool")   # [{token, text}, ...]
+```
+
+See the [Pool workflow guide](guides/workflows/pool.md) for the
+config shape and the fan-out-vs-serial gotcha.
+
+See the [strategy workflow guides](guides/workflows/overview.md)
+for the canonical command sequences for every strategy (Solo,
+Switchboard, Pool, Pipeline, Supervisor, Debate, Consensus),
+including per-strategy gotchas and variations.
+
+## Public API
+
+All functions are addressed by session name (the `:name` you put
+in config). Shown here with the `E` alias (`GenAgentEnsemble.IEx`)
+set up by the repo's `.iex.exs`.
+
+### Core
+
+| Function                   | Purpose                                            |
+|----------------------------|----------------------------------------------------|
+| `E.ask(name, prompt)`      | Synchronous single-turn. Blocks until reply.       |
+| `E.tell(name, prompt)`     | Async. Returns a `token` you poll or drain later.  |
+| `E.poll(name, token)`      | Non-blocking check on a single token.              |
+| `E.inbox(name)`            | Drain all completed tokens since last call.        |
+| `E.notify(name, event)`    | Send an event to the strategy (cast).              |
+| `E.status(name)`           | Inspect strategy phase, queue depth, etc.          |
+| `E.stop(name)`             | Stop an ensemble cleanly.                          |
+| `E.list()`                 | Names of all running ensembles.                    |
+| `E.start_link(opts)`       | Start an ad-hoc ensemble imperatively (same shape  |
+|                            | as a config entry).                                |
+
+### Helpers (iex-flavoured sugar)
+
+| Function                   | Purpose                                            |
+|----------------------------|----------------------------------------------------|
+| `E.ask!(name, prompt)`     | Like `ask/2` but returns the response text string. |
+| `E.text(resp)`             | Extract `.text` from `%Response{}` or `{:ok, r}`.  |
+| `E.puts(resp)`             | Print response text (markdown-friendly).           |
+| `E.await(name, token)`     | Block on a `tell` token, return the `%Response{}`. |
+| `E.drain(name)`            | `inbox` unwrapped to `[{token, text}, ...]`.       |
+
+For library code (not iex), call `GenAgentEnsemble` directly -- the
+`IEx` module is a humans-at-the-prompt convenience.
+
+## Ad-hoc ensembles from iex
+
+You don't have to use config. Any ensemble can be started
+imperatively with the same opts shape:
+
+```elixir
+iex> E.start_link(
+...>   name: "scratch",
+...>   strategy: GenAgentEnsemble.Strategies.Solo,
+...>   opts: [
+...>     agent: {"w", GenAgentEnsemble.Agents.Simple,
+...>             backend: GenAgentEnsemble.Backends.Echo,
+...>             transform: &String.upcase/1}
+...>   ]
+...> )
+iex> E.ask!("scratch", "hello")
+"HELLO"
+```
+
+This is the natural way to prototype: try a config inline, iterate,
+then promote to `config/config.exs` when you're happy with it.
+
+## Secrets and `config/runtime.exs`
+
+API keys and other secrets don't belong in `config/config.exs`
+(compile-time evaluated, checked into git). Use
+`config/runtime.exs` or environment variables that the backend
+reads directly.
+
+For Anthropic:
+
+```sh
+export ANTHROPIC_API_KEY=...
+iex -S mix
+```
+
+## Built-in `Simple` agent
+
+`GenAgentEnsemble.Agents.Simple` is a reusable one-turn callback
+module. Accepts any backend options (`:system`, `:system_prompt`,
+`:model`, `:cwd`, etc.) and forwards them to the backend. Use it
+for iex experimentation and as the worker for simple ensembles.
+
+For real projects you'll typically write your own callback module
+with richer state and prompt-engineered behaviour -- Simple is the
+shortest path to "working ensemble in 10 lines of config."
+
+## Development
+
+From `extensions/ensemble` in the GenAgent checkout:
+
+```sh
+mix deps.get
+mix test
+```
+
+Local development uses path dependencies on core and the four adapters.
+Set `GEN_AGENT_HEX=1` when building or publishing a standalone Hex archive;
+the package then declares ordinary Hex requirements instead.
+
+Full pre-commit checklist (matches CI):
+
+```sh
+mix format --check-formatted
+mix compile --warnings-as-errors
+mix credo --strict
+mix dialyzer
+mix test
+```
+
+## Status
+
+Pre-1.0. The strategy op vocabulary
+(`:start | :stop | :dispatch | :reply | :reply_error | :forward | :halt`)
+and public API are stable and unlikely to change further before 1.0.
+Breaking changes bump the minor version; see `CHANGELOG.md` for
+what's changed.

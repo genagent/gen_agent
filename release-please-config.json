@@ -1,9 +1,42 @@
 {
+  "separate-pull-requests": true,
   "packages": {
     ".": {
       "release-type": "elixir",
       "bump-minor-pre-major": true,
+      "include-component-in-tag": false,
+      "exclude-paths": ["integrations/**", "extensions/**"],
       "extra-files": ["README.md", "lib/gen_agent.ex"]
+    },
+    "integrations/claude": {
+      "release-type": "elixir",
+      "component": "gen_agent_claude",
+      "bump-minor-pre-major": true,
+      "include-component-in-tag": true
+    },
+    "integrations/codex": {
+      "release-type": "elixir",
+      "component": "gen_agent_codex",
+      "bump-minor-pre-major": true,
+      "include-component-in-tag": true
+    },
+    "integrations/anthropic": {
+      "release-type": "elixir",
+      "component": "gen_agent_anthropic",
+      "bump-minor-pre-major": true,
+      "include-component-in-tag": true
+    },
+    "integrations/openai": {
+      "release-type": "elixir",
+      "component": "gen_agent_openai",
+      "bump-minor-pre-major": true,
+      "include-component-in-tag": true
+    },
+    "extensions/ensemble": {
+      "release-type": "elixir",
+      "component": "gen_agent_ensemble",
+      "bump-minor-pre-major": true,
+      "include-component-in-tag": true
     }
   }
 }
