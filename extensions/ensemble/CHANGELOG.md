@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.2.0...gen_agent_ensemble-v0.2.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* accept gen_agent 0.5 in component packages ([#167](https://github.com/genagent/gen_agent/issues/167)) ([43272dd](https://github.com/genagent/gen_agent/commit/43272dd2a699927d8d1bdc42390e795f853b6c84))
+
 ## [0.2.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.1.4...gen_agent_ensemble-v0.2.0) (2026-10-01)
 
 
