@@ -43,6 +43,11 @@ starting the packaged strategy before the older callback recipe.
 These pages show shapes within one agent process. Read and adapt the
 callback module rather than expecting an installable strategy:
 
+When adapting a callback example, make the options returned by
+`init_agent/1` match the selected backend. Examples that return `:system`
+or `:max_tokens` need different options for the Codex backend; see its
+[backend options](../../integrations/codex/README.md#backend-options).
+
 | Pattern | Use |
 | --- | --- |
 | [Research](research.md) | Self-chain through phases with `{:prompt, ..., state}`. |
