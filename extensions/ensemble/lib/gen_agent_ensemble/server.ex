@@ -309,16 +309,57 @@ defmodule GenAgentEnsemble.Server do
 
   # --- op execution ---
 
-  defp apply_ops(state, ops), do: Enum.reduce(ops, state, &apply_op_safe/2)
+  defp apply_ops(state, ops) do
+    Enum.reduce_while(ops, state, &apply_op_safe/2)
+  end
 
   defp apply_op_safe(op, state) do
     case apply_op(op, state) do
-      {:ok, state2} ->
-        state2
+      {:ok, next} ->
+        {:cont, next}
+
+      # A previous op may have already closed this run (for example, a
+      # rejected member of a Consensus fanout).
+      {:error, {:unknown_token, _}} when tuple_size(op) == 4 and elem(op, 0) == :dispatch ->
+        {:cont, state}
 
       {:error, reason} ->
         Logger.warning("[gen_agent_ensemble] op #{inspect(op)} failed: #{inspect(reason)}")
+        handle_op_failure(op, reason, state)
+    end
+  end
+
+  # Stop the rest of this op batch after a rejected scoped dispatch. In
+  # particular, a Supervisor fanout may contain starts after it.
+  defp handle_op_failure({:dispatch, agent, _prompt, token}, reason, state) do
+    {:halt, reject_dispatch(state, agent, token, reason)}
+  end
+
+  defp handle_op_failure(_op, _reason, state), do: {:cont, state}
+
+  defp reject_dispatch(state, agent, token, reason) do
+    state =
+      if function_exported?(state.strategy_mod, :handle_dispatch_rejected, 4) do
+        {ops, strategy_state} =
+          call_strategy(state.strategy_mod, :handle_dispatch_rejected, [
+            agent,
+            token,
+            reason,
+            state.strategy_state
+          ])
+
+        %{state | strategy_state: strategy_state} |> apply_ops(ops)
+      else
         state
+      end
+
+    # External strategies without the callback still get a terminal result.
+    # reply_to_token is conditional, so a strategy's own reply wins.
+    if Map.has_key?(state.pending, token) do
+      {:ok, state} = reply_to_token(state, token, {:error, {:dispatch_rejected, agent, reason}})
+      state
+    else
+      state
     end
   end
 

@@ -196,6 +196,14 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   end
 
   @impl true
+  def handle_dispatch_rejected(agent, token, reason, state) do
+    case state.phase do
+      {:running, ^token, _, _, _} -> handle_error(agent, reason, state)
+      _ -> {:ok, [{:reply_error, token, reason}], state}
+    end
+  end
+
+  @impl true
   def handle_agent_down(_agent, reason, state) do
     {:ok, [{:halt, {:agent_down, reason}}], state}
   end

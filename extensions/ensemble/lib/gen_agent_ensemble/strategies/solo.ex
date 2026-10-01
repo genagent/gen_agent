@@ -64,6 +64,12 @@ defmodule GenAgentEnsemble.Strategies.Solo do
   end
 
   @impl true
+  def handle_dispatch_rejected(_agent, token, reason, state) do
+    tokens = state.tokens |> :queue.to_list() |> Enum.reject(&(&1 == token)) |> :queue.from_list()
+    {:ok, [{:reply_error, token, reason}], %{state | tokens: tokens}}
+  end
+
+  @impl true
   def handle_notify(event, state) do
     {:ok, [{:forward, state.agent, event}], state}
   end

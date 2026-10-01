@@ -103,6 +103,17 @@ defmodule GenAgentEnsemble.Strategies.Pool do
   end
 
   @impl true
+  def handle_dispatch_rejected(worker, token, reason, state) do
+    if Map.get(state.busy, worker) == token do
+      state = %{state | busy: Map.delete(state.busy, worker)}
+      {ops, state} = maybe_dispatch_next(state, worker, [{:reply_error, token, reason}])
+      {:ok, ops, state}
+    else
+      {:ok, [{:reply_error, token, reason}], state}
+    end
+  end
+
+  @impl true
   def handle_agent_down(worker, reason, state) do
     if MapSet.member?(state.workers, worker) do
       workers = MapSet.delete(state.workers, worker)
