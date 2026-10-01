@@ -1,8 +1,7 @@
 defmodule GenAgentAnthropicTest do
-  use ExUnit.Case
-  doctest GenAgentAnthropic
+  use ExUnit.Case, async: true
 
-  test "greets the world" do
-    assert GenAgentAnthropic.hello() == :world
+  test "module is defined" do
+    assert Code.ensure_loaded?(GenAgentAnthropic)
   end
 end
