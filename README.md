@@ -94,7 +94,16 @@ IO.puts(response.text)
 
 # Async prompt.
 {:ok, ref} = GenAgent.tell("my-coder", "Add tests for lib/foo.ex")
-{:ok, :completed, response} = GenAgent.poll("my-coder", ref)
+GenAgent.poll("my-coder", ref)
+#=> {:ok, :pending} while the turn runs, then {:ok, :completed, response}
+
+# Or have the outcome sent to you as a message.
+{:ok, ref} = GenAgent.tell_with_completion("my-coder", "Run the tests")
+
+receive do
+  {:gen_agent, :completion, "my-coder", ^ref, {:ok, response}} -> IO.puts(response.text)
+  {:gen_agent, :completion, "my-coder", ^ref, {:error, reason}} -> IO.inspect(reason)
+end
 
 # Push an external event into handle_event/2.
 GenAgent.notify("my-coder", {:ci_failed, "test_auth"})
