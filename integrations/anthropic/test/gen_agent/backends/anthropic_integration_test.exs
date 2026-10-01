@@ -36,9 +36,9 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
       "id" => Keyword.get(opts, :id, "msg_01"),
       "type" => "message",
       "role" => "assistant",
-      "content" => [%{"type" => "text", "text" => text}],
+      "content" => Keyword.get(opts, :content, [%{"type" => "text", "text" => text}]),
       "model" => "claude-sonnet-4-5",
-      "stop_reason" => "end_turn",
+      "stop_reason" => Keyword.get(opts, :stop_reason, "end_turn"),
       "usage" => %{
         "input_tokens" => Keyword.get(opts, :input_tokens, 10),
         "output_tokens" => Keyword.get(opts, :output_tokens, 5)
@@ -148,12 +148,99 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
       assert r1.session_id == r2.session_id
     end
 
+    for {scenario, response_opts} <- [
+          {"empty end_turn", [content: []]},
+          {"empty refusal", [content: [], stop_reason: "refusal"]},
+          {"thinking-only max_tokens",
+           [
+             content: [%{"type" => "thinking", "thinking" => "hmm", "signature" => "sig"}],
+             stop_reason: "max_tokens"
+           ]}
+        ] do
+      test "drops the unanswered turn after #{scenario}" do
+        test_pid = self()
+        ref = make_ref()
+        empty_response = api_response("", unquote(Macro.escape(response_opts)))
+
+        http_fn = fn req ->
+          messages = req.body.messages
+          send(test_pid, {ref, messages})
+
+          case List.last(messages).content do
+            "first" -> {:ok, api_response("first reply")}
+            "unanswered" -> {:ok, empty_response}
+            "next" -> {:ok, api_response("next reply")}
+          end
+        end
+
+        name = start_anthropic_agent(http_fn)
+
+        assert {:ok, %{text: "first reply"}} = GenAgent.ask(name, "first")
+        assert {:ok, %{text: ""}} = GenAgent.ask(name, "unanswered")
+        assert {:ok, %{text: "next reply"}} = GenAgent.ask(name, "next")
+
+        assert_receive {^ref, [%{role: "user", content: "first"}]}
+
+        assert_receive {^ref,
+                        [
+                          %{role: "user", content: "first"},
+                          %{role: "assistant", content: "first reply"},
+                          %{role: "user", content: "unanswered"}
+                        ]}
+
+        assert_receive {^ref,
+                        [
+                          %{role: "user", content: "first"},
+                          %{role: "assistant", content: "first reply"},
+                          %{role: "user", content: "next"}
+                        ]}
+      end
+    end
+
     test "propagates HTTP errors" do
       http_fn = fn _req -> {:error, {:http_error, 401, %{"error" => "invalid api key"}}} end
 
       name = start_anthropic_agent(http_fn)
 
       assert {:error, {:http_error, 401, _}} = GenAgent.ask(name, "hi")
+    end
+
+    test "a transport error keeps the previous completed history" do
+      test_pid = self()
+      ref = make_ref()
+
+      http_fn = fn req ->
+        messages = req.body.messages
+        send(test_pid, {ref, messages})
+
+        case List.last(messages).content do
+          "first" -> {:ok, api_response("first reply")}
+          "failed" -> {:error, :transport_failure}
+          "next" -> {:ok, api_response("next reply")}
+        end
+      end
+
+      name = start_anthropic_agent(http_fn)
+
+      assert {:ok, %{text: "first reply"}} = GenAgent.ask(name, "first")
+      assert {:error, :transport_failure} = GenAgent.ask(name, "failed")
+      assert {:ok, %{text: "next reply"}} = GenAgent.ask(name, "next")
+
+      assert_receive {^ref, [%{role: "user", content: "first"}]}
+
+      assert_receive {^ref,
+                      [
+                        %{role: "user", content: "first"},
+                        %{role: "assistant", content: "first reply"},
+                        %{role: "user", content: "failed"}
+                      ]}
+
+      assert_receive {^ref,
+                      [
+                        %{role: "user", content: "first"},
+                        %{role: "assistant", content: "first reply"},
+                        %{role: "user", content: "next"}
+                      ]}
     end
   end
 end

@@ -24,8 +24,9 @@ defmodule GenAgent.Backends.Anthropic do
   2. When the state machine delivers the terminal `:result` event,
      it calls `update_session/2` with the event's data, and this
      backend appends the assistant's message to `session.messages`.
-  3. The next `prompt/2` sees both messages in the session and sends
-     the full history to the API.
+     If the response is empty or refused, it removes the unanswered
+     user message instead.
+  3. The next `prompt/2` sends the updated history to the API.
 
   This uses both sides of the `GenAgent.Backend` contract in a way
   the CLI backends don't: CLI backends leave `prompt/2`'s returned
@@ -122,9 +123,17 @@ defmodule GenAgent.Backends.Anthropic do
   end
 
   @impl GenAgent.Backend
+  def update_session(%__MODULE__{} = session, %{stop_reason: "refusal"}) do
+    drop_last_user_message(session)
+  end
+
   def update_session(%__MODULE__{} = session, %{text: text})
       when is_binary(text) and text != "" do
     append_message(session, "assistant", text)
+  end
+
+  def update_session(%__MODULE__{} = session, %{text: ""}) do
+    drop_last_user_message(session)
   end
 
   def update_session(%__MODULE__{} = session, _data), do: session
@@ -138,6 +147,13 @@ defmodule GenAgent.Backends.Anthropic do
 
   defp append_message(%__MODULE__{messages: messages} = session, role, content) do
     %{session | messages: messages ++ [%{role: role, content: content}]}
+  end
+
+  defp drop_last_user_message(%__MODULE__{messages: messages} = session) do
+    case Enum.reverse(messages) do
+      [%{role: "user"} | rest] -> %{session | messages: Enum.reverse(rest)}
+      _ -> session
+    end
   end
 
   defp build_request(%__MODULE__{} = session) do
