@@ -1,9 +1,37 @@
 # Debate
 
-Two agents with opposing roles pushing each other forward via
-cross-agent `notify`. No orchestrator, no shared state. Each side
-drives the conversation by reacting to the other until both reach
-a round cap and halt together.
+Two agents take turns until a convergence rule or round cap ends the
+exchange. The shipped Ensemble strategy owns the alternation and
+reply. The callback recipe later on this page instead uses
+cross-agent `notify` and mutual halt without an orchestrator.
+
+## Using it from `gen_agent_ensemble`
+
+`GenAgentEnsemble.Strategies.Debate` accepts exactly two agent specs.
+Each agent keeps its own backend session. The default reply is a
+labeled transcript; `:converge`, `:rounds`, and `:reply` customize the
+stopping and output rules.
+
+```elixir
+simple = GenAgentEnsemble.Agents.Simple
+echo = GenAgentEnsemble.Backends.Echo
+
+{:ok, _pid} =
+  GenAgentEnsemble.start_link(
+    name: "design-debate",
+    strategy: GenAgentEnsemble.Strategies.Debate,
+    opts: [
+      agents: [{"for", simple, backend: echo}, {"against", simple, backend: echo}],
+      rounds: 4
+    ]
+  )
+
+{:ok, transcript} = GenAgentEnsemble.ask("design-debate", "Should this API be synchronous?")
+```
+
+The rest of this page is a separate callback-level reference
+implementation. Read the shipped strategy's module documentation for
+its exact options and failure behavior.
 
 ## When to reach for this
 
@@ -19,7 +47,7 @@ supports. Once you've seen it you'll recognize the shape in
 richer fan-out topologies later (the [Supervisor](supervisor.md)
 pattern is this idea generalized to N workers plus a coordinator).
 
-## What it exercises in gen_agent
+## What the callback recipe exercises
 
 - **Cross-agent `GenAgent.notify/2`** from inside
   `handle_response/3` -- the "I just finished my turn, now it's
@@ -34,7 +62,7 @@ pattern is this idea generalized to N workers plus a coordinator).
   potentially on different backends, each with their own system
   prompt.
 
-## The pattern
+## Callback reference implementation
 
 One callback module (used for both sides), plus a small starter
 function that spins up the two agents with opposing roles and

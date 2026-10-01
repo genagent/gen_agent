@@ -1,9 +1,37 @@
 # Pool
 
-Pre-started worker pool with round-robin task dispatch. Unlike
-[Supervisor](supervisor.md) where workers are spawned per-sub-task
-and halt after one turn, pool workers stay alive across many
-turns.
+Pre-started workers stay alive across many turns. The shipped Ensemble
+strategy dispatches to the next free worker and queues requests FIFO
+when all are busy. The callback recipe later on this page uses
+round-robin assignment instead. Unlike [Supervisor](supervisor.md),
+Pool does not start a new worker for each sub-task.
+
+## Using it from `gen_agent_ensemble`
+
+This pattern ships as `GenAgentEnsemble.Strategies.Pool`. The
+strategy owns the N workers, FIFO queueing, and parallel dispatch;
+you supply a worker agent spec.
+
+```elixir
+{:ok, _pid} =
+  GenAgentEnsemble.start_link(
+    name: "qa-pool",
+    strategy: GenAgentEnsemble.Strategies.Pool,
+    opts: [
+      worker_count: 4,
+      worker_template: {"worker", MyWorker, backend: MyBackend}
+    ]
+  )
+
+{:ok, tok1} = GenAgentEnsemble.tell("qa-pool", "question one")
+{:ok, tok2} = GenAgentEnsemble.tell("qa-pool", "question two")
+# After the workers finish, inbox drains completed results.
+{:ok, inbox} = GenAgentEnsemble.inbox("qa-pool")
+```
+
+The rest of this page is a separate callback-level reference
+implementation. Read the shipped strategy's module documentation for
+its exact options and failure behavior.
 
 ## When to reach for this
 
@@ -21,7 +49,7 @@ instead of halting. Combined with `GenAgent.tell/2`'s natural
 mailbox queueing (a busy worker buffers incoming work), you get
 backpressure for free.
 
-## What it exercises in gen_agent
+## What the callback recipe exercises
 
 - **Worker lifecycle reuse across many turns**: `{:noreply, state}`
   from `handle_response/3` sends the worker back to idle,
@@ -33,7 +61,7 @@ backpressure for free.
 - **Pool-wide quiescence detection**: "all workers are idle and
   their mailboxes are empty" -- a small loop over `status/1`.
 
-## The pattern
+## Callback reference implementation
 
 One worker module (short), one pool dispatcher module (short).
 

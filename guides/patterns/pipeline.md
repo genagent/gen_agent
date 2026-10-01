@@ -1,9 +1,40 @@
 # Pipeline
 
-Linear N-stage transformation chain. Each stage is a distinct
-single-turn agent with its own role, the output of stage N becomes
-the input of stage N+1 via `GenAgent.notify/2`, and the last stage
-halts with the final result on state.
+Linear N-stage transformation chain. The shipped Ensemble strategy
+passes each stage's response text as the next stage's prompt. The
+callback recipe later on this page is an alternative implementation:
+it uses `GenAgent.notify/2` between one-shot agents and stores the
+last output on agent state.
+
+## Using it from `gen_agent_ensemble`
+
+This pattern ships as `GenAgentEnsemble.Strategies.Pipeline`. The
+strategy owns the stage-to-stage dispatch (each stage's response
+becomes the next stage's prompt) and reply at the end; you bring a
+callback module per stage (typically one module used for all stages
+with per-stage opts).
+
+```elixir
+{:ok, _pid} =
+  GenAgentEnsemble.start_link(
+    name: "brainstorm",
+    strategy: GenAgentEnsemble.Strategies.Pipeline,
+    opts: [
+      stages: [
+        {"brainstormer", MyStage, backend: MyBackend, system: "Generate 5 ideas..."},
+        {"editor",       MyStage, backend: MyBackend, system: "Pick the best idea..."},
+        {"headliner",    MyStage, backend: MyBackend, system: "Write a one-line headline..."}
+      ]
+    ]
+  )
+
+{:ok, headline} =
+  GenAgentEnsemble.ask("brainstorm", "topic: coffee in the morning")
+```
+
+The rest of this page is a separate callback-level reference
+implementation. Read the shipped strategy's module documentation for
+its exact options, queueing, and failure behavior.
 
 ## When to reach for this
 
@@ -20,7 +51,7 @@ inside one agent. That matters when each step benefits from a
 different system prompt, different max tokens, or potentially a
 different backend.
 
-## What it exercises in gen_agent
+## What the callback recipe exercises
 
 - **One-way cross-agent notify chain**: each stage notifies the
   next with `{:pipeline_input, text}` and then halts.
@@ -35,7 +66,7 @@ different backend.
   `{:pipeline_failed, reason}` notify down the chain so no
   downstream stage sits waiting forever.
 
-## The pattern
+## Callback reference implementation
 
 One callback module (used for every stage; the role and
 instruction are per-stage config), plus a starter that wires up

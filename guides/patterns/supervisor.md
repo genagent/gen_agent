@@ -1,10 +1,41 @@
 # Supervisor
 
-Coordinator + dynamic worker pool. One coordinator plans sub-tasks
-via its own LLM turn, **spawns N worker agents from inside its own
-`handle_response/3` callback**, notifies each worker with its
-sub-task, collects results as they arrive via notify, and
-self-chains a synthesis turn.
+Coordinator + temporary worker pool. The shipped Ensemble strategy
+dispatches to a coordinator, parses its response into sub-prompts,
+starts one worker per sub-prompt, and combines their replies. The
+callback recipe later on this page takes a
+different path: its coordinator starts workers from
+`handle_response/3`, exchanges notifications, and runs a final LLM
+synthesis turn.
+
+## Using it from `gen_agent_ensemble`
+
+This pattern ships as `GenAgentEnsemble.Strategies.Supervisor`. The
+strategy handles spawning, collection, and reply synthesis. Supply
+coordinator and worker agent specs, plus a `:decomposer` function
+that turns the coordinator's response into sub-prompts. A
+`:synthesizer` function is optional; without one, worker texts are
+joined in worker-name order.
+
+```elixir
+{:ok, _pid} =
+  GenAgentEnsemble.start_link(
+    name: "research-squad",
+    strategy: GenAgentEnsemble.Strategies.Supervisor,
+    opts: [
+      coordinator: {"planner", MyPlanner, backend: MyBackend},
+      worker_template: {"worker", MyWorker, backend: MyBackend},
+      decomposer: &MyPlanner.parse_subtasks/1,
+      synthesizer: &MyPlanner.merge_results/1
+    ]
+  )
+
+{:ok, result} = GenAgentEnsemble.ask("research-squad", "research X")
+```
+
+The rest of this page is a separate callback-level reference
+implementation. Read the shipped strategy's module documentation for
+its exact options and failure behavior.
 
 ## When to reach for this
 
@@ -20,7 +51,7 @@ Everything else composes: the coordinator is a
 turn spawns a pool of one-shot workers, each of whom is
 essentially a single-item [Pipeline](pipeline.md) stage.
 
-## What it exercises in gen_agent
+## What the callback recipe exercises
 
 - **Dynamic `GenAgent.start_agent/2` called from inside a running
   callback.** The coordinator's planning-phase `handle_response`
@@ -38,7 +69,7 @@ essentially a single-item [Pipeline](pipeline.md) stage.
   after its single turn so the coordinator doesn't have to track
   or stop them explicitly.
 
-## The pattern
+## Callback reference implementation
 
 Two callback modules: a `Coordinator` that owns the phase state
 machine and spawns workers, and a `Worker` that is one-shot and
