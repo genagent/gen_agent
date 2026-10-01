@@ -267,12 +267,34 @@ defmodule GenAgent.Backends.AnthropicTest do
       assert session.messages == initial
     end
 
-    test "ignores empty text" do
+    test "removes the unanswered user message for empty text" do
       {:ok, session} = Anthropic.start_session(api_key: "sk-test", http_fn: ok_response("x"))
-      initial = session.messages
+
+      session = %{
+        session
+        | messages: [
+            %{role: "user", content: "first"},
+            %{role: "assistant", content: "reply"},
+            %{role: "user", content: "unanswered"}
+          ]
+      }
 
       session = Anthropic.update_session(session, %{text: ""})
-      assert session.messages == initial
+
+      assert session.messages == [
+               %{role: "user", content: "first"},
+               %{role: "assistant", content: "reply"}
+             ]
+    end
+
+    test "removes a refused turn even when the response contains text" do
+      {:ok, session} = Anthropic.start_session(api_key: "sk-test", http_fn: ok_response("x"))
+      session = %{session | messages: [%{role: "user", content: "refused"}]}
+
+      session =
+        Anthropic.update_session(session, %{text: "I cannot help", stop_reason: "refusal"})
+
+      assert session.messages == []
     end
   end
 
