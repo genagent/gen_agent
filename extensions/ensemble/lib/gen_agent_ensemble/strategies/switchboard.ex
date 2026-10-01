@@ -102,6 +102,13 @@ defmodule GenAgentEnsemble.Strategies.Switchboard do
   end
 
   @impl true
+  def handle_dispatch_rejected(agent, token, reason, state) do
+    queue = Map.fetch!(state.pending, agent)
+    queue = queue |> :queue.to_list() |> Enum.reject(&(&1 == token)) |> :queue.from_list()
+    {:ok, [{:reply_error, token, reason}], put_in(state.pending[agent], queue)}
+  end
+
+  @impl true
   def handle_agent_down(agent, reason, state) do
     if MapSet.member?(state.agents, agent) do
       {tokens, state} = drain_agent_tokens(state, agent)

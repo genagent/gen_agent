@@ -104,6 +104,14 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
   end
 
   @impl true
+  def handle_dispatch_rejected(stage, token, reason, state) do
+    case state.phase do
+      {:in_stage, _idx, ^token} -> handle_error(stage, reason, state)
+      _ -> {:ok, [{:reply_error, token, {stage, reason}}], state}
+    end
+  end
+
+  @impl true
   def handle_agent_down(_stage, reason, state) do
     {:ok, [{:halt, {:stage_down, reason}}], state}
   end

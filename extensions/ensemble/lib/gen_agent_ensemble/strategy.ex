@@ -21,10 +21,12 @@ defmodule GenAgentEnsemble.Strategy do
       module.
     * `{:stop, agent_name}` -- terminate a sub-agent.
     * `{:dispatch, agent_name, prompt, token}` -- send a prompt to an existing
-      sub-agent via `GenAgent.tell/3`. The framework calls `handle_response/3`
+      sub-agent via `GenAgent.tell_with_completion/3`. The framework calls `handle_response/3`
       only while `token` remains pending, so late results from an aborted run
-      cannot enter a later run. The three-element form remains available for
-      existing external strategies but has no run fencing.
+      cannot enter a later run. If dispatch is rejected, the framework calls
+      `handle_dispatch_rejected/4` and closes the token if the callback does not.
+      The three-element form remains available for existing external strategies
+      but has no run fencing or token to fail; rejection is only logged.
     * `{:reply, token, response}` -- complete a pending `tell`/`ask`.
       The caller polling on `token` (or blocked on an `ask`) receives
       the response.
@@ -34,8 +36,12 @@ defmodule GenAgentEnsemble.Strategy do
       the named sub-agent.
     * `{:halt, reason}` -- terminate the session.
 
-  Ops are applied sequentially and are best-effort: if the framework
-  can't apply an op (unknown agent, etc.) it logs and continues.
+  Ops are applied sequentially. A rejected scoped dispatch ends the current
+  op batch after notifying the strategy; other op failures are logged and
+  processing continues. Strategies that record token state before dispatch
+  should implement `handle_dispatch_rejected/4` to remove that token and
+  advance any queued work. The framework guarantees a terminal error for
+  the token even when the callback is absent.
 
   ## Tokens
 
@@ -70,9 +76,16 @@ defmodule GenAgentEnsemble.Strategy do
   @callback handle_ask(prompt, keyword, token, strategy_state) :: result
   @callback handle_response(agent_name, response, strategy_state) :: result
   @callback handle_error(agent_name, term(), strategy_state) :: result
+  @callback handle_dispatch_rejected(agent_name, token, term(), strategy_state) :: result
   @callback handle_notify(term(), strategy_state) :: result
   @callback handle_agent_down(agent_name, term(), strategy_state) :: result
   @callback handle_status(strategy_state) :: map()
 
-  @optional_callbacks [handle_error: 3, handle_agent_down: 3, handle_notify: 2, handle_status: 1]
+  @optional_callbacks [
+    handle_error: 3,
+    handle_dispatch_rejected: 4,
+    handle_agent_down: 3,
+    handle_notify: 2,
+    handle_status: 1
+  ]
 end

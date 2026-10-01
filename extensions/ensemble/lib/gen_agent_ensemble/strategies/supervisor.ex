@@ -186,6 +186,15 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   end
 
   @impl true
+  def handle_dispatch_rejected(agent, token, reason, state) do
+    case state.phase do
+      {:decomposing, ^token} -> handle_error(agent, reason, state)
+      {:fanning_out, ^token, _} -> handle_error(agent, reason, state)
+      _ -> {:ok, [{:reply_error, token, {agent, reason}}], state}
+    end
+  end
+
+  @impl true
   def handle_notify(_event, state), do: {:ok, [], state}
 
   @impl true
