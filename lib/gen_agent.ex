@@ -16,7 +16,7 @@ defmodule GenAgent do
 
       def deps do
         [
-          {:gen_agent, "~> 0.4.0"}, # x-release-please-version
+          {:gen_agent, "~> 0.5.0"}, # x-release-please-version
           # Plus at least one backend:
           {:gen_agent_claude, "~> 0.1.0"},
           {:gen_agent_codex, "~> 0.2.0"},
