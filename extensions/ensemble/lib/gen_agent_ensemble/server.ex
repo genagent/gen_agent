@@ -484,7 +484,15 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp dispatch(state, name, prompt, token) do
-    case GenAgent.tell_with_completion(namespaced(state, name), prompt, self()) do
+    result =
+      try do
+        GenAgent.tell_with_completion(namespaced(state, name), prompt, self())
+      catch
+        :exit, {:noproc, _} -> {:error, {:agent_not_running, name}}
+        :exit, reason -> {:error, {:dispatch_exit, reason}}
+      end
+
+    case result do
       {:ok, ref} ->
         {ordinal, state} = next_dispatch(state, token)
         started_at = System.monotonic_time()
@@ -663,6 +671,8 @@ defmodule GenAgentEnsemble.Server do
   defp reason_kind({:dispatch_rejected, _, _}), do: :dispatch_rejected
   defp reason_kind({:worker_down, _, _}), do: :worker_down
   defp reason_kind({:unknown_agent, _}), do: :unknown_agent
+  defp reason_kind({:agent_not_running, _}), do: :agent_not_running
+  defp reason_kind({:dispatch_exit, _}), do: :dispatch_exit
   defp reason_kind(:no_agent_specified), do: :no_agent_specified
   defp reason_kind(_reason), do: :backend_or_strategy_error
 
