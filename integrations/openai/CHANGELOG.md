@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.2.0...gen_agent_openai-v0.2.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* repoint adapter source links after consolidation ([#55](https://github.com/genagent/gen_agent/issues/55)) ([6b81a75](https://github.com/genagent/gen_agent/commit/6b81a75beb4d9517c13d56a16b23176d86a60c67))
+
 ## [0.2.0](https://github.com/genagent/gen_agent_openai/compare/v0.1.1...v0.2.0) (2026-10-01)
 
 
