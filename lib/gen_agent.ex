@@ -154,6 +154,7 @@ defmodule GenAgent do
     * `notify_ack/3` -- acknowledge in-memory notification admission.
     * `interrupt/1` -- cancel an in-flight turn.
     * `interrupt_request/3` -- acknowledge cancellation for a matching request ref.
+    * `cancel_request/3` -- remove a queued tell by its request ref.
     * `resume/1` -- unhalt an agent and drain its mailbox.
     * `status/2` -- read the agent's current state.
     * `runtime_snapshot/2` -- read bounded runtime metadata.
@@ -588,7 +589,10 @@ defmodule GenAgent do
   The default timeout is `:infinity`. The agent's own watchdog is the
   primary timeout mechanism -- callers generally should not need to set
   their own. Supplying a shorter timeout here will raise on expiry
-  without affecting the agent.
+  without affecting the agent. A queued ask is dropped if its calling
+  process dies. If that ask is already active, it keeps running. A live
+  caller's timeout leaves its ask queued or running. For cancellable queued
+  work, use `tell/3` or `tell_with_completion/4` and `cancel_request/3`.
   """
   @spec ask(name(), String.t(), timeout()) ::
           {:ok, Response.t()} | {:error, term()}
@@ -623,20 +627,23 @@ defmodule GenAgent do
 
   Admission failure returns `{:error, {:overloaded, info}}` with no ref or
   completion message. Accepted queued requests deliver after their turn
-  completes; `pre_turn/2` skip, halt and invalid results deliver their
-  corresponding error without starting a turn. Successful and failed turns
-  deliver after their decision and `post_turn/3` callbacks. An interrupt,
-  watchdog timeout or backend failure delivers an error. A crashing
-  `handle_response/3` callback stops the agent before completion; monitor
-  the agent when its death matters to the caller.
+  completes, unless cancelled with `cancel_request/3`. A cancelled queued
+  request delivers `{:gen_agent, :completion, name, ref, {:error, :cancelled}}`
+  without running turn lifecycle callbacks. `pre_turn/2` skip, halt and
+  invalid results deliver their corresponding error without starting a
+  turn. Successful and failed turns deliver after their decision and
+  `post_turn/3` callbacks. An interrupt, watchdog timeout or backend
+  failure delivers an error. A crashing `handle_response/3` callback stops
+  the agent before completion; monitor the agent when its death matters.
 
   Delivery is a single BEAM message sent at most once per accepted request.
   It is independent of the bounded `poll/3` result cache. A dead recipient
   does not receive the message, and abrupt agent death can leave accepted
   requests without a completion message; a monitor reports that uncertainty.
   This does not prove that an external provider process has settled.
-  The request ref remains suitable for `interrupt_request/3`, and a new
-  agent under the same name never reuses it.
+  The request ref remains suitable for `interrupt_request/3` while active
+  or `cancel_request/3` while queued. A new agent under the same name never
+  reuses it.
   """
   @spec tell_with_completion(name(), String.t(), pid(), timeout()) ::
           {:ok, request_ref()} | {:error, term()}
@@ -652,7 +659,8 @@ defmodule GenAgent do
 
     * `{:ok, :pending}` if the request is queued or in-flight.
     * `{:ok, :completed, response}` if the turn finished successfully.
-    * `{:error, reason}` if the turn failed.
+    * `{:error, reason}` if the turn failed, including `{:error, :cancelled}`
+      for a cancelled queued request.
     * `{:error, :not_found}` if the ref is unknown (never issued, or
       pruned from the bounded result cache).
 
@@ -722,7 +730,8 @@ defmodule GenAgent do
   Returns `{:ok, :accepted}` when the agent has cancelled that turn,
   `{:error, :not_current}` when another turn is active, or
   `{:error, :idle}` when no turn is active. A queued request is not
-  interruptible through this API. Unlike `interrupt/1`, this operation
+  interruptible through this API; use `cancel_request/3` for a queued tell.
+  Unlike `interrupt/1`, this operation
   is acknowledged by the agent and cannot cancel a successor turn after
   the observed request finishes. It is also safe against a replacement
   agent registered under the same name, because request references are
@@ -736,6 +745,35 @@ defmodule GenAgent do
           {:ok, :accepted} | {:error, :not_current | :idle}
   def interrupt_request(name, ref, timeout \\ @default_call_timeout) when is_reference(ref) do
     :gen_statem.call(via(name), {:interrupt_request, ref}, timeout)
+  end
+
+  @doc """
+  Cancel a queued `tell/3` or `tell_with_completion/4` request by exact ref.
+
+  Returns `{:ok, :cancelled}` when the queued request is removed, or when
+  its cancellation result is still cached. The cancellation releases its
+  queue count and bytes immediately. `poll/3` then returns
+  `{:error, :cancelled}`. A completion recipient receives exactly one
+  `{:gen_agent, :completion, name, ref, {:error, :cancelled}}` message.
+
+  Returns `{:error, :current}` for an active tell turn; use
+  `interrupt_request/3` to interrupt it. Returns
+  `{:error, :already_finished}` for a cached terminal result other than
+  cancellation. Returns `{:error, :not_found}` for an unknown ref, a
+  pruned result, or an internal ask or event ref. Cancellation results
+  count toward the bounded `max_tell_results` cache. Once pruned, a
+  cancelled ref also returns `{:error, :not_found}`.
+
+  A queued turn has not started, so cancellation does not call
+  `handle_response/3`, `handle_error/3`, or `post_turn/3`. The agent
+  processes cancellation and dispatch in order: if dispatch happened
+  first, this returns `{:error, :current}` and leaves the turn alone.
+  The default call timeout is `:infinity`.
+  """
+  @spec cancel_request(name(), request_ref(), timeout()) ::
+          {:ok, :cancelled} | {:error, :current | :already_finished | :not_found}
+  def cancel_request(name, ref, timeout \\ @default_call_timeout) when is_reference(ref) do
+    :gen_statem.call(via(name), {:cancel_request, ref}, timeout)
   end
 
   @doc """
