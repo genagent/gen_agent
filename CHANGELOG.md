@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/genagent/gen_agent/compare/v0.2.2...v0.3.0) (2026-10-01)
+
+
+### Features
+
+* bound pending runtime inputs ([#41](https://github.com/genagent/gen_agent/issues/41)) ([3a00c02](https://github.com/genagent/gen_agent/commit/3a00c02d15f85d3ccd2ac9216bc49c12db6760f6))
+* deliver request-scoped completion messages ([#42](https://github.com/genagent/gen_agent/issues/42)) ([882b10d](https://github.com/genagent/gen_agent/commit/882b10dff5ca8ae930bf774e10baf173ef3d4ca7))
+
 ## [0.2.2](https://github.com/genagent/gen_agent/compare/v0.2.1...v0.2.2) (2026-10-01)
 
 ### Features
