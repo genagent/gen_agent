@@ -144,6 +144,48 @@ defmodule GenAgent.Backends.ClaudeExecutableConformanceTest do
     assert length(GenAgent.status(name).agent_state.errors) == 2
   end
 
+  test "session-id applies to the first turn and resume replaces it later", context do
+    session_id = "11111111-1111-4111-8111-111111111111"
+    name = start_agent(context, session_id: session_id)
+
+    assert {:ok, _} = GenAgent.ask(name, "first prompt")
+    fresh_args = args(context.directory, :fresh)
+    assert flag_value(fresh_args, "--session-id") == session_id
+    refute "--resume" in fresh_args
+
+    assert {:ok, _} = GenAgent.ask(name, "second prompt")
+    resume_args = args(context.directory, :resume)
+    assert flag_value(resume_args, "--resume") == "fixture-session"
+    refute "--session-id" in resume_args
+  end
+
+  test "continue applies to the first turn and resume replaces it later", context do
+    name = start_agent(context, continue_session: true)
+
+    assert {:ok, _} = GenAgent.ask(name, "first prompt")
+    assert "--continue" in args(context.directory, :fresh)
+
+    assert {:ok, _} = GenAgent.ask(name, "second prompt")
+    resume_args = args(context.directory, :resume)
+    assert flag_value(resume_args, "--resume") == "fixture-session"
+    refute "--continue" in resume_args
+  end
+
+  test "disabled session persistence is rejected before invoking the CLI", context do
+    assert {:error, {:backend_start_failed, {:unsupported_option, :no_session_persistence}}} =
+             GenAgent.start_agent(Agent,
+               name: "claude-no-persistence-#{System.unique_integer([:positive])}",
+               backend: GenAgent.Backends.Claude,
+               observer: self(),
+               binary: context.binary,
+               working_dir: context.directory,
+               no_session_persistence: true
+             )
+
+    refute File.exists?(Path.join(context.directory, "fresh.args"))
+    refute File.exists?(Path.join(context.directory, "resume.args"))
+  end
+
   for action <- [:interrupt, :watchdog, :stop, :kill] do
     @tag action: action
     test "#{action} stops the BEAM task on the executable streaming path", context do
@@ -180,5 +222,14 @@ defmodule GenAgent.Backends.ClaudeExecutableConformanceTest do
     |> Path.join("#{mode}.args")
     |> File.read!()
     |> String.split("\n", trim: true)
+  end
+
+  defp flag_value(args, flag) do
+    args
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.find_value(fn
+      [^flag, value] -> value
+      _ -> nil
+    end)
   end
 end

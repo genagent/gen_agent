@@ -89,7 +89,11 @@ required.
 
 ## Backend options
 
-`start_session/1` accepts any option supported by `ClaudeWrapper.stream/2`:
+`start_session/1` accepts `ClaudeWrapper.stream/2` options with one exception:
+`no_session_persistence: true` returns
+`{:error, {:unsupported_option, :no_session_persistence}}`, because later
+turns resume the CLI session. If `:session_id` or `:continue_session` is
+supplied for the first turn, the backend omits it once `--resume` is used.
 
 **Config:**
 - `:binary`, `:working_dir` (aliased as `:cwd`), `:env`, `:timeout`,

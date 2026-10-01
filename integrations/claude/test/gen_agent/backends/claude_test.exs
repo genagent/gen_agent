@@ -20,6 +20,13 @@ defmodule GenAgent.Backends.ClaudeTest do
   end
 
   describe "start_session/1" do
+    test "rejects disabled session persistence" do
+      assert {:error, {:unsupported_option, :no_session_persistence}} =
+               Claude.start_session(no_session_persistence: true)
+
+      assert {:ok, _session} = Claude.start_session(no_session_persistence: false)
+    end
+
     test "builds a session with the given opts" do
       {:ok, session} =
         Claude.start_session(
@@ -148,6 +155,11 @@ defmodule GenAgent.Backends.ClaudeTest do
 
       assert session.session_id == "sess-prior"
       assert session.opts[:working_dir] == "/tmp"
+    end
+
+    test "rejects disabled session persistence" do
+      assert {:error, {:unsupported_option, :no_session_persistence}} =
+               Claude.resume_session("sess-prior", no_session_persistence: true)
     end
   end
 
