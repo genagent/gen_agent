@@ -447,6 +447,10 @@ pattern" decision tree.
 GenAgent emits telemetry events for observability:
 
 ```
+[:gen_agent, :turn, :start]      # content-free, %{agent, ref, origin}
+[:gen_agent, :turn, :stop]       # content-free, duration_ms
+[:gen_agent, :turn, :error]      # content-free, duration_ms, reason_kind
+[:gen_agent, :turn, :rejected]   # declined before dispatch; no matching start
 [:gen_agent, :prompt, :start]    # %{agent, ref}
 [:gen_agent, :prompt, :stop]     # %{agent, ref, duration}
 [:gen_agent, :prompt, :error]    # %{agent, ref, reason}
@@ -458,7 +462,10 @@ GenAgent emits telemetry events for observability:
 ```
 
 Enough to build a communication graph, track latency, alert on stuck
-agents. Attach handlers with `:telemetry.attach/4`.
+agents. Attach handlers with `:telemetry.attach/4`. Use the `:turn`
+events for ordinary metrics: older prompt/event events can carry
+prompts, raw errors, or agent state. `GenAgent.Telemetry` documents
+measurements, units, ordering, and data handling.
 
 ## What GenAgent does not do
 

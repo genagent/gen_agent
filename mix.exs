@@ -70,7 +70,8 @@ defmodule GenAgent.MixProject do
           GenAgent,
           GenAgent.Backend,
           GenAgent.Event,
-          GenAgent.Response
+          GenAgent.Response,
+          GenAgent.Telemetry
         ]
       ]
     ]

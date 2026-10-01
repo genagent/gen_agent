@@ -474,7 +474,6 @@ defmodule GenAgent.Server do
 
   def handle_event(:state_timeout, :watchdog, :processing, %Data{current_request: current} = data) do
     cleanup_task(current)
-    emit_prompt_error(data.name, current.request_ref, :timeout, data.agent_state)
     finish_error(data, current, :timeout)
   end
 
@@ -503,13 +502,6 @@ defmodule GenAgent.Server do
       when is_reference(ref) and is_map(current) do
     case current do
       %{task_ref: ^ref} ->
-        emit_prompt_error(
-          data.name,
-          current.request_ref,
-          {:task_crashed, reason},
-          data.agent_state
-        )
-
         finish_error(data, current, {:task_crashed, reason})
 
       _ ->
@@ -525,11 +517,11 @@ defmodule GenAgent.Server do
 
   defp handle_task_result({:ok, response, new_session, new_agent_state}, current, data) do
     emit_prompt_stop(data.name, current.request_ref, response.duration_ms, new_agent_state)
+    emit_turn_stop(data.name, current)
     finish_turn(data, current, response, new_session, new_agent_state)
   end
 
   defp handle_task_result({:error, reason, new_session, new_agent_state}, current, data) do
-    emit_prompt_error(data.name, current.request_ref, reason, new_agent_state)
     data = %{data | backend_session: new_session, agent_state: new_agent_state}
     finish_error(data, current, reason)
   end
@@ -579,6 +571,7 @@ defmodule GenAgent.Server do
 
       reason ->
         emit_input_rejected(data.name, reason)
+        emit_turn_rejected(data.name, request_ref, kind, :overloaded)
         {:error, reason}
     end
   end
@@ -748,12 +741,14 @@ defmodule GenAgent.Server do
       {:skip, new_state} ->
         pseudo_current = %{request_ref: request_ref, kind: kind}
         data = %{data | agent_state: new_state}
+        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_skipped)
         {data, reply_actions} = record_error(data, pseudo_current, :pre_turn_skipped)
         {:keep_state, data, with_process_next(reply_actions)}
 
       {:halt, new_state} ->
         pseudo_current = %{request_ref: request_ref, kind: kind}
         data = %{data | agent_state: new_state}
+        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_halted)
         {data, reply_actions} = record_error(data, pseudo_current, :pre_turn_halted)
         data = transition_to_halted(data)
         {:keep_state, data, with_process_next(reply_actions)}
@@ -763,6 +758,7 @@ defmodule GenAgent.Server do
         require Logger
         Logger.error("GenAgent pre_turn/2 returned unexpected shape: #{inspect(other)}")
         pseudo_current = %{request_ref: request_ref, kind: kind}
+        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_invalid)
         {data, reply_actions} = record_error(data, pseudo_current, :pre_turn_invalid)
         {:keep_state, data, with_process_next(reply_actions)}
     end
@@ -794,7 +790,9 @@ defmodule GenAgent.Server do
         )
       end)
 
+    started_at = System.monotonic_time(:millisecond)
     emit_prompt_start(data.name, request_ref, prompt, original_prompt, agent_state)
+    emit_turn_start(data.name, request_ref, kind)
 
     current = %{
       request_ref: request_ref,
@@ -802,7 +800,7 @@ defmodule GenAgent.Server do
       task_pid: task.pid,
       kind: kind,
       prompt: prompt,
-      started_at: System.monotonic_time(:millisecond)
+      started_at: started_at
     }
 
     %{data | current_request: current}
@@ -1202,6 +1200,10 @@ defmodule GenAgent.Server do
   defp decision_to_transition({:halt, state}), do: {:halt, state}
 
   defp finish_error(data, current, reason) do
+    duration_ms = max(System.monotonic_time(:millisecond) - current.started_at, 0)
+    emit_prompt_error(data.name, current.request_ref, reason, data.agent_state, duration_ms)
+    emit_turn_error(data.name, current, reason, duration_ms)
+
     decision =
       safely_handle_error(
         data.agent_module,
@@ -1350,14 +1352,60 @@ defmodule GenAgent.Server do
     })
   end
 
-  defp emit_prompt_error(name, ref, reason, agent_state) do
-    :telemetry.execute([:gen_agent, :prompt, :error], %{system_time: System.system_time()}, %{
+  defp emit_prompt_error(name, ref, reason, agent_state, duration_ms \\ nil) do
+    measurements = %{system_time: System.system_time()}
+
+    measurements =
+      if duration_ms, do: Map.put(measurements, :duration, duration_ms), else: measurements
+
+    :telemetry.execute([:gen_agent, :prompt, :error], measurements, %{
       agent: name,
       ref: ref,
       reason: reason,
       agent_state: agent_state
     })
   end
+
+  defp emit_turn_start(name, ref, kind) do
+    :telemetry.execute([:gen_agent, :turn, :start], %{system_time: System.system_time()}, %{
+      agent: name,
+      ref: ref,
+      origin: request_origin(kind)
+    })
+  end
+
+  defp emit_turn_stop(name, current) do
+    duration_ms = max(System.monotonic_time(:millisecond) - current.started_at, 0)
+
+    :telemetry.execute([:gen_agent, :turn, :stop], %{duration_ms: duration_ms}, %{
+      agent: name,
+      ref: current.request_ref,
+      origin: request_origin(current.kind)
+    })
+  end
+
+  defp emit_turn_error(name, current, reason, duration_ms) do
+    :telemetry.execute([:gen_agent, :turn, :error], %{duration_ms: duration_ms}, %{
+      agent: name,
+      ref: current.request_ref,
+      origin: request_origin(current.kind),
+      reason_kind: turn_error_kind(reason)
+    })
+  end
+
+  defp emit_turn_rejected(name, ref, kind, reason_kind) do
+    :telemetry.execute([:gen_agent, :turn, :rejected], %{system_time: System.system_time()}, %{
+      agent: name,
+      ref: ref,
+      origin: request_origin(kind),
+      reason_kind: reason_kind
+    })
+  end
+
+  defp turn_error_kind(:timeout), do: :timeout
+  defp turn_error_kind(:interrupted), do: :interrupted
+  defp turn_error_kind({:task_crashed, _}), do: :task_crashed
+  defp turn_error_kind(_), do: :backend_or_callback_error
 
   defp emit_event_received(name, event) do
     :telemetry.execute([:gen_agent, :event, :received], %{system_time: System.system_time()}, %{
