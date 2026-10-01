@@ -60,7 +60,7 @@ defmodule GenAgent.CancelRequestTest do
   defp start_agent(scripts, opts \\ []) do
     name = "cancel-ref-#{System.unique_integer([:positive])}"
 
-    {:ok, _pid} =
+    {:ok, pid} =
       GenAgent.start_agent(
         Agent,
         Keyword.merge(
@@ -69,9 +69,7 @@ defmodule GenAgent.CancelRequestTest do
         )
       )
 
-    on_exit(fn ->
-      if GenAgent.whereis(name), do: GenAgent.stop(name)
-    end)
+    on_exit(fn -> DynamicSupervisor.terminate_child(GenAgent.AgentSupervisor, pid) end)
 
     name
   end
