@@ -90,6 +90,37 @@ jobs:
       - name: Build docs
         run: mix docs --warnings-as-errors
 
+  example:
+    name: GenAgent app example
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/gen_agent_app
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20"
+          otp-version: "29"
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: Run example tests
+        run: mix test
+
+      - name: Boot Claude and Codex agents
+        run: |
+          GEN_AGENT_APP_PROVIDERS=claude,codex GEN_AGENT_APP_CWD="$GITHUB_WORKSPACE" \
+            mix run -e 'case GenAgentApp.agents() do {:ok, ["claude", "codex"]} -> :ok; other -> raise inspect(other) end'
+
   packages:
     name: ${{ matrix.package }}
     runs-on: ubuntu-latest
