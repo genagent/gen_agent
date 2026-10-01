@@ -50,16 +50,21 @@ defmodule GenAgent.Backends.OpenAI do
   `usage.output_tokens_details.reasoning_tokens`) in the `:usage`
   event when present, so patterns can reason about cost.
 
-  Set `:reasoning_effort` to `:low`, `:medium`, or `:high` to
-  request a specific effort level; leave it `nil` for the model
-  default.
+  Set `:reasoning_effort` to request a specific effort level, for
+  example `:low`, `:medium`, or `:high`; leave it `nil` for the model
+  default. The value is sent as `reasoning.effort` without validation,
+  and the accepted values depend on the model, so check the model's
+  documentation. An unsupported value is reported by the API as an
+  error on the first prompt.
 
   ## Options
 
     * `:api_key` -- OpenAI API key. Defaults to `System.get_env("OPENAI_API_KEY")`.
     * `:model` -- model name. Defaults to `"gpt-5"`.
     * `:instructions` -- system prompt (string). Resent every turn; see note above.
-    * `:reasoning_effort` -- one of `:low | :medium | :high | nil`.
+    * `:reasoning_effort` -- an atom or string passed through as
+      `reasoning.effort` (for example `:low`, `:medium`, `:high`), or
+      `nil` for the model default. Accepted values depend on the model.
       When set, adds `{"reasoning": {"effort": ...}}` to each request.
     * `:max_output_tokens` -- cap on output tokens per turn. Defaults to `nil` (model default).
     * `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults to
@@ -91,7 +96,8 @@ defmodule GenAgent.Backends.OpenAI do
     :previous_response_id
   ]
 
-  @type reasoning_effort :: :low | :medium | :high | nil
+  @typedoc "Passed through as `reasoning.effort`; accepted values depend on the model."
+  @type reasoning_effort :: atom() | String.t() | nil
 
   @type t :: %__MODULE__{
           api_key: String.t() | nil,
