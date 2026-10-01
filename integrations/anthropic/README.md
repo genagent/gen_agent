@@ -104,6 +104,10 @@ of each turn (user message on dispatch, assistant message on terminal
 - `:model` -- model name. Defaults to `"claude-sonnet-4-5"`.
 - `:max_tokens` -- max tokens per turn. Defaults to `1024`.
 - `:system` -- system prompt (string).
+- `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
+  to `60_000`. The 60-second default can be short for long reasoning turns.
+- `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults
+  to `nil` (Req's default).
 - `:http_fn` -- a 1-arity function
   `(request_map) -> {:ok, response_map} | {:error, term}`
   that replaces the default `Req`-backed HTTP call. Intended for
