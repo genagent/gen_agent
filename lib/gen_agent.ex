@@ -171,12 +171,18 @@ defmodule GenAgent do
 
   GenAgent emits telemetry events for observability:
 
+    * `[:gen_agent, :turn, :start | :stop | :error | :rejected]`
     * `[:gen_agent, :prompt, :start | :stop | :error]`
     * `[:gen_agent, :event, :received]`
     * `[:gen_agent, :state, :changed]`
     * `[:gen_agent, :mailbox, :queued]`
     * `[:gen_agent, :input, :rejected]`
     * `[:gen_agent, :halted]`
+
+  Use the content-free turn events for metrics. The older prompt and
+  event telemetry can include prompts, raw errors, and agent state.
+  See `GenAgent.Telemetry` for measurements, units, correlation, and
+  ordering.
 
   ## What GenAgent does not do
 
