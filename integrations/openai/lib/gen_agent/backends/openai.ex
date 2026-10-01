@@ -199,7 +199,6 @@ defmodule GenAgent.Backends.OpenAI do
   # ---------------------------------------------------------------------------
 
   defp response_to_events(body, client_session_id) when is_map(body) do
-    text = extract_text(body)
     usage = extract_usage(body)
     response_id = body["id"]
     status = body["status"]
@@ -210,18 +209,64 @@ defmodule GenAgent.Backends.OpenAI do
         u -> [Event.new(:usage, u)]
       end
 
-    result_data =
-      %{
-        text: text,
-        session_id: client_session_id,
-        response_id: response_id,
-        stop_reason: status,
-        model: body["model"]
-      }
-      |> drop_nil_values()
+    terminal_event =
+      case response_error(body) do
+        nil ->
+          result_data =
+            %{
+              text: extract_text(body),
+              session_id: client_session_id,
+              response_id: response_id,
+              stop_reason: status,
+              model: body["model"]
+            }
+            |> drop_nil_values()
 
-    usage_events ++ [Event.new(:result, result_data)]
+          Event.new(:result, result_data)
+
+        reason ->
+          error_data =
+            %{reason: reason, response_id: response_id, status: status}
+            |> drop_nil_values()
+
+          Event.new(:error, error_data)
+      end
+
+    usage_events ++ [terminal_event]
   end
+
+  defp response_error(%{"status" => "failed"} = body),
+    do: {:response_failed, body["error"]}
+
+  defp response_error(%{"status" => "incomplete"} = body),
+    do: {:response_incomplete, body["incomplete_details"]}
+
+  defp response_error(%{"status" => "completed"} = body) do
+    case extract_refusal(body) do
+      nil -> nil
+      refusal -> {:refusal, refusal}
+    end
+  end
+
+  defp response_error(body), do: {:unexpected_response_status, body["status"]}
+
+  defp extract_refusal(%{"output" => output}) when is_list(output) do
+    Enum.find_value(output, fn
+      %{"type" => "refusal", "refusal" => refusal} ->
+        refusal
+
+      %{"type" => "message", "content" => content} when is_list(content) ->
+        Enum.find_value(content, fn
+          %{"type" => "refusal", "refusal" => refusal} -> refusal
+          _ -> nil
+        end)
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp extract_refusal(_), do: nil
 
   defp extract_text(%{"output" => output}) when is_list(output) do
     output

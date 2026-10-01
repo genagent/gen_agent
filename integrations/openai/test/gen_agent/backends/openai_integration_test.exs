@@ -173,6 +173,47 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
       assert {:error, {:http_error, 401, _}} = GenAgent.ask(name, "hi")
     end
 
+    test "failed responses leave the previous successful response id intact" do
+      failed =
+        api_response("", id: "resp_failed")
+        |> Map.merge(%{
+          "status" => "failed",
+          "error" => %{"code" => "server_error", "message" => "generation failed"}
+        })
+
+      assert_rejected_turn_preserves_response_id(
+        failed,
+        {:response_failed, failed["error"]}
+      )
+    end
+
+    test "incomplete responses leave the previous successful response id intact" do
+      incomplete =
+        api_response("partial answer", id: "resp_incomplete")
+        |> Map.merge(%{
+          "status" => "incomplete",
+          "incomplete_details" => %{"reason" => "max_output_tokens"}
+        })
+
+      assert_rejected_turn_preserves_response_id(
+        incomplete,
+        {:response_incomplete, incomplete["incomplete_details"]}
+      )
+    end
+
+    test "refusals leave the previous successful response id intact" do
+      refused =
+        api_response("", id: "resp_refused")
+        |> Map.put("output", [
+          %{
+            "type" => "message",
+            "content" => [%{"type" => "refusal", "refusal" => "I cannot help."}]
+          }
+        ])
+
+      assert_rejected_turn_preserves_response_id(refused, {:refusal, "I cannot help."})
+    end
+
     test "instructions are forwarded to the backend and resent each turn" do
       test_pid = self()
       ref = make_ref()
@@ -191,5 +232,32 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
       assert_receive {^ref, "Respond with one word only."}
       assert_receive {^ref, "Respond with one word only."}
     end
+  end
+
+  defp assert_rejected_turn_preserves_response_id(rejected_body, expected_reason) do
+    test_pid = self()
+    ref = make_ref()
+    responses = [api_response("first", id: "resp_first"), rejected_body, api_response("third")]
+    {:ok, responses_pid} = Agent.start_link(fn -> responses end)
+
+    http_fn = fn req ->
+      send(test_pid, {ref, req.body})
+
+      Agent.get_and_update(responses_pid, fn
+        [next | rest] -> {{:ok, next}, rest}
+        [] -> {{:error, :out_of_responses}, []}
+      end)
+    end
+
+    name = start_openai_agent(http_fn)
+
+    assert {:ok, %{text: "first"}} = GenAgent.ask(name, "first")
+    assert {:error, ^expected_reason} = GenAgent.ask(name, "rejected")
+    assert {:ok, %{text: "third"}} = GenAgent.ask(name, "third")
+
+    assert_receive {^ref, first_request}
+    refute Map.has_key?(first_request, :previous_response_id)
+    assert_receive {^ref, %{previous_response_id: "resp_first"}}
+    assert_receive {^ref, %{previous_response_id: "resp_first"}}
   end
 end
