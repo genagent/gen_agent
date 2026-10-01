@@ -397,6 +397,67 @@ defmodule GenAgent.Backends.OpenAITest do
       refute Map.has_key?(usage_event.data, :reasoning_tokens)
     end
 
+    test "failed responses emit a terminal error with the API error" do
+      api_error = %{"code" => "server_error", "message" => "generation failed"}
+
+      http_fn = fn _req ->
+        {:ok,
+         ok_response("", id: "resp_failed").(nil)
+         |> elem(1)
+         |> Map.merge(%{"status" => "failed", "error" => api_error})}
+      end
+
+      {:ok, session} = OpenAI.start_session(http_fn: http_fn)
+      {:ok, events, _} = OpenAI.prompt(session, "hi")
+
+      assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
+      assert data.reason == {:response_failed, api_error}
+      assert data.response_id == "resp_failed"
+      assert data.status == "failed"
+    end
+
+    test "incomplete responses emit a terminal error even when partial text exists" do
+      details = %{"reason" => "max_output_tokens"}
+
+      http_fn = fn _req ->
+        {:ok,
+         ok_response("partial answer", id: "resp_incomplete").(nil)
+         |> elem(1)
+         |> Map.merge(%{"status" => "incomplete", "incomplete_details" => details})}
+      end
+
+      {:ok, session} = OpenAI.start_session(http_fn: http_fn)
+      {:ok, events, _} = OpenAI.prompt(session, "hi")
+
+      assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
+      assert data.reason == {:response_incomplete, details}
+      assert data.status == "incomplete"
+    end
+
+    test "refusal content emits a terminal error instead of an empty result" do
+      output = [
+        %{
+          "type" => "message",
+          "content" => [%{"type" => "refusal", "refusal" => "I cannot help with that."}]
+        }
+      ]
+
+      {:ok, session} = OpenAI.start_session(http_fn: ok_response("", output: output))
+      {:ok, events, _} = OpenAI.prompt(session, "hi")
+
+      assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
+      assert data.reason == {:refusal, "I cannot help with that."}
+      assert data.status == "completed"
+    end
+
+    test "nonterminal response statuses cannot become successful turns" do
+      {:ok, session} = OpenAI.start_session(http_fn: ok_response("", status: "queued"))
+      {:ok, events, _} = OpenAI.prompt(session, "hi")
+
+      assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
+      assert data.reason == {:unexpected_response_status, "queued"}
+    end
+
     test "propagates HTTP errors" do
       failing = fn _req -> {:error, {:http_error, 429, %{"error" => "rate_limit"}}} end
       {:ok, session} = OpenAI.start_session(api_key: "sk-test", http_fn: failing)
