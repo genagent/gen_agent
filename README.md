@@ -7,6 +7,23 @@
 A behaviour and supervision framework for long-running LLM agent processes,
 modeled as OTP state machines.
 
+This repository contains six independently versioned Hex packages. Install
+only the packages an application needs; core has no dependency on a CLI
+wrapper or HTTP client.
+
+| Package | Source | Purpose |
+| --- | --- | --- |
+| [`gen_agent`](https://hex.pm/packages/gen_agent) | `.` | Agent behaviour, lifecycle, and supervision |
+| [`gen_agent_claude`](https://hex.pm/packages/gen_agent_claude) | [`integrations/claude`](https://github.com/genagent/gen_agent/tree/main/integrations/claude) | Claude CLI backend |
+| [`gen_agent_codex`](https://hex.pm/packages/gen_agent_codex) | [`integrations/codex`](https://github.com/genagent/gen_agent/tree/main/integrations/codex) | Codex CLI backend |
+| [`gen_agent_anthropic`](https://hex.pm/packages/gen_agent_anthropic) | [`integrations/anthropic`](https://github.com/genagent/gen_agent/tree/main/integrations/anthropic) | Anthropic HTTP backend |
+| [`gen_agent_openai`](https://hex.pm/packages/gen_agent_openai) | [`integrations/openai`](https://github.com/genagent/gen_agent/tree/main/integrations/openai) | OpenAI HTTP backend |
+| [`gen_agent_ensemble`](https://hex.pm/packages/gen_agent_ensemble) | [`extensions/ensemble`](https://github.com/genagent/gen_agent/tree/main/extensions/ensemble) | Multi-agent strategies |
+
+The [`claude_wrapper`](https://github.com/genagent/claude_wrapper_ex) and
+[`codex_wrapper`](https://github.com/genagent/codex_wrapper_ex) repositories
+remain independent.
+
 Each agent is a `:gen_statem` process wrapping a persistent LLM session.
 Every interaction is a prompt-response turn, and the implementation decides
 what happens between turns.

@@ -1,0 +1,388 @@
+defmodule GenAgentEnsemble.Strategies.Consensus do
+  @moduledoc """
+  N peer agents deliberate on a prompt until they converge on a
+  structured verdict, or the round cap is reached.
+
+  Each round fans the prompt out to every agent in parallel. Each
+  agent's response is parsed by a user-supplied `:verdict_parser`
+  into a categorical verdict atom plus rationale. If a threshold
+  number of agents agree on the same verdict, the session
+  converges. Otherwise, each agent is re-prompted with the *other*
+  agents' responses as context and asked to revise or confirm its
+  position.
+
+  Unparseable responses become **abstains** -- they don't count
+  toward the threshold but don't block convergence either. The
+  abstaining agent still participates in subsequent rounds.
+
+  Unlike `GenAgentEnsemble.Strategies.Debate`, Consensus's output
+  is a *programmable decision*: the strategy holds a parsed verdict
+  atom and the reply synthesizes it alongside per-agent rationales.
+  This turns LLM deliberation into `:approve | :revise | :reject`
+  that callers can branch on without re-parsing prose.
+
+  ## Options
+
+    * `:agents` (required) -- list of `{name, module, opts}` specs,
+      2 or more. Names must be distinct.
+    * `:verdict_parser` (required) -- `(String.t() -> {:ok, atom,
+      String.t()} | :error)`. Called on each agent's response text.
+      The atom is the verdict category; the string is the rationale
+      with verdict markers stripped.
+    * `:threshold` (optional) -- convergence rule. Defaults to
+      `:majority`.
+        * `:unanimous` -- all parseable verdicts agree AND no
+          abstains.
+        * `:majority` -- more than N/2 agents agree on the same
+          verdict.
+        * `{:at_least, n}` -- at least `n` agents agree on the same
+          verdict.
+    * `:rounds` (optional) -- hard cap on rounds. Defaults to 3.
+      Exceeding the cap returns a divergence report.
+    * `:reply` (optional) -- response shape:
+        * `:synthesis` (default) -- converged case: verdict +
+          each agent's rationale. Diverged case: divergence report
+          with each agent's final position.
+        * `{:synthesize, fun}` -- call `fun.(summary)` where
+          summary is `%{status, verdict, rounds, threshold, responses}`.
+          `responses` is `[{agent_name, verdict_or_nil, rationale,
+          raw_text}, ...]` in agent order; `verdict` is nil when
+          diverged.
+
+  ## Concurrency
+
+  One consensus at a time per ensemble. Additional `tell`/`ask`
+  calls queue FIFO and run after the current one completes.
+
+  ## Failure semantics
+
+    * A turn error aborts the round: the token fails with
+      `{agent, reason}`, any in-flight parallel responses are
+      discarded, the next queued prompt (if any) starts.
+    * Agent process death halts the session -- the panel size is
+      fixed; a missing agent invalidates the threshold.
+  """
+
+  @behaviour GenAgentEnsemble.Strategy
+
+  alias GenAgent.Response
+  alias GenAgentEnsemble.Queue
+
+  defstruct [
+    :agents,
+    :verdict_parser,
+    :threshold,
+    :rounds,
+    :reply_kind,
+    phase: :idle,
+    queue: nil
+  ]
+
+  @impl true
+  def init(opts) do
+    specs = Keyword.fetch!(opts, :agents)
+
+    if length(specs) < 2 do
+      raise ArgumentError,
+            "Consensus requires at least 2 agents, got #{length(specs)}"
+    end
+
+    names = for {name, _, _} <- specs, do: name
+
+    case names -- Enum.uniq(names) do
+      [] -> :ok
+      dupes -> raise ArgumentError, "Consensus duplicate agent names: #{inspect(dupes)}"
+    end
+
+    parser = Keyword.fetch!(opts, :verdict_parser)
+
+    unless is_function(parser, 1) do
+      raise ArgumentError, "Consensus :verdict_parser must be a 1-arity function"
+    end
+
+    threshold = Keyword.get(opts, :threshold, :majority)
+    validate_threshold!(threshold, length(names))
+
+    rounds = Keyword.get(opts, :rounds, 3)
+    reply_kind = Keyword.get(opts, :reply, :synthesis)
+
+    state = %__MODULE__{
+      agents: names,
+      verdict_parser: parser,
+      threshold: threshold,
+      rounds: rounds,
+      reply_kind: reply_kind,
+      queue: Queue.new()
+    }
+
+    {:ok, state, specs}
+  end
+
+  defp validate_threshold!(:unanimous, _n), do: :ok
+  defp validate_threshold!(:majority, _n), do: :ok
+
+  defp validate_threshold!({:at_least, n}, total) when is_integer(n) and n > 0 and n <= total,
+    do: :ok
+
+  defp validate_threshold!(other, total) do
+    raise ArgumentError,
+          "Consensus invalid :threshold #{inspect(other)} for #{total} agents " <>
+            "(expected :unanimous | :majority | {:at_least, n} where 1 <= n <= #{total})"
+  end
+
+  @impl true
+  def handle_tell(prompt, _opts, token, state), do: start_or_queue(prompt, token, state)
+
+  @impl true
+  def handle_ask(prompt, _opts, token, state), do: start_or_queue(prompt, token, state)
+
+  defp start_or_queue(prompt, token, %{phase: :idle} = state) do
+    ops = for agent <- state.agents, do: {:dispatch, agent, prompt, token}
+    {:ok, ops, %{state | phase: {:running, token, prompt, 1, %{}}}}
+  end
+
+  defp start_or_queue(prompt, token, state) do
+    {:ok, [], %{state | queue: Queue.enqueue(state.queue, token, prompt)}}
+  end
+
+  @impl true
+  def handle_response(agent, response, state) do
+    case state.phase do
+      {:running, token, original, round, pending} ->
+        parsed = parse_response(state.verdict_parser, response.text)
+        pending = Map.put(pending, agent, parsed)
+
+        if map_size(pending) == length(state.agents) do
+          complete_round(token, original, round, pending, state)
+        else
+          {:ok, [], %{state | phase: {:running, token, original, round, pending}}}
+        end
+
+      _ ->
+        {:ok, [], state}
+    end
+  end
+
+  defp parse_response(parser, text) do
+    case parser.(text) do
+      {:ok, verdict, rationale} when is_atom(verdict) and is_binary(rationale) ->
+        {verdict, rationale, text}
+
+      _ ->
+        {nil, text, text}
+    end
+  end
+
+  defp complete_round(token, original, round, pending, state) do
+    case converged?(pending, state.threshold, length(state.agents)) do
+      {:converged, verdict} ->
+        finalize(token, :converged, verdict, round, pending, state)
+
+      :not_converged when round >= state.rounds ->
+        finalize(token, :diverged, nil, round, pending, state)
+
+      :not_converged ->
+        reprompt_ops = build_reprompt_ops(state.agents, original, pending, token)
+        new_phase = {:running, token, original, round + 1, %{}}
+        {:ok, reprompt_ops, %{state | phase: new_phase}}
+    end
+  end
+
+  defp converged?(pending, threshold, n_agents) do
+    verdicts =
+      pending
+      |> Enum.map(fn {_agent, {v, _, _}} -> v end)
+      |> Enum.reject(&is_nil/1)
+
+    counts = Enum.frequencies(verdicts)
+
+    case threshold do
+      :unanimous ->
+        if length(verdicts) == n_agents and map_size(counts) == 1 do
+          [{verdict, _}] = Enum.to_list(counts)
+          {:converged, verdict}
+        else
+          :not_converged
+        end
+
+      :majority ->
+        needed = div(n_agents, 2) + 1
+        check_threshold(counts, needed)
+
+      {:at_least, n} ->
+        check_threshold(counts, n)
+    end
+  end
+
+  defp check_threshold(counts, needed) do
+    case Enum.max_by(counts, fn {_v, c} -> c end, fn -> nil end) do
+      {verdict, count} when count >= needed -> {:converged, verdict}
+      _ -> :not_converged
+    end
+  end
+
+  defp build_reprompt_ops(agents, original, pending, token) do
+    for agent <- agents do
+      others =
+        pending
+        |> Enum.reject(fn {a, _} -> a == agent end)
+        |> Enum.sort_by(fn {a, _} -> Enum.find_index(agents, &(&1 == a)) end)
+
+      prompt = compose_reprompt(original, others)
+      {:dispatch, agent, prompt, token}
+    end
+  end
+
+  defp compose_reprompt(original, others) do
+    others_block = Enum.map_join(others, "\n\n", &format_other_response/1)
+
+    """
+    The other panelists responded as follows to the original question:
+
+    > #{String.replace(original, "\n", "\n> ")}
+
+    #{others_block}
+
+    Given these perspectives, revise or confirm your own position. Respond to specific points where you agree or disagree. End with your verdict in the same format as before.
+    """
+    |> String.trim()
+  end
+
+  defp format_verdict(atom), do: atom |> Atom.to_string() |> String.upcase()
+
+  defp format_other_response({agent, {verdict, rationale, _raw}}) do
+    label =
+      case verdict do
+        nil -> "#{agent} (abstained)"
+        v -> "#{agent} (#{format_verdict(v)})"
+      end
+
+    "#{label}:\n#{rationale}"
+  end
+
+  defp finalize(token, status, verdict, rounds_used, pending, state) do
+    responses = collect_responses(state.agents, pending)
+
+    text =
+      case state.reply_kind do
+        :synthesis ->
+          render_synthesis(status, verdict, rounds_used, state.threshold, responses)
+
+        {:synthesize, fun} ->
+          fun.(%{
+            status: status,
+            verdict: verdict,
+            rounds: rounds_used,
+            threshold: state.threshold,
+            responses: responses
+          })
+      end
+
+    response = %Response{text: text}
+    state = %{state | phase: :idle}
+    {ops, state} = maybe_start_next(state, [{:reply, token, response}])
+    {:ok, ops, state}
+  end
+
+  defp collect_responses(agents, pending) do
+    for agent <- agents do
+      case Map.fetch(pending, agent) do
+        {:ok, {verdict, rationale, raw}} -> {agent, verdict, rationale, raw}
+        :error -> {agent, nil, "", ""}
+      end
+    end
+  end
+
+  defp render_synthesis(:converged, verdict, rounds_used, threshold, responses) do
+    agreeing = Enum.count(responses, fn {_, v, _, _} -> v == verdict end)
+
+    header =
+      "CONSENSUS: #{inspect(verdict)} (#{agreeing} of #{length(responses)} agreed via " <>
+        "#{format_threshold(threshold)}, round #{rounds_used})"
+
+    body = Enum.map_join(responses, "\n\n", &render_response_entry/1)
+
+    header <> "\n\n" <> body
+  end
+
+  defp render_synthesis(:diverged, _verdict, rounds_used, threshold, responses) do
+    header =
+      "DIVERGED AFTER #{rounds_used} ROUND#{if rounds_used == 1, do: "", else: "S"} " <>
+        "(#{format_threshold(threshold)} not reached)"
+
+    body = Enum.map_join(responses, "\n\n", &render_response_entry/1)
+
+    header <> "\n\n" <> body
+  end
+
+  defp render_response_entry({agent, verdict, rationale, _raw}) do
+    label =
+      case verdict do
+        nil -> "#{agent} [abstain]"
+        v -> "#{agent} [#{format_verdict(v)}]"
+      end
+
+    "#{label}:\n#{rationale}"
+  end
+
+  defp format_threshold(:unanimous), do: "unanimous"
+  defp format_threshold(:majority), do: "majority"
+  defp format_threshold({:at_least, n}), do: "at_least #{n}"
+
+  defp maybe_start_next(%{phase: :idle} = state, ops_so_far) do
+    case Queue.pop(state.queue) do
+      {:ok, {token, prompt}, rest} ->
+        dispatch_ops = for agent <- state.agents, do: {:dispatch, agent, prompt, token}
+        state = %{state | phase: {:running, token, prompt, 1, %{}}, queue: rest}
+        {ops_so_far ++ dispatch_ops, state}
+
+      :empty ->
+        {ops_so_far, state}
+    end
+  end
+
+  @impl true
+  def handle_error(agent, reason, state) do
+    case state.phase do
+      {:running, token, _, _, _} ->
+        state = %{state | phase: :idle}
+        {ops, state} = maybe_start_next(state, [{:reply_error, token, {agent, reason}}])
+        {:ok, ops, state}
+
+      _ ->
+        {:ok, [], state}
+    end
+  end
+
+  @impl true
+  def handle_agent_down(_agent, reason, state) do
+    {:ok, [{:halt, {:agent_down, reason}}], state}
+  end
+
+  @impl true
+  def handle_notify(_event, state), do: {:ok, [], state}
+
+  @impl true
+  def handle_status(state) do
+    phase =
+      case state.phase do
+        :idle ->
+          :idle
+
+        {:running, _token, _original, round, pending} ->
+          %{
+            round: round,
+            responded: map_size(pending),
+            expected: length(state.agents)
+          }
+      end
+
+    %{
+      agents: state.agents,
+      threshold: state.threshold,
+      rounds: state.rounds,
+      phase: phase,
+      queued: Queue.len(state.queue)
+    }
+  end
+end

@@ -5,6 +5,31 @@ updates:
     schedule:
       interval: weekly
 
+  - package-ecosystem: mix
+    directory: /integrations/claude
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: mix
+    directory: /integrations/codex
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: mix
+    directory: /integrations/anthropic
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: mix
+    directory: /integrations/openai
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: mix
+    directory: /extensions/ensemble
+    schedule:
+      interval: weekly
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
