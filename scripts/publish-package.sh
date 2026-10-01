@@ -11,6 +11,10 @@ esac
 cd "${root}/${package}"
 if [[ "${package}" != "." ]]; then
   export GEN_AGENT_HEX=1
+  # A release may follow a freshly published core version while the checked-in
+  # integration lockfile still points to the previous one. Test against the
+  # newest compatible core before publishing the integration.
+  mix deps.update gen_agent
 fi
 
 app="$(sed -n 's/^[[:space:]]*app: :\([a-z_]*\),/\1/p' mix.exs | head -1)"

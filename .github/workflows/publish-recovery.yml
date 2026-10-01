@@ -1,0 +1,50 @@
+name: Recover Hex publication
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package whose tagged release was not published to Hex
+        required: true
+        type: choice
+        options:
+          - .
+          - integrations/claude
+          - integrations/codex
+          - integrations/anthropic
+          - integrations/openai
+          - extensions/ensemble
+      tag:
+        description: Existing release tag to publish from
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.19"
+          otp-version: "27"
+
+      - name: Refresh core dependency for an integration
+        if: ${{ inputs.package != '.' }}
+        env:
+          PACKAGE: ${{ inputs.package }}
+        run: |
+          cd "$PACKAGE"
+          GEN_AGENT_HEX=1 mix deps.update gen_agent
+
+      - name: Publish tagged package if absent from Hex
+        env:
+          PACKAGE: ${{ inputs.package }}
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: scripts/publish-package.sh "$PACKAGE"
