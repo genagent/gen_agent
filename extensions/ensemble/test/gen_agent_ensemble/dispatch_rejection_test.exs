@@ -5,6 +5,31 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
   alias GenAgentEnsemble.{ControlledAgent, ControlledBackend}
   alias GenAgentEnsemble.Strategies.{Consensus, Pipeline, Pool, Solo, Switchboard}
 
+  defmodule MissingAgentStrategy do
+    @behaviour GenAgentEnsemble.Strategy
+
+    @impl true
+    def init(opts) do
+      {:ok, %{token: nil}, Keyword.fetch!(opts, :agents)}
+    end
+
+    @impl true
+    def handle_tell(prompt, opts, token, state), do: dispatch(prompt, opts, token, state)
+
+    @impl true
+    def handle_ask(prompt, opts, token, state), do: dispatch(prompt, opts, token, state)
+
+    @impl true
+    def handle_response(_agent, response, %{token: token} = state) do
+      {:ok, [{:reply, token, response}], %{state | token: nil}}
+    end
+
+    defp dispatch(prompt, opts, token, state) do
+      agent = Keyword.get(opts, :agent, "missing")
+      {:ok, [{:dispatch, agent, prompt, token}], %{state | token: token}}
+    end
+  end
+
   setup do
     name = "rejection-#{System.unique_integer([:positive])}"
 
@@ -59,6 +84,54 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
     send(later_task, {:result, "LATER"})
     assert {:ok, %{text: "LATER"}} = Task.await(later)
     assert {:ok, %{queued_tokens: 0}} = Ensemble.status(name)
+  end
+
+  test "missing sub-agent rejects ask and tell without killing the session", %{name: name} do
+    {:ok, server} =
+      Ensemble.start_link(
+        name: name,
+        strategy: MissingAgentStrategy,
+        opts: [
+          agents: [{"live", ControlledAgent, [backend: ControlledBackend, observer: self()]}]
+        ]
+      )
+
+    unavailable = {:dispatch_rejected, "missing", {:agent_not_running, "missing"}}
+
+    assert {:error, ^unavailable} = Ensemble.ask(name, "missing ask")
+    {:ok, token} = Ensemble.tell(name, "missing tell")
+    assert {:error, ^unavailable} = Ensemble.poll(name, token)
+    assert Process.alive?(server)
+    assert {:ok, %{pending_tokens: []}} = Ensemble.status(name)
+
+    live = ask_async(name, "working", agent: "live")
+    assert_receive {:controlled_prompt, _, "working", task}, 2_000
+    send(task, {:result, "WORKS"})
+    assert {:ok, %{text: "WORKS"}} = Task.await(live)
+  end
+
+  test "dead sub-agent rejects dispatch while another worker remains usable", %{name: name} do
+    agents =
+      for tag <- ["live", "dead"] do
+        {tag, ControlledAgent, [backend: ControlledBackend, observer: self(), tag: tag]}
+      end
+
+    {:ok, server} =
+      Ensemble.start_link(name: name, strategy: MissingAgentStrategy, opts: [agents: agents])
+
+    [{dead, _}] = Registry.lookup(GenAgent.Registry, "#{name}/dead")
+    monitor = Process.monitor(dead)
+    Process.exit(dead, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^dead, :killed}, 2_000
+
+    assert {:error, {:dispatch_rejected, "dead", {:agent_not_running, "dead"}}} =
+             Ensemble.ask(name, "dead ask", agent: "dead")
+
+    live = ask_async(name, "working", agent: "live")
+    assert_receive {:controlled_prompt, "live", "working", task}, 2_000
+    send(task, {:result, "WORKS"})
+    assert {:ok, %{text: "WORKS"}} = Task.await(live)
+    assert Process.alive?(server)
   end
 
   test "Switchboard removes only the rejected token from its agent queue", %{name: name} do
