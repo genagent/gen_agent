@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.2.2...gen_agent_codex-v0.2.3) (2026-10-01)
+
+
+### Bug Fixes
+
+* preserve boundaries between Codex agent messages ([#74](https://github.com/genagent/gen_agent/issues/74)) ([e03b4f6](https://github.com/genagent/gen_agent/commit/e03b4f629787d91013a02854b4d875c40b8005fa))
+
 ## [0.2.2](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.2.1...gen_agent_codex-v0.2.2) (2026-10-01)
 
 
