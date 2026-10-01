@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.5](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.2.4...gen_agent_codex-v0.2.5) (2026-10-01)
+
+
+### Bug Fixes
+
+* accept gen_agent 0.5 in component packages ([#167](https://github.com/genagent/gen_agent/issues/167)) ([43272dd](https://github.com/genagent/gen_agent/commit/43272dd2a699927d8d1bdc42390e795f853b6c84))
+* **codex:** distinguish unsupported options from resume limitations ([#162](https://github.com/genagent/gen_agent/issues/162)) ([6be8ef9](https://github.com/genagent/gen_agent/commit/6be8ef9f053069f9a4a71d158d877cb815eda627))
+* **codex:** keep retry notifications nonterminal ([#155](https://github.com/genagent/gen_agent/issues/155)) ([0ad56d1](https://github.com/genagent/gen_agent/commit/0ad56d1f34acc9126e211264a204b9b3e7f29351))
+
 ## [0.2.4](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.2.3...gen_agent_codex-v0.2.4) (2026-10-01)
 
 
