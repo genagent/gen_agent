@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.1.4...gen_agent_ensemble-v0.2.0) (2026-10-01)
+
+
+### Features
+
+* emit observational Ensemble lifecycle telemetry ([#86](https://github.com/genagent/gen_agent/issues/86)) ([cd78875](https://github.com/genagent/gen_agent/commit/cd7887542bcfeee2804c2840f2b66b8a8424386c))
+
 ## [0.1.4](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.1.3...gen_agent_ensemble-v0.1.4) (2026-10-01)
 
 
