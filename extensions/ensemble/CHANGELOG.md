@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.1.3...gen_agent_ensemble-v0.1.4) (2026-10-01)
+
+
+### Bug Fixes
+
+* **ensemble:** finish tokens when dispatch is rejected ([#65](https://github.com/genagent/gen_agent/issues/65)) ([b4d42a9](https://github.com/genagent/gen_agent/commit/b4d42a9d336d223e4856dd77b88da8b6477bd1f8))
+
 ## [0.1.3](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.1.2...gen_agent_ensemble-v0.1.3) (2026-10-01)
 
 
