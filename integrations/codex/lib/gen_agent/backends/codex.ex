@@ -60,6 +60,7 @@ defmodule GenAgent.Backends.Codex do
   alias GenAgent.Backends.Codex.EventTranslator
 
   @config_keys [:binary, :working_dir, :env, :timeout, :verbose]
+  @unsupported_resume_keys [:cd, :add_dirs, :search]
   @exec_keys [
     :model,
     :sandbox,
@@ -258,8 +259,11 @@ defmodule GenAgent.Backends.Codex do
 
   defp validate_exec_opts(opts) do
     case Enum.find(opts, fn {key, _value} -> key not in @exec_keys end) do
-      {key, _value} ->
+      {key, _value} when key in @unsupported_resume_keys ->
         {:error, {:unsupported_resume_option, key}}
+
+      {key, _value} ->
+        {:error, {:unsupported_option, key}}
 
       nil ->
         if opts[:approval_policy] in [nil, :untrusted, :on_request, :never] do

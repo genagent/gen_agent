@@ -112,6 +112,10 @@ approval policy become supported `-c` overrides on resume.
 Options that the resume command cannot preserve (`:cd`, `:add_dirs`,
 `:search`) fail at session startup with
 `{:error, {:unsupported_resume_option, option}}`.
+Other unrecognized options fail on both start and resume with
+`{:error, {:unsupported_option, option}}`. Generic callback options such as
+`:system`, `:system_prompt`, and `:max_tokens` are not Codex backend options;
+an agent's `init_agent/1` must return options accepted by its selected backend.
 
 **Backend-only:**
 - `:exec_fn` -- a 2-arity function `(prompt, session) -> {:ok, enumerable} | {:error, term()}`

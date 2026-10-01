@@ -50,9 +50,29 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
     end
   end
 
+  defmodule PatternAgent do
+    use GenAgent
+
+    @impl true
+    def init_agent(_opts) do
+      {:ok, [system: "You are a researcher.", max_tokens: 512], %{}}
+    end
+
+    @impl true
+    def handle_response(_ref, _response, state), do: {:noreply, state}
+  end
+
   defp event(type, data), do: %JsonLineEvent{event_type: type, data: data, raw: ""}
 
   defp unique_name(prefix), do: "#{prefix}-#{System.unique_integer([:positive])}"
+
+  test "guide-style callback options identify the unsupported Codex option" do
+    assert {:error, {:backend_start_failed, {:unsupported_option, :system}}} =
+             GenAgent.start_agent(PatternAgent,
+               name: unique_name("pattern-codex"),
+               backend: GenAgent.Backends.Codex
+             )
+  end
 
   defp start_codex_agent(exec_fn, extra_opts \\ []) do
     name = unique_name("codex")

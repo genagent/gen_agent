@@ -82,10 +82,23 @@ defmodule GenAgent.Backends.CodexStreamingTest do
     for option <- [:cd, :add_dirs, :search] do
       assert {:error, {:unsupported_resume_option, ^option}} =
                Codex.start_session([{option, "fixture"}])
+
+      assert {:error, {:unsupported_resume_option, ^option}} =
+               Codex.resume_session("fixture-thread", [{option, "fixture"}])
     end
 
     assert {:error, {:invalid_approval_policy, :on_failure}} =
              Codex.start_session(approval_policy: :on_failure)
+  end
+
+  test "unknown options report an unsupported option on start and resume" do
+    for option <- [:system_prompt, :system, :max_tokens, :modle] do
+      assert {:error, {:unsupported_option, ^option}} =
+               Codex.start_session([{option, "fixture"}])
+
+      assert {:error, {:unsupported_option, ^option}} =
+               Codex.resume_session("fixture-thread", [{option, "fixture"}])
+    end
   end
 
   test "an explicit approval policy wins over a conflicting config override on resume" do
