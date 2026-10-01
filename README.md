@@ -150,6 +150,9 @@ can differ: return the appropriate options from `init_agent/1` when adding
 model settings, instructions, or permissions. Each agent keeps its own
 provider session.
 
+For a runnable OTP application that starts Claude and Codex behind one
+entry point, see the [local GenAgent app example](examples/gen_agent_app/README.md).
+
 ## State model
 
 An agent is a state machine with two states:
