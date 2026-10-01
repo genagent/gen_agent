@@ -58,27 +58,29 @@ defmodule GenAgent.Response do
         text
 
       _ ->
-        {reversed_chunks, _seen_text?} =
-          Enum.reduce(events, {[], false}, fn
-            %Event{kind: :text, data: data}, {chunks, seen_text?} ->
-              text = Map.get(data, :text, "")
-
-              chunks =
-                if Map.get(data, :message_boundary, false) and seen_text? and text != "" do
-                  [text, "\n\n" | chunks]
-                else
-                  [text | chunks]
-                end
-
-              {chunks, seen_text? or text != ""}
-
-            _, acc ->
-              acc
-          end)
-
-        reversed_chunks |> Enum.reverse() |> IO.iodata_to_binary()
+        assemble_deltas(events)
     end
   end
+
+  defp assemble_deltas(events) do
+    {reversed_chunks, _seen_text?} = Enum.reduce(events, {[], false}, &append_text/2)
+    reversed_chunks |> Enum.reverse() |> IO.iodata_to_binary()
+  end
+
+  defp append_text(%Event{kind: :text, data: data}, {chunks, seen_text?}) do
+    text = Map.get(data, :text, "")
+
+    chunks =
+      if Map.get(data, :message_boundary, false) and seen_text? and text != "" do
+        [text, "\n\n" | chunks]
+      else
+        [text | chunks]
+      end
+
+    {chunks, seen_text? or text != ""}
+  end
+
+  defp append_text(_event, acc), do: acc
 
   defp extract_usage(events) do
     events
