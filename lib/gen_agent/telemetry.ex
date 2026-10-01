@@ -12,9 +12,10 @@ defmodule GenAgent.Telemetry do
   | `[:gen_agent, :turn, :stop]` | `duration_ms` (non-negative milliseconds) | `agent`, `ref`, `origin` |
   | `[:gen_agent, :turn, :error]` | `duration_ms` (non-negative milliseconds) | `agent`, `ref`, `origin`, `reason_kind` |
   | `[:gen_agent, :turn, :rejected]` | `system_time` (native unit) | `agent`, `ref`, `origin`, `reason_kind` |
+  | `[:gen_agent, :turn, :cancelled]` | `system_time` (native unit) | `agent`, `ref`, `origin`, `reason_kind` |
 
-  `ref` is the request reference and correlates the start with one
-  terminal event. `origin` is one of `:ask`, `:tell`, `:event`, or
+  `ref` is the request reference. For dispatched turns, it correlates
+  the start with one terminal event. `origin` is one of `:ask`, `:tell`, `:event`, or
   `:self_chain`. A dispatched turn emits `:start` and then `:stop` or
   `:error` when it settles. Duration uses the agent process's
   monotonic clock from dispatch to backend outcome, watchdog,
@@ -27,11 +28,17 @@ defmodule GenAgent.Telemetry do
   notifications are instead reported by `[:gen_agent, :input,
   :rejected]`; they are not prompt turns.
 
+  `:cancelled` means accepted queued work was removed before dispatch,
+  so it also has **no matching `:start`** and no duration. Its
+  `reason_kind` is `:caller_cancelled` for a queued tell cancelled by
+  ref, or `:caller_down` for a queued ask whose caller died.
+
   `reason_kind` is deliberately coarse: terminal errors use
   `:timeout`, `:interrupted`, `:task_crashed`, or
   `:backend_or_callback_error`. Pre-dispatch rejections use
   `:overloaded`, `:pre_turn_skipped`, `:pre_turn_halted`, or
-  `:pre_turn_invalid`. The raw reason, prompt, response, backend
+  `:pre_turn_invalid`. Queue cancellations use `:caller_cancelled` or
+  `:caller_down`. The raw reason, prompt, response, backend
   session, and agent state are never included in these turn events.
   `agent` and especially `ref` can still have high cardinality: use
   them to correlate traces, not as unbounded metric labels. The

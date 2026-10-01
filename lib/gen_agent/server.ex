@@ -54,6 +54,7 @@ defmodule GenAgent.Server do
       pre_run_done: false,
       self_chain: nil,
       mailbox: :queue.new(),
+      ask_monitors: %{},
       pending_prompt_bytes: 0,
       # Events delivered via `GenAgent.notify/2` that arrived while
       # the agent was in `:processing` are buffered here instead of
@@ -251,6 +252,7 @@ defmodule GenAgent.Server do
             pending_prompt_bytes: data.pending_prompt_bytes - :erlang.external_size(prompt)
         }
 
+        data = clear_ask_monitor(data, request_ref)
         try_dispatch(data, request_ref, kind, prompt)
     end
   end
@@ -458,6 +460,26 @@ defmodule GenAgent.Server do
   end
 
   # ---------------------------------------------------------------------------
+  # cancel_request -- remove only a queued tell with the exact ref
+  # ---------------------------------------------------------------------------
+
+  def handle_event({:call, from}, {:cancel_request, ref}, _state, %Data{} = data) do
+    cond do
+      current_tell_ref?(data.current_request, ref) ->
+        {:keep_state_and_data, [{:reply, from, {:error, :current}}]}
+
+      Map.get(data.tell_results, ref) == {:error, :cancelled} ->
+        {:keep_state_and_data, [{:reply, from, {:ok, :cancelled}}]}
+
+      Map.has_key?(data.tell_results, ref) ->
+        {:keep_state_and_data, [{:reply, from, {:error, :already_finished}}]}
+
+      true ->
+        cancel_queued_tell(data, from, ref)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # resume -- unhalt and re-trigger drain
   # ---------------------------------------------------------------------------
 
@@ -490,6 +512,22 @@ defmodule GenAgent.Server do
 
       _ ->
         :keep_state_and_data
+    end
+  end
+
+  def handle_event(:info, {:DOWN, mon, :process, _pid, _reason}, _state, %Data{} = data)
+      when is_map_key(data.ask_monitors, mon) do
+    {request_ref, ask_monitors} = Map.pop(data.ask_monitors, mon)
+    data = %{data | ask_monitors: ask_monitors}
+
+    case find_queued_entry(data.mailbox, request_ref) do
+      {^request_ref, {:ask, _from} = kind, prompt} ->
+        data = remove_queued_entry(data, request_ref, prompt)
+        emit_turn_cancelled(data.name, request_ref, kind, :caller_down)
+        {:keep_state, data}
+
+      nil ->
+        {:keep_state, data}
     end
   end
 
@@ -528,9 +566,73 @@ defmodule GenAgent.Server do
 
   # ---------------------------------------------------------------------------
   defp queue_ask(data, from, prompt) do
-    case enqueue_prompt(data, make_ref(), {:ask, from}, prompt) do
-      {:ok, queued} -> {:keep_state, queued}
-      {:error, reason} -> {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+    request_ref = make_ref()
+
+    case enqueue_prompt(data, request_ref, {:ask, from}, prompt) do
+      {:ok, queued} ->
+        monitor = Process.monitor(elem(from, 0))
+
+        {:keep_state,
+         %{queued | ask_monitors: Map.put(queued.ask_monitors, monitor, request_ref)}}
+
+      {:error, reason} ->
+        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+    end
+  end
+
+  defp cancel_queued_tell(data, from, ref) do
+    case find_queued_entry(data.mailbox, ref) do
+      {^ref, :tell, prompt} ->
+        finish_queued_tell_cancel(data, from, ref, :tell, prompt)
+
+      {^ref, {:tell, _recipient} = kind, prompt} ->
+        finish_queued_tell_cancel(data, from, ref, kind, prompt)
+
+      _ ->
+        {:keep_state_and_data, [{:reply, from, {:error, :not_found}}]}
+    end
+  end
+
+  defp current_tell_ref?(%{request_ref: ref, kind: :tell}, ref), do: true
+  defp current_tell_ref?(%{request_ref: ref, kind: {:tell, _recipient}}, ref), do: true
+  defp current_tell_ref?(_current, _ref), do: false
+
+  defp finish_queued_tell_cancel(data, from, ref, kind, prompt) do
+    data = remove_queued_entry(data, ref, prompt)
+    data = store_tell_result(data, ref, {:error, :cancelled})
+
+    if match?({:tell, _}, kind) do
+      {:tell, recipient} = kind
+      send(recipient, {:gen_agent, :completion, data.name, ref, {:error, :cancelled}})
+    end
+
+    emit_turn_cancelled(data.name, ref, kind, :caller_cancelled)
+    {:keep_state, data, [{:reply, from, {:ok, :cancelled}}]}
+  end
+
+  defp find_queued_entry(mailbox, ref) do
+    Enum.find(:queue.to_list(mailbox), fn {request_ref, _kind, _prompt} -> request_ref == ref end)
+  end
+
+  defp remove_queued_entry(data, ref, prompt) do
+    mailbox =
+      :queue.filter(fn {request_ref, _kind, _prompt} -> request_ref != ref end, data.mailbox)
+
+    %{
+      data
+      | mailbox: mailbox,
+        pending_prompt_bytes: data.pending_prompt_bytes - :erlang.external_size(prompt)
+    }
+  end
+
+  defp clear_ask_monitor(data, request_ref) do
+    case Enum.find(data.ask_monitors, fn {_monitor, ref} -> ref == request_ref end) do
+      {monitor, ^request_ref} ->
+        Process.demonitor(monitor, [:flush])
+        %{data | ask_monitors: Map.delete(data.ask_monitors, monitor)}
+
+      nil ->
+        data
     end
   end
 
@@ -1395,6 +1497,15 @@ defmodule GenAgent.Server do
 
   defp emit_turn_rejected(name, ref, kind, reason_kind) do
     :telemetry.execute([:gen_agent, :turn, :rejected], %{system_time: System.system_time()}, %{
+      agent: name,
+      ref: ref,
+      origin: request_origin(kind),
+      reason_kind: reason_kind
+    })
+  end
+
+  defp emit_turn_cancelled(name, ref, kind, reason_kind) do
+    :telemetry.execute([:gen_agent, :turn, :cancelled], %{system_time: System.system_time()}, %{
       agent: name,
       ref: ref,
       origin: request_origin(kind),

@@ -237,6 +237,7 @@ for details.
 | `notify_ack/3` | Wait for an in-memory notification admission result. |
 | `interrupt/1` | Cancel an in-flight turn. |
 | `interrupt_request/3` | Acknowledge cancellation only if the active request ref matches. |
+| `cancel_request/3` | Remove a queued tell by its exact request ref. |
 | `resume/1` | Unhalt an agent and drain its mailbox. |
 | `status/2` | Read the agent's current state. |
 | `runtime_snapshot/2` | Read bounded runtime metadata and pending-input counts. |
@@ -277,13 +278,15 @@ end
 The optional third argument selects a recipient pid; it defaults to the
 caller. The agent registers that recipient when it accepts the request,
 so a fast response or `pre_turn/2` skip can send the completion before
-the call returns. Match on the ref, which also works with
-`interrupt_request/3`. Pending-queue overload returns an error without
-a ref or completion message. Accepted queued requests deliver after
-their turn; backend errors, gate skip/halt/invalid, interruption, and
-watchdog expiry deliver error outcomes. The message is sent after turn
-decision and `post_turn/3` callbacks, at most once for each accepted
-request. Existing `tell/3` and `poll/3` behavior stays unchanged.
+the call returns. Match on the ref, which works with
+`interrupt_request/3` while active or `cancel_request/3` while queued.
+Pending-queue overload returns an error without a ref or completion
+message. Accepted queued requests deliver after
+their turn, or deliver `{:error, :cancelled}` when cancelled before
+dispatch. Backend errors, gate skip/halt/invalid, interruption, and
+watchdog expiry deliver error outcomes. For started turns, the message
+is sent after turn decision and `post_turn/3` callbacks. It is sent at
+most once for each accepted request.
 
 Delivery does not depend on the bounded poll-result cache. It is an
 in-memory BEAM send, not durable delivery: a dead recipient loses its
