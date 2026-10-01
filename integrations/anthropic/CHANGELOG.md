@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.4](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.2.3...gen_agent_anthropic-v0.2.4) (2026-10-01)
+
+
+### Bug Fixes
+
+* accept gen_agent 0.5 in component packages ([#167](https://github.com/genagent/gen_agent/issues/167)) ([43272dd](https://github.com/genagent/gen_agent/commit/43272dd2a699927d8d1bdc42390e795f853b6c84))
+* **anthropic:** discard unanswered turns after empty responses ([#153](https://github.com/genagent/gen_agent/issues/153)) ([990ac79](https://github.com/genagent/gen_agent/commit/990ac79acb1b13dfba07fba3542a9f2817e7edbb))
+
 ## [0.2.3](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.2.2...gen_agent_anthropic-v0.2.3) (2026-10-01)
 
 
