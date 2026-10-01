@@ -1,6 +1,8 @@
 defmodule GenAgent.StreamStateTest do
   use ExUnit.Case, async: true
 
+  import GenAgent.TestDownAssertions
+
   alias GenAgent.Event
 
   defmodule Agent do
@@ -148,10 +150,7 @@ defmodule GenAgent.StreamStateTest do
     task_monitor = Process.monitor(task_pid)
 
     assert :ok = GenAgent.interrupt(name)
-    assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, down_reason}
-    # Monitor registration can race with the interrupt killing the task.
-    # Then the monitor reports :noproc instead of the task's kill reason.
-    assert down_reason in [:killed, :noproc]
+    assert_killed_or_gone(task_monitor, task_pid)
     assert_receive {:decision, {:error, :interrupted}, ^ref, []}
     assert_receive {:post_turn, {:error, :interrupted}, ^ref, []}
     assert {:error, :interrupted} = GenAgent.poll(name, ref)

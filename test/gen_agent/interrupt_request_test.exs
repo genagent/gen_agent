@@ -2,6 +2,7 @@ defmodule GenAgent.InterruptRequestTest do
   use ExUnit.Case, async: true
 
   alias GenAgent.Event
+  import GenAgent.TestDownAssertions
 
   defmodule Agent do
     use GenAgent
@@ -73,7 +74,7 @@ defmodule GenAgent.InterruptRequestTest do
     task_monitor = Process.monitor(task_pid)
 
     assert {:ok, :accepted} = GenAgent.interrupt_request(name, ref)
-    assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, :killed}
+    assert_killed_or_gone(task_monitor, task_pid)
     assert_receive {:completed, ^ref}
     assert {:error, :interrupted} = GenAgent.poll(name, ref)
     assert GenAgent.status(name).agent_state.outcomes == [{ref, {:error, :interrupted}}]
@@ -118,7 +119,7 @@ defmodule GenAgent.InterruptRequestTest do
     old_task_monitor = Process.monitor(old_task)
 
     assert :ok = GenAgent.stop(name)
-    assert_receive {:DOWN, ^old_task_monitor, :process, ^old_task, :killed}
+    assert_killed_or_gone(old_task_monitor, old_task)
     wait_until(fn -> GenAgent.whereis(name) == nil end)
 
     start_agent([blocked_turn(:b)], name)

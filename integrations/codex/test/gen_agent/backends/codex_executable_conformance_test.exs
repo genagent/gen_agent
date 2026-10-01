@@ -1,6 +1,8 @@
 defmodule GenAgent.Backends.CodexExecutableConformanceTest do
   use ExUnit.Case, async: false
 
+  import GenAgent.TestDownAssertions
+
   @moduletag capture_log: true
 
   defmodule Agent do
@@ -191,7 +193,7 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
           Process.exit(GenAgent.whereis(name), :kill)
       end
 
-      assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, :killed}, 1_000
+      assert_killed_or_gone(task_monitor, task_pid, 1_000)
     end
   end
 

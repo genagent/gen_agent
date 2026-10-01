@@ -2,6 +2,7 @@ defmodule GenAgent.EventCaptureTest do
   use ExUnit.Case, async: true
 
   alias GenAgent.Event
+  import GenAgent.TestDownAssertions
 
   defmodule Agent do
     use GenAgent
@@ -179,7 +180,7 @@ defmodule GenAgent.EventCaptureTest do
     task_monitor = Process.monitor(task_pid)
 
     assert :ok = GenAgent.interrupt(name)
-    assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, :killed}
+    assert_killed_or_gone(task_monitor, task_pid)
     assert_receive {:decision, ^ref, {:error, :interrupted}, 0}
     assert {:error, :interrupted} = GenAgent.poll(name, ref)
 

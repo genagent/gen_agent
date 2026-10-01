@@ -10,8 +10,15 @@ defmodule GenAgentEnsemble.WorkerLossTest do
 
     on_exit(fn ->
       case Registry.lookup(GenAgentEnsemble.Registry, name) do
-        [{server, _}] -> if Process.alive?(server), do: Ensemble.stop(name)
-        [] -> :ok
+        [{server, _}] ->
+          try do
+            GenServer.stop(server, :normal, 10_000)
+          catch
+            :exit, {:noproc, _} -> :ok
+          end
+
+        [] ->
+          :ok
       end
     end)
 

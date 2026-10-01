@@ -11,6 +11,7 @@ defmodule GenAgent.IntegrationTest do
   @moduletag capture_log: true
 
   alias GenAgent.Event
+  import GenAgent.TestDownAssertions
 
   defmodule SimpleAgent do
     use GenAgent
@@ -285,7 +286,7 @@ defmodule GenAgent.IntegrationTest do
 
         Process.exit(agent_pid, :kill)
 
-        assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, :killed}
+        assert_killed_or_gone(task_monitor, task_pid)
         wait_until(fn -> GenAgent.whereis(name) == nil end)
         refute task_pid in Task.Supervisor.children(task_supervisor)
       end
@@ -572,7 +573,7 @@ defmodule GenAgent.IntegrationTest do
 
       :ok = GenAgent.stop(name)
 
-      assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, :killed}
+      assert_killed_or_gone(task_monitor, task_pid)
       wait_until(fn -> is_nil(GenAgent.whereis(name)) end)
     end
 
@@ -592,8 +593,8 @@ defmodule GenAgent.IntegrationTest do
 
         Process.exit(agent_pid, :kill)
 
-        assert_receive {:DOWN, ^agent_monitor, :process, ^agent_pid, :killed}
-        assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, :killed}
+        assert_killed_or_gone(agent_monitor, agent_pid)
+        assert_killed_or_gone(task_monitor, task_pid)
         wait_until(fn -> is_nil(GenAgent.whereis(name)) end)
 
         assert Process.alive?(other_task_pid)

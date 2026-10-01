@@ -63,7 +63,7 @@ defmodule GenAgentEnsemble.OwnershipTest do
       assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
     end)
 
-    assert GenAgent.whereis("#{name}/worker") == nil
+    assert_deregistered("#{name}/worker")
     assert no_ensemble_telemetry_handler?(name)
 
     replacement = start_solo(name)
@@ -102,7 +102,7 @@ defmodule GenAgentEnsemble.OwnershipTest do
       assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
     end)
 
-    assert GenAgent.whereis("#{name}/worker") == nil
+    assert_deregistered("#{name}/worker")
     assert is_pid(start_solo(name))
   end
 
@@ -135,8 +135,8 @@ defmodule GenAgentEnsemble.OwnershipTest do
              )
 
     assert Registry.lookup(GenAgentEnsemble.Registry, name) == []
-    assert GenAgent.whereis("#{name}/good") == nil
-    assert GenAgent.whereis("#{name}/bad") == nil
+    assert_deregistered("#{name}/good")
+    assert_deregistered("#{name}/bad")
     assert no_ensemble_telemetry_handler?(name)
     assert is_pid(start_solo(name))
   end
@@ -163,6 +163,26 @@ defmodule GenAgentEnsemble.OwnershipTest do
   end
 
   def ignore_event(_event, _measurements, _metadata, _config), do: :ok
+
+  defp assert_deregistered(name) do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    await_deregistration(name, deadline)
+  end
+
+  defp await_deregistration(name, deadline) do
+    case GenAgent.whereis(name) do
+      nil ->
+        :ok
+
+      pid ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          flunk("#{name} remained registered as #{inspect(pid)}")
+        else
+          Process.sleep(10)
+          await_deregistration(name, deadline)
+        end
+    end
+  end
 
   defp await_result(name, token, attempts \\ 100) do
     case Ensemble.poll(name, token) do
