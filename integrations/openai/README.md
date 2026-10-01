@@ -134,8 +134,10 @@ every turn after the first.
   `System.get_env("OPENAI_API_KEY")`.
 - `:model` -- model name. Defaults to `"gpt-5"`.
 - `:instructions` -- system prompt (string). Resent every turn.
-- `:reasoning_effort` -- one of `:low | :medium | :high | nil`.
-  When set, requests a specific reasoning effort for o1/o3/o4/gpt-5.
+- `:reasoning_effort` -- an atom or string passed through as
+  `reasoning.effort` on reasoning models (for example `:low`,
+  `:medium`, `:high`), or `nil` for the model default. The backend
+  does not validate it; accepted values depend on the model.
 - `:max_output_tokens` -- cap on output tokens per turn. Defaults
   to `nil` (model default).
 - `:http_fn` -- a 1-arity function

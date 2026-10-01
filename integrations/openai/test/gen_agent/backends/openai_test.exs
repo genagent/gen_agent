@@ -259,6 +259,24 @@ defmodule GenAgent.Backends.OpenAITest do
       assert request.body.reasoning == %{effort: :high}
     end
 
+    test "passes any reasoning effort value through unchanged" do
+      for effort <- [:minimal, "xhigh"] do
+        ref = make_ref()
+
+        {:ok, session} =
+          OpenAI.start_session(
+            api_key: "sk-test",
+            reasoning_effort: effort,
+            http_fn: recording_fn(ref, ok_response("k"))
+          )
+
+        {:ok, _events, _session} = OpenAI.prompt(session, "hi")
+
+        assert_receive {^ref, request}
+        assert request.body.reasoning == %{effort: effort}
+      end
+    end
+
     test "includes max_output_tokens when set" do
       ref = make_ref()
 
