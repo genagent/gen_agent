@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.1.2...gen_agent_ensemble-v0.1.3) (2026-10-01)
+
+
+### Bug Fixes
+
+* **ensemble:** own agents for session lifetime ([#62](https://github.com/genagent/gen_agent/issues/62)) ([e574683](https://github.com/genagent/gen_agent/commit/e574683574f94d5b07219bbd6c10770bc3cf657e))
+
 ## [0.1.2](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.1.1...gen_agent_ensemble-v0.1.2) (2026-10-01)
 
 
