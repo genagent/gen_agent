@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.5](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.1.4...gen_agent_claude-v0.1.5) (2026-10-01)
+
+
+### Bug Fixes
+
+* accept gen_agent 0.5 in component packages ([#167](https://github.com/genagent/gen_agent/issues/167)) ([43272dd](https://github.com/genagent/gen_agent/commit/43272dd2a699927d8d1bdc42390e795f853b6c84))
+* **claude:** avoid conflicting resume options ([#154](https://github.com/genagent/gen_agent/issues/154)) ([f2de272](https://github.com/genagent/gen_agent/commit/f2de27263b9190d572f8a7ee47da3013733ec4bf))
+* **claude:** require escaped CLI binary paths ([#166](https://github.com/genagent/gen_agent/issues/166)) ([151dbfd](https://github.com/genagent/gen_agent/commit/151dbfdf8859097214c5512870602507979d066b))
+
 ## [0.1.4](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.1.3...gen_agent_claude-v0.1.4) (2026-10-01)
 
 
