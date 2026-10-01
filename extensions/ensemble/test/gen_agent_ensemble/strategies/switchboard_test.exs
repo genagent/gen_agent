@@ -148,7 +148,7 @@ defmodule GenAgentEnsemble.Strategies.SwitchboardTest do
     {:ok, pid} = start_session(name, [{"alice", [echo("alice")]}])
     ref = Process.monitor(pid)
 
-    GenAgent.stop("#{name}/alice")
+    Process.exit(GenAgent.whereis("#{name}/alice"), :kill)
 
     assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
   end

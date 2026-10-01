@@ -85,7 +85,7 @@ defmodule GenAgentEnsemble.Strategies.PipelineTest do
       start_pipeline(name, [[transform("s1")], [transform("s2")]])
 
     ref = Process.monitor(pid)
-    GenAgent.stop("#{name}/#{name}-s1")
+    Process.exit(GenAgent.whereis("#{name}/#{name}-s1"), :kill)
 
     assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
   end

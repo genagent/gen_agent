@@ -8,6 +8,9 @@ defmodule GenAgentEnsemble.Server do
     :strategy_mod,
     :strategy_state,
     :session_name,
+    :agent_tree,
+    :task_supervisor,
+    :agent_supervisor,
     # agents we own, MapSet of agent names
     :agents,
     # monitor refs, %{mref => agent_name}
@@ -24,7 +27,15 @@ defmodule GenAgentEnsemble.Server do
 
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
-    GenServer.start_link(__MODULE__, opts, name: via(name))
+
+    case GenServer.start(__MODULE__, opts, name: via(name)) do
+      {:ok, pid} = result ->
+        Process.link(pid)
+        result
+
+      error ->
+        error
+    end
   end
 
   def tell(name, prompt, opts \\ []), do: GenServer.call(via(name), {:tell, prompt, opts})
@@ -50,32 +61,49 @@ defmodule GenAgentEnsemble.Server do
     strategy_opts = Keyword.get(opts, :opts, [])
     session_name = Keyword.fetch!(opts, :name)
 
-    case strategy_mod.init(strategy_opts) do
-      {:ok, strategy_state, start_specs} ->
-        state = %__MODULE__{
-          strategy_mod: strategy_mod,
-          strategy_state: strategy_state,
-          session_name: session_name,
-          agents: MapSet.new(),
-          monitors: %{},
-          pending: %{},
-          completed: %{},
-          in_flight: %{}
-        }
+    with {:ok, strategy_state, start_specs} <- strategy_mod.init(strategy_opts),
+         {:ok, agent_tree} <- GenAgentEnsemble.AgentTree.start_link(session_name) do
+      # Older releases left this handler behind after abrupt server death.
+      # Request-scoped completions now replace the telemetry bridge entirely.
+      _ = :telemetry.detach("gen_agent_ensemble:#{session_name}")
 
-        attach_telemetry(session_name)
-        state = apply_start_specs(state, start_specs)
-        {:ok, state}
+      {task_supervisor, agent_supervisor} =
+        GenAgentEnsemble.AgentTree.supervisors(agent_tree)
+
+      state = %__MODULE__{
+        strategy_mod: strategy_mod,
+        strategy_state: strategy_state,
+        session_name: session_name,
+        agent_tree: agent_tree,
+        task_supervisor: task_supervisor,
+        agent_supervisor: agent_supervisor,
+        agents: MapSet.new(),
+        monitors: %{},
+        pending: %{},
+        completed: %{},
+        in_flight: %{}
+      }
+
+      case apply_start_specs(state, start_specs) do
+        {:ok, state} ->
+          {:ok, state}
+
+        {:error, reason} ->
+          Supervisor.stop(agent_tree)
+          {:stop, reason}
+      end
+    else
+      {:error, reason} -> {:stop, reason}
     end
   end
 
-  defp apply_start_specs(state, specs), do: Enum.reduce(specs, state, &apply_start_spec/2)
-
-  defp apply_start_spec(spec, state) do
-    case apply_op({:start, spec}, state) do
-      {:ok, new_state} -> new_state
-      {:error, _} -> state
-    end
+  defp apply_start_specs(state, specs) do
+    Enum.reduce_while(specs, {:ok, state}, fn spec, {:ok, acc} ->
+      case apply_op({:start, spec}, acc) do
+        {:ok, next} -> {:cont, {:ok, next}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   @impl true
@@ -164,18 +192,18 @@ defmodule GenAgentEnsemble.Server do
   end
 
   @impl true
-  def handle_info({:gen_agent_stop, ns_agent, ref}, state) do
+  def handle_info({:gen_agent, :completion, _ns_agent, ref, {:ok, response}}, state) do
     case Map.pop(state.in_flight, ref) do
       {nil, _} ->
         {:noreply, state}
 
       {{bare_agent, token}, rest} ->
         state = %{state | in_flight: rest}
-        {:noreply, handle_prompt_stop(state, ns_agent, ref, bare_agent, token)}
+        {:noreply, handle_prompt_response(state, bare_agent, token, response)}
     end
   end
 
-  def handle_info({:gen_agent_error, _ns_agent, ref, reason}, state) do
+  def handle_info({:gen_agent, :completion, _ns_agent, ref, {:error, reason}}, state) do
     case Map.pop(state.in_flight, ref) do
       {nil, _} ->
         {:noreply, state}
@@ -234,22 +262,16 @@ defmodule GenAgentEnsemble.Server do
 
   def handle_info(_msg, state), do: {:noreply, state}
 
-  defp handle_prompt_stop(state, ns_agent, ref, bare_agent, token) do
+  defp handle_prompt_response(state, bare_agent, token, response) do
     if active_dispatch?(state, token) do
-      case GenAgent.poll(ns_agent, ref, 5_000) do
-        {:ok, :completed, response} ->
-          {ops, strategy_state} =
-            call_strategy(state.strategy_mod, :handle_response, [
-              bare_agent,
-              response,
-              state.strategy_state
-            ])
+      {ops, strategy_state} =
+        call_strategy(state.strategy_mod, :handle_response, [
+          bare_agent,
+          response,
+          state.strategy_state
+        ])
 
-          %{state | strategy_state: strategy_state} |> apply_ops(ops)
-
-        _ ->
-          state
-      end
+      %{state | strategy_state: strategy_state} |> apply_ops(ops)
     else
       state
     end
@@ -281,12 +303,7 @@ defmodule GenAgentEnsemble.Server do
 
   @impl true
   def terminate(_reason, state) do
-    detach_telemetry(state.session_name)
-
-    Enum.each(state.agents, fn name ->
-      _ = catch_exit(fn -> GenAgent.stop(namespaced(state, name)) end)
-    end)
-
+    _ = catch_exit(fn -> Supervisor.stop(state.agent_tree) end)
     :ok
   end
 
@@ -306,9 +323,15 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp apply_op({:start, {name, module, opts}}, state) do
-    agent_opts = Keyword.put(opts, :name, namespaced(state, name))
+    agent_opts =
+      opts
+      |> Keyword.put(:name, namespaced(state, name))
+      |> Keyword.put(:task_supervisor, state.task_supervisor)
 
-    case GenAgent.start_agent(module, agent_opts) do
+    case DynamicSupervisor.start_child(
+           state.agent_supervisor,
+           GenAgent.child_spec(module, agent_opts)
+         ) do
       {:ok, pid} ->
         mref = Process.monitor(pid)
 
@@ -330,7 +353,7 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp apply_op({:stop, name}, state) do
-    _ = catch_exit(fn -> GenAgent.stop(namespaced(state, name)) end)
+    _ = catch_exit(fn -> GenAgent.stop(namespaced(state, name), state.agent_supervisor) end)
     monitors = drop_monitors_for(state.monitors, name)
 
     {:ok,
@@ -372,8 +395,13 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp dispatch(state, name, prompt, token) do
-    {:ok, ref} = GenAgent.tell(namespaced(state, name), prompt)
-    {:ok, %{state | in_flight: Map.put(state.in_flight, ref, {name, token})}}
+    case GenAgent.tell_with_completion(namespaced(state, name), prompt, self()) do
+      {:ok, ref} ->
+        {:ok, %{state | in_flight: Map.put(state.in_flight, ref, {name, token})}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp reply_to_token(state, token, result) do
@@ -410,8 +438,8 @@ defmodule GenAgentEnsemble.Server do
 
   # Internal name used when registering a sub-agent with GenAgent.Registry.
   # Strategy code always sees the bare name; the Server translates when
-  # calling GenAgent.{tell,stop,notify,poll} and ignores the namespaced
-  # name that comes back on telemetry events (it looks up by ref instead).
+  # calling GenAgent.{tell_with_completion,stop,notify} and ignores the
+  # namespaced name in completion messages (it looks up by ref instead).
   defp namespaced(%__MODULE__{session_name: session}, bare_name) do
     "#{session}/#{bare_name}"
   end
@@ -433,38 +461,4 @@ defmodule GenAgentEnsemble.Server do
   catch
     :exit, _ -> :ok
   end
-
-  # --- telemetry bridge ---
-
-  defp attach_telemetry(session_name) do
-    :telemetry.attach_many(
-      handler_id(session_name),
-      [
-        [:gen_agent, :prompt, :stop],
-        [:gen_agent, :prompt, :error]
-      ],
-      &__MODULE__.__telemetry_handler__/4,
-      self()
-    )
-  end
-
-  @doc false
-  def __telemetry_handler__([:gen_agent, :prompt, :stop], _m, %{agent: agent, ref: ref}, target) do
-    send(target, {:gen_agent_stop, agent, ref})
-  end
-
-  def __telemetry_handler__(
-        [:gen_agent, :prompt, :error],
-        _m,
-        %{agent: agent, ref: ref, reason: reason},
-        target
-      ) do
-    send(target, {:gen_agent_error, agent, ref, reason})
-  end
-
-  defp detach_telemetry(session_name) do
-    :telemetry.detach(handler_id(session_name))
-  end
-
-  defp handler_id(session_name), do: "gen_agent_ensemble:#{session_name}"
 end

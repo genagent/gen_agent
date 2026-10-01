@@ -102,7 +102,7 @@ defmodule GenAgentEnsemble.WorkerLossTest do
     # Any sibling result already in flight, or delivered after the stop, is
     # fenced out before it can replay queued work or replace the errors.
     send(worker2_task, {:result, "LATE"})
-    send(server, {:gen_agent_stop, "#{name}/worker-2", late_ref})
+    send(server, {:gen_agent, :completion, "#{name}/worker-2", late_ref, {:error, :stale}})
     assert {:ok, status} = Ensemble.status(name)
     assert status.phase == :idle
     assert status.queued == 0

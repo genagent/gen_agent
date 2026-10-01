@@ -290,7 +290,7 @@ defmodule GenAgentEnsemble.Strategies.ConsensusTest do
       ])
 
     ref = Process.monitor(pid)
-    GenAgent.stop("#{name}/a")
+    Process.exit(GenAgent.whereis("#{name}/a"), :kill)
 
     assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
   end
