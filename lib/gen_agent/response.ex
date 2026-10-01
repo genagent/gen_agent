@@ -36,8 +36,10 @@ defmodule GenAgent.Response do
 
   The `events` list must include exactly one terminal event (`:result` or
   `:error`). Text is taken from the `:result` event's `:text` field if
-  present, otherwise assembled from any `:text` deltas. Usage is taken from
-  the most recent `:usage` event, if any.
+  present, otherwise assembled from any `:text` deltas. Deltas concatenate
+  directly; a text event with `message_boundary: true` starts a separate
+  assistant message after a blank line. Usage is taken from the most recent
+  `:usage` event, if any.
   """
   @spec from_events([Event.t()], keyword()) :: t()
   def from_events(events, opts \\ []) when is_list(events) do
@@ -56,9 +58,25 @@ defmodule GenAgent.Response do
         text
 
       _ ->
-        events
-        |> Enum.filter(&(&1.kind == :text))
-        |> Enum.map_join("", fn %Event{data: data} -> Map.get(data, :text, "") end)
+        {reversed_chunks, _seen_text?} =
+          Enum.reduce(events, {[], false}, fn
+            %Event{kind: :text, data: data}, {chunks, seen_text?} ->
+              text = Map.get(data, :text, "")
+
+              chunks =
+                if Map.get(data, :message_boundary, false) and seen_text? and text != "" do
+                  [text, "\n\n" | chunks]
+                else
+                  [text | chunks]
+                end
+
+              {chunks, seen_text? or text != ""}
+
+            _, acc ->
+              acc
+          end)
+
+        reversed_chunks |> Enum.reverse() |> IO.iodata_to_binary()
     end
   end
 

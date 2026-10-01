@@ -9,6 +9,8 @@ defmodule GenAgent.Event do
   ## Event kinds
 
     * `:text` -- an assistant text chunk (delta). `data` carries `%{text: String.t()}`.
+      A backend can set `message_boundary: true` when the text starts a
+      separate completed assistant message rather than continuing a delta.
     * `:tool_use` -- the agent invoked a tool. `data` is backend-specific.
     * `:tool_result` -- a tool returned. `data` is backend-specific.
     * `:usage` -- token usage info. `data` typically carries

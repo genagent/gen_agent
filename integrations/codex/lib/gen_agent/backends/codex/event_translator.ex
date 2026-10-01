@@ -12,7 +12,7 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
       `:result` event as `session_id`.
     * `turn.started` -- filtered.
     * `item.completed` with `item.type == "agent_message"` -- emits a
-      `:text` event with the item's text content.
+      `:text` event with the item's text content and a message boundary.
     * `item.completed` with `item.type == "tool_call"` or similar --
       emits a `:tool_use` event. (Exact shape depends on what Codex
       surfaces; we pass the raw item through in `:data`.)
@@ -86,8 +86,9 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
     # Intentionally omit :text. Codex's terminal event carries no
     # assembled text -- the agent's response arrives as earlier
     # `item.completed` -> `:text` events. `GenAgent.Response.from_events`
-    # falls back to concatenating :text deltas when the :result event
-    # has no :text key, which is exactly what we want.
+    # assembles :text events when the :result event has no :text key.
+    # Distinct completed messages carry a boundary marker so their text
+    # remains readable without changing streaming-delta semantics.
     result_data =
       %{session_id: thread_id}
       |> drop_nil_values()
@@ -118,7 +119,7 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
   # ---------------------------------------------------------------------------
 
   defp translate_item(%{"type" => "agent_message", "text" => text}) when is_binary(text) do
-    [Event.new(:text, %{text: text})]
+    [Event.new(:text, %{text: text, message_boundary: true})]
   end
 
   defp translate_item(%{"type" => "tool_call"} = item) do
