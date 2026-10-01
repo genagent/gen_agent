@@ -135,6 +135,21 @@ defmodule GenAgent.Backends.ClaudeExecutableConformanceTest do
     assert File.read!(Path.join(context.directory, "resume.env")) == "configured\n"
   end
 
+  test "real wrapper executes a CLI path containing spaces", context do
+    spaced_dir = Path.join(context.directory, "with space")
+    File.mkdir_p!(spaced_dir)
+    spaced_binary = Path.join(spaced_dir, "claude fixture")
+    File.cp!(context.binary, spaced_binary)
+    File.chmod!(spaced_binary, 0o755)
+
+    name = start_agent(%{context | binary: spaced_binary})
+
+    assert {:ok, response} = GenAgent.ask(name, "first prompt")
+    assert response.text == "fixture-reply"
+    assert response.session_id == "fixture-session"
+    assert ["--", "first prompt"] == Enum.take(args(spaced_dir, :fresh), -2)
+  end
+
   test "typed CLI failure and truncated stream reach GenAgent as errors", context do
     name = start_agent(context)
 
