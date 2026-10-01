@@ -158,7 +158,7 @@ config :gen_agent_ensemble,
     #        backend: GenAgent.Backends.OpenAI,
     #        model: "gpt-5-mini",
     #        max_output_tokens: 2048,
-    #        system:
+    #        instructions:
     #          "You are a senior engineer arguing one side of an architecture decision. " <>
     #            "Be concrete, cite real tradeoffs, respond directly to the other side's " <>
     #            "points. 3-5 tight sentences. Concede explicitly when the other side is right."}

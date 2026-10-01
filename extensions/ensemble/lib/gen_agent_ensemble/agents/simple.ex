@@ -5,7 +5,8 @@ defmodule GenAgentEnsemble.Agents.Simple do
   The smallest useful agent: accepts a prompt, runs one backend turn,
   returns to idle ready for the next prompt. All options are forwarded
   to the backend as-is, so you can pass backend-specific keys like
-  `:system_prompt` (Claude), `:system` (Anthropic), `:model`, etc.
+  `:system_prompt` (Claude), `:system` (Anthropic), `:instructions`
+  (OpenAI), `:model`, etc.
 
   Intended for iex experimentation and as the default worker for
   example ensembles. For real projects you'll typically write your own
