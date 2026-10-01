@@ -27,6 +27,17 @@ defmodule GenAgent.ResponseTest do
       assert Response.from_events(events).text == "hello"
     end
 
+    test "separates completed messages without splitting streaming deltas" do
+      events = [
+        Event.new(:text, %{text: "first ", message_boundary: true}),
+        Event.new(:text, %{text: "message"}),
+        Event.new(:text, %{text: "second", message_boundary: true}),
+        Event.new(:result, %{})
+      ]
+
+      assert Response.from_events(events).text == "first message\n\nsecond"
+    end
+
     test "extracts usage from the most recent :usage event" do
       events = [
         Event.new(:usage, %{input_tokens: 1, output_tokens: 2}),

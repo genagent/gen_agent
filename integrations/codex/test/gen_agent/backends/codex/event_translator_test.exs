@@ -4,6 +4,7 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
   alias CodexWrapper.JsonLineEvent
   alias GenAgent.Backends.Codex.EventTranslator
   alias GenAgent.Event
+  alias GenAgent.Response
 
   defp event(type, data), do: %JsonLineEvent{event_type: type, data: data, raw: ""}
 
@@ -58,6 +59,25 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
 
       assert [%Event{kind: :text, data: %{text: "hello world"}}, %Event{kind: :result}] =
                EventTranslator.translate(events)
+    end
+
+    test "separate completed agent messages stay distinct in the response" do
+      events = [
+        event("item.completed", %{
+          "item" => %{"type" => "agent_message", "text" => "I will inspect the file."}
+        }),
+        event("item.completed", %{
+          "item" => %{"type" => "agent_message", "text" => "The file is correct."}
+        }),
+        event("turn.completed", %{})
+      ]
+
+      translated = EventTranslator.translate(events)
+      assert [%Event{kind: :text}, %Event{kind: :text}, %Event{kind: :result}] = translated
+      assert Enum.all?(Enum.take(translated, 2), &(&1.data.message_boundary == true))
+
+      assert Response.from_events(translated).text ==
+               "I will inspect the file.\n\nThe file is correct."
     end
 
     test "tool_call becomes :tool_use with the whole item as data" do
