@@ -148,6 +148,7 @@ defmodule GenAgent do
     * `child_spec/2` -- build a child spec for caller-owned supervision.
     * `ask/3` -- synchronous prompt, blocks until the turn finishes.
     * `tell/3` -- async prompt, returns a ref for `poll/3`.
+    * `tell_with_completion/4` -- async prompt with request-scoped completion delivery.
     * `poll/3` -- check on a previously-issued `tell/3`.
     * `notify/2` -- push an external event into `c:handle_event/2`.
     * `notify_ack/3` -- acknowledge in-memory notification admission.
@@ -600,6 +601,42 @@ defmodule GenAgent do
   @spec tell(name(), String.t(), timeout()) :: {:ok, request_ref()} | {:error, term()}
   def tell(name, prompt, timeout \\ @default_call_timeout) when is_binary(prompt) do
     :gen_statem.call(via(name), {:tell, prompt}, timeout)
+  end
+
+  @doc """
+  Submit an asynchronous prompt and opt into one completion message.
+
+  `recipient` is a pid (defaults to the calling process). On an accepted
+  request this returns `{:ok, ref}` and sends the recipient
+  `{:gen_agent, :completion, name, ref, {:ok, response}}` or
+  `{:gen_agent, :completion, name, ref, {:error, reason}}` when the logical
+  request finishes. The recipient is registered within the same agent call
+  that accepts the request, so even an immediate `pre_turn/2` skip or fast
+  backend response can be delivered before this function returns. Match on
+  the returned ref to correlate the message.
+
+  Admission failure returns `{:error, {:overloaded, info}}` with no ref or
+  completion message. Accepted queued requests deliver after their turn
+  completes; `pre_turn/2` skip, halt and invalid results deliver their
+  corresponding error without starting a turn. Successful and failed turns
+  deliver after their decision and `post_turn/3` callbacks. An interrupt,
+  watchdog timeout or backend failure delivers an error. A crashing
+  `handle_response/3` callback stops the agent before completion; monitor
+  the agent when its death matters to the caller.
+
+  Delivery is a single BEAM message sent at most once per accepted request.
+  It is independent of the bounded `poll/3` result cache. A dead recipient
+  does not receive the message, and abrupt agent death can leave accepted
+  requests without a completion message; a monitor reports that uncertainty.
+  This does not prove that an external provider process has settled.
+  The request ref remains suitable for `interrupt_request/3`, and a new
+  agent under the same name never reuses it.
+  """
+  @spec tell_with_completion(name(), String.t(), pid(), timeout()) ::
+          {:ok, request_ref()} | {:error, term()}
+  def tell_with_completion(name, prompt, recipient \\ self(), timeout \\ @default_call_timeout)
+      when is_binary(prompt) and is_pid(recipient) do
+    :gen_statem.call(via(name), {:tell_with_completion, prompt, recipient}, timeout)
   end
 
   @doc """
