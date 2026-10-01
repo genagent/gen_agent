@@ -4,6 +4,11 @@
 [![Hex.pm](https://img.shields.io/hexpm/v/gen_agent_claude.svg)](https://hex.pm/packages/gen_agent_claude)
 [![Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/gen_agent_claude)
 
+The package source and new issues live in
+[`genagent/gen_agent/integrations/claude`](https://github.com/genagent/gen_agent/tree/main/integrations/claude).
+The [former repository](https://github.com/genagent/gen_agent_claude) retains
+historical releases and discussions.
+
 Claude backend for [GenAgent](https://github.com/genagent/gen_agent),
 built on top of [claude_wrapper](https://hex.pm/packages/claude_wrapper).
 

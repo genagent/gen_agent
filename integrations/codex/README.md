@@ -4,6 +4,11 @@
 [![Hex.pm](https://img.shields.io/hexpm/v/gen_agent_codex.svg)](https://hex.pm/packages/gen_agent_codex)
 [![Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/gen_agent_codex)
 
+The package source and new issues live in
+[`genagent/gen_agent/integrations/codex`](https://github.com/genagent/gen_agent/tree/main/integrations/codex).
+The [former repository](https://github.com/genagent/gen_agent_codex) retains
+historical releases and discussions.
+
 Codex backend for [GenAgent](https://github.com/genagent/gen_agent),
 built on top of [codex_wrapper](https://hex.pm/packages/codex_wrapper).
 
