@@ -145,7 +145,7 @@ defmodule GenAgentEnsemble.RunFencingTest do
     assert_receive {:controlled_prompt, "b", _reprompt_b, b2}, 2_000
 
     # A duplicate terminal notification from round one has no live ref.
-    send(pid, {:gen_agent_error, "#{name}/a", first_ref, :stale_round})
+    send(pid, {:gen_agent, :completion, "#{name}/a", first_ref, {:error, :stale_round}})
     send(a2, {:result, "yes again"})
     send(b2, {:result, "yes too"})
     assert {:ok, :completed, response} = await_poll(name, token)

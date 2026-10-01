@@ -40,7 +40,7 @@ per-strategy gotchas.
 def deps do
   [
     {:gen_agent, "~> 0.3.0"},
-    {:gen_agent_ensemble, "~> 0.1.2"},
+    {:gen_agent_ensemble, "~> 0.1"},
     # Plus at least one backend:
     {:gen_agent_anthropic, "~> 0.2"},
     # and/or:
@@ -51,9 +51,11 @@ def deps do
 end
 ```
 
-Ensemble 0.1.1 requires GenAgent 0.2. Ensemble 0.1.2 accepts both GenAgent
-0.2 and 0.3, preserving existing consumers while allowing the current core
-release.
+Ensemble 0.1.2 accepts both GenAgent 0.2 and 0.3. Current source requires
+GenAgent 0.3 for caller-owned agent supervision and request-scoped completion
+delivery. These keep agents and prompt tasks tied to the ensemble's lifetime,
+including abrupt server loss. Provider subprocess settlement remains the
+backend's responsibility.
 
 ## Quickstart (zero-setup demo)
 

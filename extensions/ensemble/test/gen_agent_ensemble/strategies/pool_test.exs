@@ -88,7 +88,7 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
 
     # Kill the only worker. The Server namespaces sub-agent names internally
     # as "<session>/<bare>", so we reach it by the registered name.
-    GenAgent.stop("#{name}/#{name}-w-1")
+    Process.exit(GenAgent.whereis("#{name}/#{name}-w-1"), :kill)
 
     assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
   end

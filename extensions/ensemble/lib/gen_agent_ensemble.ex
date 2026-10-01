@@ -79,7 +79,7 @@ defmodule GenAgentEnsemble do
   defdelegate status(name), to: GenAgentEnsemble.Server
 
   @doc """
-  Stop the ensemble. Sub-agents are terminated in the process.
+  Stop the ensemble and its owned sub-agents and prompt tasks.
   """
   defdelegate stop(name), to: GenAgentEnsemble.Server
 

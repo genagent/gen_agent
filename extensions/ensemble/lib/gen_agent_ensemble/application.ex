@@ -7,6 +7,7 @@ defmodule GenAgentEnsemble.Application do
   def start(_type, _args) do
     children = [
       {Registry, keys: :unique, name: GenAgentEnsemble.Registry},
+      {Registry, keys: :unique, name: GenAgentEnsemble.AgentTreeRegistry},
       {DynamicSupervisor, strategy: :one_for_one, name: GenAgentEnsemble.Supervisor}
     ]
 
