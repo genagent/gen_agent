@@ -1,102 +1,74 @@
 # Patterns
 
-`GenAgent` is a behaviour, not a framework. It gives you a state
-machine, a backend abstraction, and lifecycle hooks, and then gets
-out of your way. This guide collects the common topologies people
-actually build on top of it -- how a human drives a single session,
-how agents work autonomously, how multiple agents cooperate, how
-failures are recovered, and so on -- as complete worked examples.
+`GenAgent` gives each agent an OTP process, a backend, and lifecycle
+callbacks. The patterns in this guide cover two ways to build on it:
+shipped strategies in
+[`gen_agent_ensemble`](https://hex.pm/packages/gen_agent_ensemble),
+and callback-level reference implementations you can adapt in your own
+application.
 
-Each pattern on this page is a self-contained callback module (plus
-a small manager-facing facade in some cases) that you can read,
-adapt, and drop into your own application. They are **not** shipped
-as public API modules -- there's no `deps.get` step and no stable
-module names to match against. They're reference implementations.
-Copy the parts you need, simplify what you don't, and let the rest
-age out.
+An Ensemble session owns its sub-agents under one strategy. Add
+`{:gen_agent_ensemble, "~> 0.1.4"}` to your dependencies and start a
+session with `GenAgentEnsemble.start_link(name: ..., strategy: ...,
+opts: ...)`. Submit with `ask` for a synchronous result or `tell`
+followed by `poll` or `inbox`. An agent spec chooses its callback module
+and backend options, so one session can use different backends for
+different roles. The separate
+[`gen_agent_server`](https://github.com/genagent/gen_agent_server)
+application adds named instances, bounded result retention, CLI access,
+and optional scheduling around these strategies.
 
-The patterns are backend-independent. Everything demonstrated here
-works against any `GenAgent.Backend` implementation, and we test
-them in the playground against a mix of Claude, Codex, Anthropic
-HTTP, and the in-memory Mock backend.
+## Shipped Ensemble strategies
 
-## Patterns at a glance
+| Strategy | Shape | When it fits |
+| --- | --- | --- |
+| [`GenAgentEnsemble.Strategies.Solo`](solo.md) | One agent | A single session behind the Ensemble API. |
+| `GenAgentEnsemble.Strategies.Switchboard` | Caller-routed named agents | A human or client chooses `agent:` on each call. |
+| `GenAgentEnsemble.Strategies.Pipeline` | Ordered stages | Each stage's response text becomes the next prompt. |
+| `GenAgentEnsemble.Strategies.Supervisor` | Coordinator and temporary workers | Decompose one request, run independent sub-tasks, collect replies. |
+| `GenAgentEnsemble.Strategies.Pool` | Fixed reusable workers | Dispatch to the next free worker; queue requests FIFO when all are busy. |
+| `GenAgentEnsemble.Strategies.Debate` | Two alternating agents | Continue until a convergence rule or round cap ends the exchange. |
+| [`GenAgentEnsemble.Strategies.Consensus`](consensus.md) | N agents with parsed verdicts | Compare decisions against a threshold and report divergence at the round cap. |
 
-| Pattern                         | Topology                                  | Key gen_agent features                                   |
-|---------------------------------|-------------------------------------------|----------------------------------------------------------|
-| [Switchboard](switchboard.md)   | Human-managed named fleet                 | `tell`/`poll`, `notify`, inbox cursor, telemetry         |
-| [Research](research.md)         | Autonomous self-chain (1 agent)           | `{:prompt, ..., state}` state machine, `handle_error`    |
-| [Debate](debate.md)             | Two agents, cross-agent `notify`          | Cross-agent notify, `handle_event` -> prompt, mutual halt|
-| [Pipeline](pipeline.md)         | Linear stage chain                        | One-way notify chain, per-stage self-halt                |
-| [Supervisor](supervisor.md)     | Coordinator + dynamic worker pool         | `start_agent/2` from inside a callback, fan-out/fan-in   |
-| [Pool](pool.md)                 | Reusable worker pool, round-robin         | Multi-turn workers, `tell/2` mailbox queueing            |
-| [Watcher](watcher.md)           | Reactive event-driven agent               | `handle_event` filtering, idle-until-triggered           |
-| [Heartbeat](heartbeat.md)       | Time-driven periodic agent                | Synthetic `:tick` events, per-tick state inspection      |
-| [Checkpointer](checkpointer.md) | Human-in-the-loop review workflow         | Idle-with-phase-marker pause primitive                   |
-| [Retry](retry.md)               | `handle_error` self-chain retry loop      | `handle_error` returning `{:prompt, ..., state}`         |
-| [Workspace](workspace.md)       | Single agent + temp git workspace         | All four v0.2 lifecycle hooks                            |
+The [Switchboard](switchboard.md), [Pipeline](pipeline.md),
+[Supervisor](supervisor.md), [Pool](pool.md), and [Debate](debate.md)
+pages predate the packaged strategies. Their callback modules are
+alternative examples, not the implementations behind those strategies.
+Use each strategy's module documentation for its exact options and
+failure semantics. These guide pages include a short example of
+starting the packaged strategy before the older callback recipe.
+
+## Single-agent callback patterns
+
+These pages show shapes within one agent process. Read and adapt the
+callback module rather than expecting an installable strategy:
+
+| Pattern | Use |
+| --- | --- |
+| [Research](research.md) | Self-chain through phases with `{:prompt, ..., state}`. |
+| [Watcher](watcher.md) | Wait for an event and decide whether it starts a turn. |
+| [Heartbeat](heartbeat.md) | React to periodic tick events. |
+| [Checkpointer](checkpointer.md) | Pause for human input while remaining resumable. |
+| [Retry](retry.md) | Decide on retry and backoff in agent state. |
+| [Workspace](workspace.md) | Run turns in isolated Git workspaces with lifecycle hooks. |
 
 ## Choosing a pattern
 
-Most real agents end up being a combination, not a pure instance of
-one of these. A rough decision tree:
+Use **Switchboard** when the caller knows which named agent should
+receive each request. Use **Pipeline** when roles have a fixed order,
+and **Supervisor** when one request can be decomposed into temporary,
+independent workers. Use **Pool** for a stream of independent requests
+that should reuse a bounded set of workers. **Debate** and
+**[Consensus](consensus.md)**
+add explicit convergence rules; the latter parses categorical verdicts
+from two or more agents.
 
-- **You want a human driving one or more long-lived sessions from
-  iex or an MCP client.** Start with **[Switchboard](switchboard.md)**.
-  It's the thinnest layer on top of `GenAgent` and matches the
-  "manager is the interface" model.
+Use a callback pattern for behavior inside one agent: **Research** for
+self-directed phases, **Watcher** or **Heartbeat** for event-driven
+work, **Checkpointer** for a human pause, **Retry** for recovery, and
+**Workspace** for per-turn isolation. These shapes can also be used as
+sub-agents within an Ensemble strategy.
 
-- **One agent needs to walk itself through several phases of work
-  without human input.** Start with **[Research](research.md)**. The
-  self-chain via `{:prompt, ..., state}` is the whole move.
-
-- **Work has to flow through a fixed sequence of distinct agents,
-  each with its own role.** Start with **[Pipeline](pipeline.md)**.
-
-- **One coordinator needs to fan work out to N variable workers and
-  collect the results.** Start with **[Supervisor](supervisor.md)**
-  if workers are one-shot, or **[Pool](pool.md)** if they're
-  long-lived and round-robin dispatched.
-
-- **Two agents with opposing roles need to push each other forward.**
-  Use **[Debate](debate.md)**. Cross-agent `notify` is the primitive.
-
-- **An agent should sit idle until events arrive (CI failures, file
-  changes, webhooks).** Start with **[Watcher](watcher.md)**.
-
-- **An agent should wake up on a fixed interval to poll, summarize,
-  or check in.** Start with **[Heartbeat](heartbeat.md)**. It's
-  Watcher with the clock as the event source -- the filter lives on
-  agent state instead of event content.
-
-- **An agent should do something, then pause for human review, then
-  continue based on the review decision.** Start with
-  **[Checkpointer](checkpointer.md)**. The key move is
-  idle-with-phase-marker rather than `{:halt, state}` -- halt is
-  terminal, idle is resumable.
-
-- **Transient failures need to trigger retries with backoff, and
-  you want the retry decision to live on agent state.** Start with
-  **[Retry](retry.md)**.
-
-- **Every turn needs to run against an isolated git worktree, with
-  per-turn commits and a completion hook.** Start with
-  **[Workspace](workspace.md)**. This is also the best full example
-  of gen_agent v0.2 lifecycle hooks in action.
-
-## What these patterns are NOT
-
-- **Not a cookbook you install as a dependency.** Each page is code
-  you read and copy. If you want a library layer on top of
-  `GenAgent`, build it in your own application with whatever
-  opinionation you need.
-
-- **Not exhaustive.** The shapes that are here are the ones that
-  came up naturally while dogfooding `GenAgent` against real
-  backends. If you find yourself building a topology that isn't
-  here, it's not missing on purpose -- it just hasn't been needed
-  yet.
-
-- **Not opinionated about prompts.** All example prompts are
-  deliberately short. Real agents have real prompt engineering
-  inside them, and we assume you'll write your own.
+All examples use short prompts so the process and handoff remain clear.
+Write task-specific instructions and verify claims against their source
+when using a real backend.

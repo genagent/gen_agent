@@ -1,7 +1,33 @@
 # Switchboard
 
-Human-driven fleet of named long-lived agent sessions, each anchored
-to a working directory, driven from iex or an MCP client.
+Human-driven fleet of named, long-lived agent sessions. The shipped
+Ensemble strategy routes each call to the named agent chosen by its
+caller. The callback recipe later on this page adds per-session
+history, summary, and inbox-cursor state in an application facade.
+
+## Using it from `gen_agent_ensemble`
+
+`GenAgentEnsemble.Strategies.Switchboard` owns the named agents and
+their routing. Pass `agent:` on every `ask` or `tell` call; there is no
+implicit default.
+
+```elixir
+simple = GenAgentEnsemble.Agents.Simple
+echo = GenAgentEnsemble.Backends.Echo
+
+{:ok, _pid} =
+  GenAgentEnsemble.start_link(
+    name: "reviewers",
+    strategy: GenAgentEnsemble.Strategies.Switchboard,
+    opts: [agents: [{"alice", simple, backend: echo}, {"bob", simple, backend: echo}]]
+  )
+
+{:ok, response} = GenAgentEnsemble.ask("reviewers", "review this", agent: "alice")
+```
+
+The rest of this page is a separate callback-level reference
+implementation. Read the shipped strategy's module documentation for
+its exact routing and failure behavior.
 
 ## When to reach for this
 
@@ -16,7 +42,7 @@ This is the closest pattern to what people build when they first
 reach for gen_agent: "I want my chat loop but for N concurrent
 sessions, non-blocking."
 
-## What it exercises in gen_agent
+## What the callback recipe exercises
 
 - `GenAgent.start_agent/2`, `tell/2`, `poll/2`, `notify/2`,
   `interrupt/1`, `halt/1`, `resume/1`, `stop/1` -- the full public
@@ -32,7 +58,7 @@ sessions, non-blocking."
   `[:gen_agent, :prompt, :start|:stop|:error]`, etc.) tailed from
   the manager side as a live feed.
 
-## The pattern
+## Callback reference implementation
 
 Two modules: a `SessionAgent` callback module that holds the
 per-session state, and a `Switchboard` facade that exposes a flat
