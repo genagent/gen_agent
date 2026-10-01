@@ -39,16 +39,21 @@ per-strategy gotchas.
 ```elixir
 def deps do
   [
-    {:gen_agent_ensemble, "~> 0.1"},
+    {:gen_agent, "~> 0.3.0"},
+    {:gen_agent_ensemble, "~> 0.1.2"},
     # Plus at least one backend:
     {:gen_agent_anthropic, "~> 0.2"},
     # and/or:
     {:gen_agent_claude, "~> 0.1"},
-    {:gen_agent_openai, "~> 0.1"},
-    {:gen_agent_codex, "~> 0.1"}
+    {:gen_agent_openai, "~> 0.2"},
+    {:gen_agent_codex, "~> 0.2"}
   ]
 end
 ```
+
+Ensemble 0.1.1 requires GenAgent 0.2. Ensemble 0.1.2 accepts both GenAgent
+0.2 and 0.3, preserving existing consumers while allowing the current core
+release.
 
 ## Quickstart (zero-setup demo)
 
