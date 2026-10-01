@@ -5,7 +5,13 @@
       "release-type": "elixir",
       "bump-minor-pre-major": true,
       "include-component-in-tag": false,
-      "exclude-paths": ["integrations/**", "extensions/**"],
+      "exclude-paths": [
+        "integrations/claude",
+        "integrations/codex",
+        "integrations/anthropic",
+        "integrations/openai",
+        "extensions/ensemble"
+      ],
       "extra-files": ["README.md", "lib/gen_agent.ex"]
     },
     "integrations/claude": {
