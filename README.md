@@ -90,6 +90,15 @@ GenAgent.stop("my-coder")
 Use the same callback module and `GenAgent` API for both providers. Select
 the backend when starting each agent:
 
+`gen_agent` owns the agent process, prompt tasks, callbacks, and queue.
+`gen_agent_claude` and `gen_agent_codex` implement the backend contract,
+translate provider events, and retain each provider's session identifier.
+Those backends call `claude_wrapper` and `codex_wrapper`, respectively;
+the wrappers build CLI arguments, parse output, and select a runner for
+the external process. Add both backend packages to one application when
+agents need both CLIs. Select a backend per agent, then use the same
+`GenAgent.ask/3`, `tell/3`, `poll/3`, and interruption APIs for either.
+
 ```elixir
 defmodule MyApp.Assistant do
   use GenAgent
