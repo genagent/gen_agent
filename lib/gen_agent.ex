@@ -879,9 +879,9 @@ defmodule GenAgent do
   """
   @spec whereis(name()) :: pid() | nil
   def whereis(name) do
-    case Registry.lookup(GenAgent.Registry, name) do
-      [{pid, _}] -> pid
-      [] -> nil
+    case Registry.whereis_name({GenAgent.Registry, name}) do
+      :undefined -> nil
+      pid -> pid
     end
   end
 
