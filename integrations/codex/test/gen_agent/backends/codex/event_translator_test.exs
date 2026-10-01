@@ -242,14 +242,46 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
                EventTranslator.translate(events)
     end
 
-    test "plain error event" do
+    test "error notification followed by completion does not fail the turn" do
+      events = [
+        event("error", %{"message" => "Reconnecting... 1/5"}),
+        event("item.completed", %{"item" => %{"type" => "agent_message", "text" => "done"}}),
+        event("turn.completed", %{})
+      ]
+
+      assert [%Event{kind: :text, data: %{text: "done"}}, %Event{kind: :result}] =
+               EventTranslator.translate(events)
+    end
+
+    test "turn.failed preserves a structured error" do
+      events = [
+        event("error", %{"message" => "Reconnecting... 1/5"}),
+        event("turn.failed", %{"error" => %{"message" => "connection lost"}})
+      ]
+
+      assert [%Event{kind: :error, data: %{reason: %{"message" => "connection lost"}}}] =
+               EventTranslator.translate(events)
+    end
+
+    test "turn.failed uses the latest notification when it has no reason" do
+      events = [
+        event("error", %{"message" => "first error"}),
+        event("error", %{"message" => "last error"}),
+        event("turn.failed", %{})
+      ]
+
+      assert [%Event{kind: :error, data: %{reason: "last error"}}] =
+               EventTranslator.translate(events)
+    end
+
+    test "error notification at end of stream becomes a terminal error" do
       events = [event("error", %{"message" => "network down"})]
 
       assert [%Event{kind: :error, data: %{reason: "network down"}}] =
                EventTranslator.translate(events)
     end
 
-    test "error with neither field falls back to :unknown" do
+    test "error notification with neither field falls back to :unknown at end of stream" do
       assert [%Event{kind: :error, data: %{reason: :unknown}}] =
                EventTranslator.translate([event("error", %{})])
     end

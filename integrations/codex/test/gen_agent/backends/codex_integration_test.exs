@@ -164,6 +164,69 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
       assert {:error, "sandbox violation"} = GenAgent.ask(name, "ouch")
     end
 
+    test "a lazy stream continues past an error notification and records a completed thread" do
+      test_pid = self()
+
+      exec_fn = fn _prompt, session ->
+        send(test_pid, {:thread_id_seen, session.thread_id})
+
+        {:ok,
+         Stream.map(
+           [
+             event("thread.started", %{"thread_id" => "thread-retry"}),
+             event("turn.started", %{}),
+             event("error", %{"message" => "Reconnecting... 1/5"}),
+             event("item.completed", %{
+               "item" => %{"type" => "agent_message", "text" => "recovered"}
+             }),
+             event("turn.completed", %{})
+           ],
+           fn event ->
+             send(test_pid, {:pulled, event.event_type})
+             event
+           end
+         )}
+      end
+
+      name = start_codex_agent(exec_fn)
+
+      assert {:ok, %{text: "recovered", session_id: "thread-retry"}} = GenAgent.ask(name, "go")
+      assert_receive {:thread_id_seen, nil}
+
+      for type <- ["thread.started", "turn.started", "error", "item.completed", "turn.completed"] do
+        assert_receive {:pulled, ^type}
+      end
+
+      assert {:ok, %{session_id: "thread-retry"}} = GenAgent.ask(name, "again")
+      assert_receive {:thread_id_seen, "thread-retry"}
+    end
+
+    test "a lazy stream continues past an error notification to turn.failed" do
+      test_pid = self()
+
+      exec_fn = fn _prompt, _session ->
+        {:ok,
+         Stream.map(
+           [
+             event("thread.started", %{"thread_id" => "thread-failed"}),
+             event("error", %{"message" => "Reconnecting... 1/5"}),
+             event("turn.failed", %{"error" => %{"message" => "connection lost"}})
+           ],
+           fn event ->
+             send(test_pid, {:pulled, event.event_type})
+             event
+           end
+         )}
+      end
+
+      name = start_codex_agent(exec_fn)
+
+      assert {:error, %{"message" => "connection lost"}} = GenAgent.ask(name, "go")
+      assert_receive {:pulled, "thread.started"}
+      assert_receive {:pulled, "error"}
+      assert_receive {:pulled, "turn.failed"}
+    end
+
     test "parsed action items reach stream callback in order" do
       lines = [
         ~s({"type":"thread.started","thread_id":"t-mcp"}),

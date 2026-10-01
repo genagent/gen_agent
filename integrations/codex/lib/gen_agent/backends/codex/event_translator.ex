@@ -24,11 +24,14 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
     * `turn.completed` -- emits a `:usage` event (if token counts are
       present) followed by a terminal `:result` event carrying the
       captured `thread_id` as `session_id`.
-    * `error` or `turn.failed` -- emits a terminal `:error` event.
+    * `error` -- remembers the latest notification without ending the turn.
+      If the stream ends before a turn outcome, emits a terminal `:error`.
+    * `turn.failed` -- emits a terminal `:error` event, using the latest
+      notification as a fallback when the failure has no reason.
     * Unknown event types -- filtered.
 
-  If a turn's event list contains no `turn.completed` and no error
-  event, the translator emits nothing terminal. The state machine's
+  If a turn's event list contains no `turn.completed`, `turn.failed`, or
+  error notification, the translator emits nothing terminal. The state machine's
   `no_terminal_event` guard will then deliver `{:error, :no_terminal_event}`
   to the caller.
   """
@@ -44,19 +47,46 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
     events |> translate_stream() |> Enum.to_list()
   end
 
-  @doc "Translate events as they arrive while retaining the thread ID for the terminal event."
+  @doc "Translate events as they arrive while retaining the thread ID and latest error notification."
   @spec translate_stream(Enumerable.t()) :: Enumerable.t()
   def translate_stream(events) do
-    Stream.transform(events, nil, fn event, thread_id ->
-      thread_id =
-        case event do
-          %JsonLineEvent{event_type: "thread.started", data: %{"thread_id" => id}} -> id
-          _ -> thread_id
-        end
+    Stream.transform(
+      events,
+      fn -> %{thread_id: nil, last_error: nil, terminal?: false} end,
+      &translate_event/2,
+      fn
+        %{terminal?: false, last_error: %{reason: reason, data: data}} = state ->
+          {[Event.new(:error, %{reason: reason, data: data})], state}
 
-      {translate_one(event, thread_id), thread_id}
-    end)
+        state ->
+          {[], state}
+      end,
+      fn _ -> :ok end
+    )
   end
+
+  defp translate_event(
+         %JsonLineEvent{event_type: "thread.started", data: %{"thread_id" => id}},
+         state
+       ) do
+    {[], %{state | thread_id: id}}
+  end
+
+  defp translate_event(%JsonLineEvent{event_type: "error", data: data}, state) do
+    {[], %{state | last_error: %{reason: notification_reason(data), data: data}}}
+  end
+
+  defp translate_event(%JsonLineEvent{event_type: "turn.failed", data: data}, state) do
+    fallback = if state.last_error, do: state.last_error.reason, else: :unknown
+    reason = failure_reason(data, fallback)
+    {[Event.new(:error, %{reason: reason, data: data})], %{state | terminal?: true}}
+  end
+
+  defp translate_event(%JsonLineEvent{event_type: "turn.completed"} = event, state) do
+    {translate_one(event, state.thread_id), %{state | terminal?: true}}
+  end
+
+  defp translate_event(event, state), do: {translate_one(event, state.thread_id), state}
 
   # ---------------------------------------------------------------------------
   # Per-event translation
@@ -96,22 +126,6 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
     usage_events ++ [Event.new(:result, result_data)]
   end
 
-  defp translate_one(
-         %JsonLineEvent{event_type: "turn.failed", data: data},
-         _thread_id
-       ) do
-    reason = data["error"] || data["message"] || :unknown
-    [Event.new(:error, %{reason: reason, data: data})]
-  end
-
-  defp translate_one(
-         %JsonLineEvent{event_type: "error", data: data},
-         _thread_id
-       ) do
-    reason = data["error"] || data["message"] || :unknown
-    [Event.new(:error, %{reason: reason, data: data})]
-  end
-
   defp translate_one(%JsonLineEvent{}, _thread_id), do: []
 
   # ---------------------------------------------------------------------------
@@ -140,6 +154,21 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
+
+  defp notification_reason(data) do
+    case failure_reason(data) do
+      %{"message" => message} when is_binary(message) and message != "" -> message
+      reason -> reason
+    end
+  end
+
+  defp failure_reason(data, fallback \\ :unknown)
+
+  defp failure_reason(%{"error" => error} = data, fallback)
+       when is_map(error) and map_size(error) == 0,
+       do: data["message"] || fallback
+
+  defp failure_reason(data, fallback), do: data["error"] || data["message"] || fallback
 
   defp extract_usage(%{"usage" => %{} = usage}) do
     input = usage["input_tokens"]
