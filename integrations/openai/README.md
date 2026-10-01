@@ -4,6 +4,11 @@
 [![Hex.pm](https://img.shields.io/hexpm/v/gen_agent_openai.svg)](https://hex.pm/packages/gen_agent_openai)
 [![Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/gen_agent_openai)
 
+The package source and new issues live in
+[`genagent/gen_agent/integrations/openai`](https://github.com/genagent/gen_agent/tree/main/integrations/openai).
+The [former repository](https://github.com/genagent/gen_agent_openai) retains
+historical releases and discussions.
+
 HTTP-direct OpenAI backend for [GenAgent](https://github.com/genagent/gen_agent),
 built on [Req](https://hex.pm/packages/req).
 
