@@ -19,8 +19,8 @@ defmodule GenAgent do
           {:gen_agent, "~> 0.2.2"}, # x-release-please-version
           # Plus at least one backend:
           {:gen_agent_claude, "~> 0.1.0"},
-          {:gen_agent_codex, "~> 0.1.0"},
-          {:gen_agent_anthropic, "~> 0.1.0"},
+          {:gen_agent_codex, "~> 0.2.0"},
+          {:gen_agent_anthropic, "~> 0.2.0"},
           {:gen_agent_openai, "~> 0.1.0"}
         ]
       end
