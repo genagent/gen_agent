@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/genagent/gen_agent/compare/v0.4.0...v0.5.0) (2026-10-01)
+
+
+### Features
+
+* **core:** cancel queued tells and drop orphaned asks ([#161](https://github.com/genagent/gen_agent/issues/161)) ([3438bc9](https://github.com/genagent/gen_agent/commit/3438bc97c9d67e8fcaa2acd1246feaf9549111d0))
+
+
+### Bug Fixes
+
+* **codex:** distinguish unsupported options from resume limitations ([#162](https://github.com/genagent/gen_agent/issues/162)) ([6be8ef9](https://github.com/genagent/gen_agent/commit/6be8ef9f053069f9a4a71d158d877cb815eda627))
+
 ## [0.4.0](https://github.com/genagent/gen_agent/compare/v0.3.1...v0.4.0) (2026-10-01)
 
 
