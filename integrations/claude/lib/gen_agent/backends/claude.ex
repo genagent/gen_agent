@@ -9,7 +9,9 @@ defmodule GenAgent.Backends.Claude do
 
   ## Options
 
-  `start_session/1` accepts any option supported by `ClaudeWrapper.stream/2`:
+  `start_session/1` accepts `ClaudeWrapper.stream/2` options except
+  `:no_session_persistence`, which cannot be enabled because this backend
+  resumes the CLI session on later turns:
 
     * Config: `:binary`, `:working_dir` (aliased as `:cwd`), `:env`,
       `:timeout`, `:verbose`, `:debug`
@@ -29,7 +31,8 @@ defmodule GenAgent.Backends.Claude do
   On the first turn, no `:resume` flag is passed. When the terminal
   `:result` event arrives, `update_session/2` captures `session_id`
   from the event data and stores it on the session struct. Subsequent
-  turns pass that id through Claude's `--resume` flag.
+  turns pass that id through Claude's `--resume` flag, without forwarding
+  the first turn's `:session_id` or `:continue_session` options.
 
   `terminate_session/1` has no native process to close. GenAgent cancels
   its prompt task on interrupt, watchdog, stop, or agent death, but the
@@ -56,14 +59,18 @@ defmodule GenAgent.Backends.Claude do
 
   @impl GenAgent.Backend
   def start_session(opts) do
-    {stream_fn, opts} = Keyword.pop(opts, :stream_fn, &ClaudeWrapper.stream/2)
-    opts = normalize_opts(opts)
+    if Keyword.get(opts, :no_session_persistence) do
+      {:error, {:unsupported_option, :no_session_persistence}}
+    else
+      {stream_fn, opts} = Keyword.pop(opts, :stream_fn, &ClaudeWrapper.stream/2)
+      opts = normalize_opts(opts)
 
-    {:ok,
-     %__MODULE__{
-       opts: opts,
-       stream_fn: stream_fn
-     }}
+      {:ok,
+       %__MODULE__{
+         opts: opts,
+         stream_fn: stream_fn
+       }}
+    end
   end
 
   @impl GenAgent.Backend
@@ -88,8 +95,9 @@ defmodule GenAgent.Backends.Claude do
 
   @impl GenAgent.Backend
   def resume_session(session_id, opts) when is_binary(session_id) do
-    {:ok, session} = start_session(opts)
-    {:ok, %{session | session_id: session_id}}
+    with {:ok, session} <- start_session(opts) do
+      {:ok, %{session | session_id: session_id}}
+    end
   end
 
   @impl GenAgent.Backend
@@ -109,5 +117,10 @@ defmodule GenAgent.Backends.Claude do
   end
 
   defp merge_resume(opts, nil), do: opts
-  defp merge_resume(opts, session_id), do: Keyword.put(opts, :resume, session_id)
+
+  defp merge_resume(opts, session_id) do
+    opts
+    |> Keyword.drop([:session_id, :continue_session])
+    |> Keyword.put(:resume, session_id)
+  end
 end
