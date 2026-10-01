@@ -4,6 +4,11 @@
 [![Hex.pm](https://img.shields.io/hexpm/v/gen_agent_anthropic.svg)](https://hex.pm/packages/gen_agent_anthropic)
 [![Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/gen_agent_anthropic)
 
+The package source and new issues live in
+[`genagent/gen_agent/integrations/anthropic`](https://github.com/genagent/gen_agent/tree/main/integrations/anthropic).
+The [former repository](https://github.com/genagent/gen_agent_anthropic) retains
+historical releases and discussions.
+
 HTTP-direct Anthropic backend for [GenAgent](https://github.com/genagent/gen_agent),
 built on [Req](https://hex.pm/packages/req).
 
