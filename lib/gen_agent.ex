@@ -150,6 +150,7 @@ defmodule GenAgent do
     * `tell/3` -- async prompt, returns a ref for `poll/3`.
     * `poll/3` -- check on a previously-issued `tell/3`.
     * `notify/2` -- push an external event into `c:handle_event/2`.
+    * `notify_ack/3` -- acknowledge in-memory notification admission.
     * `interrupt/1` -- cancel an in-flight turn.
     * `interrupt_request/3` -- acknowledge cancellation for a matching request ref.
     * `resume/1` -- unhalt an agent and drain its mailbox.
@@ -173,6 +174,7 @@ defmodule GenAgent do
     * `[:gen_agent, :event, :received]`
     * `[:gen_agent, :state, :changed]`
     * `[:gen_agent, :mailbox, :queued]`
+    * `[:gen_agent, :input, :rejected]`
     * `[:gen_agent, :halted]`
 
   ## What GenAgent does not do
@@ -467,6 +469,18 @@ defmodule GenAgent do
   is returned. Accepted stream callbacks keep their state; the rejected
   event is not delivered to `c:handle_stream_event/2`.
 
+  Pending prompt and deferred notification queues have independent count
+  and payload-byte limits: `:max_pending_prompts` and
+  `:max_pending_notifications` (both default `1_000`), and
+  `:max_pending_prompt_bytes` and `:max_pending_notification_bytes`
+  (both default `1_048_576`). Limits are non-negative integers; zero
+  disables that pending queue. Bytes are the sum of
+  `:erlang.external_size/1` of each queued prompt or notification payload,
+  not the entire process memory. The active prompt and notifications
+  handled immediately while idle are not pending. Self-chaining has one
+  reserved slot outside the prompt count limit, but its payload must fit
+  `:max_pending_prompt_bytes`.
+
   Any other option is forwarded to `c:init_agent/1`. GenAgent-level
   knobs (like `:watchdog_ms`) are recognized and stripped before
   forwarding.
@@ -517,7 +531,11 @@ defmodule GenAgent do
         :watchdog_ms,
         :max_tell_results,
         :max_events_per_turn,
-        :max_event_bytes_per_turn
+        :max_event_bytes_per_turn,
+        :max_pending_prompts,
+        :max_pending_prompt_bytes,
+        :max_pending_notifications,
+        :max_pending_notification_bytes
       ])
 
     child_opts =
@@ -533,6 +551,16 @@ defmodule GenAgent do
       |> maybe_put(:max_tell_results, Keyword.get(server_opts, :max_tell_results))
       |> maybe_put(:max_events_per_turn, Keyword.get(server_opts, :max_events_per_turn))
       |> maybe_put(:max_event_bytes_per_turn, Keyword.get(server_opts, :max_event_bytes_per_turn))
+      |> maybe_put(:max_pending_prompts, Keyword.get(server_opts, :max_pending_prompts))
+      |> maybe_put(:max_pending_prompt_bytes, Keyword.get(server_opts, :max_pending_prompt_bytes))
+      |> maybe_put(
+        :max_pending_notifications,
+        Keyword.get(server_opts, :max_pending_notifications)
+      )
+      |> maybe_put(
+        :max_pending_notification_bytes,
+        Keyword.get(server_opts, :max_pending_notification_bytes)
+      )
 
     GenAgent.Server.child_spec(child_opts)
   end
@@ -544,6 +572,11 @@ defmodule GenAgent do
   `{:error, reason}`. If the agent is currently processing another
   prompt, the caller is queued transparently and unblocks when its
   queued turn finishes.
+
+  If admission to the pending prompt queue fails, returns
+  `{:error, {:overloaded, info}}` immediately; no turn is accepted.
+  `info` includes the queue, count or byte limit reached, current count
+  and bytes, incoming bytes, and configured maxima.
 
   The default timeout is `:infinity`. The agent's own watchdog is the
   primary timeout mechanism -- callers generally should not need to set
@@ -560,9 +593,11 @@ defmodule GenAgent do
   Send an asynchronous prompt to an agent.
 
   Returns `{:ok, ref}` immediately. Use `poll/2` to check on the
-  result. The same queueing semantics as `ask/2` apply.
+  result. The same queueing semantics as `ask/2` apply. When a pending
+  queue limit is reached, returns `{:error, {:overloaded, info}}` without
+  an accepted ref.
   """
-  @spec tell(name(), String.t(), timeout()) :: {:ok, request_ref()}
+  @spec tell(name(), String.t(), timeout()) :: {:ok, request_ref()} | {:error, term()}
   def tell(name, prompt, timeout \\ @default_call_timeout) when is_binary(prompt) do
     :gen_statem.call(via(name), {:tell, prompt}, timeout)
   end
@@ -596,11 +631,33 @@ defmodule GenAgent do
   returns `{:prompt, text, state}` the prompt is dispatched (or
   queued, if the agent is busy).
 
-  Asynchronous. Returns `:ok` immediately.
+  Asynchronous. Returns `:ok` immediately, including when the agent later
+  rejects the event because its pending queue is full. Rejections emit
+  `[:gen_agent, :input, :rejected]` telemetry. Use `notify_ack/3` when the
+  sender needs an in-memory admission result.
   """
   @spec notify(name(), term()) :: :ok
   def notify(name, event) do
     :gen_statem.cast(via(name), {:notify, event})
+  end
+
+  @doc """
+  Send an event and wait for the agent to acknowledge admission.
+
+  Returns `:ok` when the event was handled immediately or retained for
+  delivery after the current turn. Returns `{:error, {:overloaded, info}}`
+  when the pending notification queue cannot hold it, or an event
+  handled while halted generates a prompt that cannot be queued. This
+  acknowledges in-memory handling or retention, not durable delivery or
+  a guarantee that a callback-generated prompt will run. A deferred
+  callback-generated prompt can be rejected later if the prompt queue is
+  full; the agent's `c:handle_error/3` receives that overload. The legacy
+  `notify/2` remains a best-effort asynchronous cast and always returns
+  `:ok`.
+  """
+  @spec notify_ack(name(), term(), timeout()) :: :ok | {:error, term()}
+  def notify_ack(name, event, timeout \\ @default_call_timeout) do
+    :gen_statem.call(via(name), {:notify_ack, event}, timeout)
   end
 
   @doc """

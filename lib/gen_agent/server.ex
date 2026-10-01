@@ -21,6 +21,10 @@ defmodule GenAgent.Server do
   @default_max_tell_results 100
   @default_max_events_per_turn 1_000
   @default_max_event_bytes_per_turn 1_048_576
+  @default_max_pending_prompts 1_000
+  @default_max_pending_prompt_bytes 1_048_576
+  @default_max_pending_notifications 1_000
+  @default_max_pending_notification_bytes 1_048_576
 
   defmodule Data do
     @moduledoc false
@@ -37,6 +41,10 @@ defmodule GenAgent.Server do
       :max_tell_results,
       :max_events_per_turn,
       :max_event_bytes_per_turn,
+      :max_pending_prompts,
+      :max_pending_prompt_bytes,
+      :max_pending_notifications,
+      :max_pending_notification_bytes,
       halted: false,
       # Flipped to true after `c:GenAgent.pre_run/1` has run successfully.
       # No prompts are dispatched before pre_run completes -- since pre_run
@@ -46,6 +54,7 @@ defmodule GenAgent.Server do
       pre_run_done: false,
       self_chain: nil,
       mailbox: :queue.new(),
+      pending_prompt_bytes: 0,
       # Events delivered via `GenAgent.notify/2` that arrived while
       # the agent was in `:processing` are buffered here instead of
       # having their `handle_event/2` callback invoked immediately.
@@ -55,6 +64,7 @@ defmodule GenAgent.Server do
       # state from turn dispatch. The buffer is drained synchronously
       # at turn completion, before the agent transitions to `:idle`.
       pending_events: :queue.new(),
+      pending_notification_bytes: 0,
       tell_results: %{},
       tell_result_order: :queue.new()
     ]
@@ -115,8 +125,23 @@ defmodule GenAgent.Server do
     max_event_bytes_per_turn =
       Keyword.get(opts, :max_event_bytes_per_turn, @default_max_event_bytes_per_turn)
 
+    max_pending_prompts = Keyword.get(opts, :max_pending_prompts, @default_max_pending_prompts)
+
+    max_pending_prompt_bytes =
+      Keyword.get(opts, :max_pending_prompt_bytes, @default_max_pending_prompt_bytes)
+
+    max_pending_notifications =
+      Keyword.get(opts, :max_pending_notifications, @default_max_pending_notifications)
+
+    max_pending_notification_bytes =
+      Keyword.get(opts, :max_pending_notification_bytes, @default_max_pending_notification_bytes)
+
     validate_capture_limit!(max_events_per_turn, :max_events_per_turn)
     validate_capture_limit!(max_event_bytes_per_turn, :max_event_bytes_per_turn)
+    validate_pending_limit!(max_pending_prompts, :max_pending_prompts)
+    validate_pending_limit!(max_pending_prompt_bytes, :max_pending_prompt_bytes)
+    validate_pending_limit!(max_pending_notifications, :max_pending_notifications)
+    validate_pending_limit!(max_pending_notification_bytes, :max_pending_notification_bytes)
 
     with {:ok, backend_opts, agent_state} <- module.init_agent(init_opts),
          {:ok, backend_session} <- backend.start_session(backend_opts) do
@@ -130,7 +155,11 @@ defmodule GenAgent.Server do
         watchdog_ms: watchdog_ms,
         max_tell_results: max_tell_results,
         max_events_per_turn: max_events_per_turn,
-        max_event_bytes_per_turn: max_event_bytes_per_turn
+        max_event_bytes_per_turn: max_event_bytes_per_turn,
+        max_pending_prompts: max_pending_prompts,
+        max_pending_prompt_bytes: max_pending_prompt_bytes,
+        max_pending_notifications: max_pending_notifications,
+        max_pending_notification_bytes: max_pending_notification_bytes
       }
 
       emit_state_change(name, nil, :idle)
@@ -216,7 +245,12 @@ defmodule GenAgent.Server do
         :keep_state_and_data
 
       {{:value, {request_ref, kind, prompt}}, mailbox} ->
-        data = %{data | mailbox: mailbox}
+        data = %{
+          data
+          | mailbox: mailbox,
+            pending_prompt_bytes: data.pending_prompt_bytes - :erlang.external_size(prompt)
+        }
+
         try_dispatch(data, request_ref, kind, prompt)
     end
   end
@@ -231,17 +265,11 @@ defmodule GenAgent.Server do
   end
 
   def handle_event({:call, from}, {:ask, prompt}, :idle, %Data{halted: true} = data) do
-    request_ref = make_ref()
-    mailbox = :queue.in({request_ref, {:ask, from}, prompt}, data.mailbox)
-    emit_mailbox_queued(data.name, :queue.len(mailbox))
-    {:keep_state, %{data | mailbox: mailbox}}
+    queue_ask(data, from, prompt)
   end
 
   def handle_event({:call, from}, {:ask, prompt}, :processing, %Data{} = data) do
-    request_ref = make_ref()
-    mailbox = :queue.in({request_ref, {:ask, from}, prompt}, data.mailbox)
-    emit_mailbox_queued(data.name, :queue.len(mailbox))
-    {:keep_state, %{data | mailbox: mailbox}}
+    queue_ask(data, from, prompt)
   end
 
   # ---------------------------------------------------------------------------
@@ -264,20 +292,13 @@ defmodule GenAgent.Server do
   end
 
   def handle_event({:call, from}, {:tell, prompt}, :idle, %Data{halted: true} = data) do
-    request_ref = make_ref()
-    mailbox = :queue.in({request_ref, :tell, prompt}, data.mailbox)
-    emit_mailbox_queued(data.name, :queue.len(mailbox))
-    {:keep_state, %{data | mailbox: mailbox}, [{:reply, from, {:ok, request_ref}}]}
+    queue_tell(data, from, prompt)
   end
 
   def handle_event({:call, from}, {:tell, prompt}, :processing, %Data{} = data) do
-    request_ref = make_ref()
-    mailbox = :queue.in({request_ref, :tell, prompt}, data.mailbox)
-    emit_mailbox_queued(data.name, :queue.len(mailbox))
-    {:keep_state, %{data | mailbox: mailbox}, [{:reply, from, {:ok, request_ref}}]}
+    queue_tell(data, from, prompt)
   end
 
-  # ---------------------------------------------------------------------------
   # poll -- check status of a previously-tell'd request
   # ---------------------------------------------------------------------------
 
@@ -366,39 +387,18 @@ defmodule GenAgent.Server do
   # the in-flight task's handle_response result.
   # ---------------------------------------------------------------------------
 
-  def handle_event(:cast, {:notify, event}, :processing, %Data{} = data) do
-    emit_event_received(data.name, event)
-    pending = :queue.in(event, data.pending_events)
-    {:keep_state, %{data | pending_events: pending}}
-  end
+  def handle_event(:cast, {:notify, event}, :processing, %Data{} = data),
+    do: notify_processing(data, event, nil)
 
-  def handle_event(:cast, {:notify, event}, :idle, %Data{} = data) do
-    emit_event_received(data.name, event)
+  def handle_event({:call, from}, {:notify_ack, event}, :processing, %Data{} = data),
+    do: notify_processing(data, event, from)
 
-    case safely_handle_event(data.agent_module, event, data.agent_state) do
-      {:noreply, new_agent_state} ->
-        {:keep_state, %{data | agent_state: new_agent_state}}
+  def handle_event(:cast, {:notify, event}, :idle, %Data{} = data),
+    do: notify_idle(data, event, nil)
 
-      {:prompt, prompt, new_agent_state} ->
-        data = %{data | agent_state: new_agent_state}
-        request_ref = make_ref()
+  def handle_event({:call, from}, {:notify_ack, event}, :idle, %Data{} = data),
+    do: notify_idle(data, event, from)
 
-        if data.halted do
-          mailbox = :queue.in({request_ref, :event, prompt}, data.mailbox)
-          emit_mailbox_queued(data.name, :queue.len(mailbox))
-          {:keep_state, %{data | mailbox: mailbox}}
-        else
-          try_dispatch(data, request_ref, :event, prompt)
-        end
-
-      {:halt, new_agent_state} ->
-        data = %{data | agent_state: new_agent_state}
-        data = transition_to_halted(data)
-        {:keep_state, data}
-    end
-  end
-
-  # ---------------------------------------------------------------------------
   # interrupt -- kill current task, deliver :interrupted
   # ---------------------------------------------------------------------------
 
@@ -505,6 +505,194 @@ defmodule GenAgent.Server do
     data = %{data | backend_session: new_session, agent_state: new_agent_state}
     finish_error(data, current, reason)
   end
+
+  # ---------------------------------------------------------------------------
+  defp queue_ask(data, from, prompt) do
+    case enqueue_prompt(data, make_ref(), {:ask, from}, prompt) do
+      {:ok, queued} -> {:keep_state, queued}
+      {:error, reason} -> {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+    end
+  end
+
+  defp queue_tell(data, from, prompt) do
+    request_ref = make_ref()
+
+    case enqueue_prompt(data, request_ref, :tell, prompt) do
+      {:ok, queued} ->
+        {:keep_state, queued, [{:reply, from, {:ok, request_ref}}]}
+
+      {:error, reason} ->
+        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+    end
+  end
+
+  defp enqueue_prompt(data, request_ref, kind, prompt) do
+    incoming_bytes = :erlang.external_size(prompt)
+
+    case overload_reason(
+           :prompts,
+           :queue.len(data.mailbox),
+           data.pending_prompt_bytes,
+           incoming_bytes,
+           data.max_pending_prompts,
+           data.max_pending_prompt_bytes
+         ) do
+      nil ->
+        mailbox = :queue.in({request_ref, kind, prompt}, data.mailbox)
+        emit_mailbox_queued(data.name, :queue.len(mailbox))
+
+        {:ok,
+         %{
+           data
+           | mailbox: mailbox,
+             pending_prompt_bytes: data.pending_prompt_bytes + incoming_bytes
+         }}
+
+      reason ->
+        emit_input_rejected(data.name, reason)
+        {:error, reason}
+    end
+  end
+
+  defp enqueue_notification(data, event) do
+    incoming_bytes = :erlang.external_size(event)
+
+    case overload_reason(
+           :notifications,
+           :queue.len(data.pending_events),
+           data.pending_notification_bytes,
+           incoming_bytes,
+           data.max_pending_notifications,
+           data.max_pending_notification_bytes
+         ) do
+      nil ->
+        pending_events = :queue.in(event, data.pending_events)
+
+        {:ok,
+         %{
+           data
+           | pending_events: pending_events,
+             pending_notification_bytes: data.pending_notification_bytes + incoming_bytes
+         }}
+
+      reason ->
+        emit_input_rejected(data.name, reason)
+        {:error, reason}
+    end
+  end
+
+  # Self-chaining has one reserved slot so a callback can make progress even
+  # when callers have filled the FIFO. It still obeys the prompt byte cap.
+  defp enqueue_self_chain(data, prompt) do
+    incoming_bytes = :erlang.external_size(prompt)
+    pending_count = if(is_nil(data.self_chain), do: 0, else: 1)
+
+    pending_bytes =
+      if(is_nil(data.self_chain), do: 0, else: :erlang.external_size(data.self_chain))
+
+    case overload_reason(
+           :self_chain,
+           pending_count,
+           pending_bytes,
+           incoming_bytes,
+           1,
+           data.max_pending_prompt_bytes
+         ) do
+      nil ->
+        {:ok, %{data | self_chain: prompt}}
+
+      reason ->
+        emit_input_rejected(data.name, reason)
+        {:error, reason}
+    end
+  end
+
+  defp accept_self_chain(data, prompt) do
+    case enqueue_self_chain(data, prompt) do
+      {:ok, queued} -> queued
+      {:error, reason} -> reject_generated_prompt(data, make_ref(), reason)
+    end
+  end
+
+  defp overload_reason(queue, count, bytes, incoming_bytes, max_count, max_bytes) do
+    limit =
+      cond do
+        count >= max_count -> :count
+        incoming_bytes > max_bytes - bytes -> :bytes
+        true -> nil
+      end
+
+    if limit do
+      {:overloaded,
+       %{
+         queue: queue,
+         limit: limit,
+         pending_count: count,
+         pending_bytes: bytes,
+         incoming_bytes: incoming_bytes,
+         max_count: max_count,
+         max_bytes: max_bytes
+       }}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  defp notify_processing(data, event, from) do
+    emit_event_received(data.name, event)
+
+    case enqueue_notification(data, event) do
+      {:ok, queued} -> reply_notification(from, {:keep_state, queued}, :ok)
+      {:error, reason} -> reply_notification(from, {:keep_state, data}, {:error, reason})
+    end
+  end
+
+  defp notify_idle(data, event, from) do
+    emit_event_received(data.name, event)
+
+    {result, acknowledgement} =
+      case safely_handle_event(data.agent_module, event, data.agent_state) do
+        {:noreply, new_agent_state} ->
+          {{:keep_state, %{data | agent_state: new_agent_state}}, :ok}
+
+        {:prompt, prompt, new_agent_state} ->
+          notify_idle_prompt(%{data | agent_state: new_agent_state}, prompt)
+
+        {:halt, new_agent_state} ->
+          data = %{data | agent_state: new_agent_state}
+          data = transition_to_halted(data)
+          {{:keep_state, data}, :ok}
+      end
+
+    reply_notification(from, result, acknowledgement)
+  end
+
+  defp notify_idle_prompt(data, prompt) do
+    request_ref = make_ref()
+
+    if data.halted do
+      case enqueue_prompt(data, request_ref, :event, prompt) do
+        {:ok, queued} ->
+          {{:keep_state, queued}, :ok}
+
+        {:error, reason} ->
+          rejected = reject_generated_prompt(data, request_ref, reason)
+          {{:keep_state, rejected}, {:error, reason}}
+      end
+    else
+      {try_dispatch(data, request_ref, :event, prompt), :ok}
+    end
+  end
+
+  defp reply_notification(nil, result, _acknowledgement), do: result
+
+  defp reply_notification(from, {:keep_state, data}, acknowledgement),
+    do: {:keep_state, data, [{:reply, from, acknowledgement}]}
+
+  defp reply_notification(from, {:keep_state, data, actions}, acknowledgement),
+    do: {:keep_state, data, [{:reply, from, acknowledgement} | actions]}
+
+  defp reply_notification(from, {:next_state, state, data}, acknowledgement),
+    do: {:next_state, state, data, [{:reply, from, acknowledgement}]}
 
   # ---------------------------------------------------------------------------
   # Dispatch + task plumbing
@@ -709,6 +897,12 @@ defmodule GenAgent.Server do
     raise ArgumentError, "#{name} must be a positive integer, got: #{inspect(value)}"
   end
 
+  defp validate_pending_limit!(value, _name) when is_integer(value) and value >= 0, do: :ok
+
+  defp validate_pending_limit!(value, name) do
+    raise ArgumentError, "#{name} must be a non-negative integer, got: #{inspect(value)}"
+  end
+
   defp maybe_handle_stream_event(module, event, state) do
     if function_exported?(module, :handle_stream_event, 2) do
       module.handle_stream_event(event, state)
@@ -871,26 +1065,59 @@ defmodule GenAgent.Server do
         data
 
       {{:value, event}, rest} ->
-        data = %{data | pending_events: rest}
+        data = %{
+          data
+          | pending_events: rest,
+            pending_notification_bytes:
+              data.pending_notification_bytes - :erlang.external_size(event)
+        }
 
-        data =
-          case safely_handle_event(data.agent_module, event, data.agent_state) do
-            {:noreply, new_state} ->
-              %{data | agent_state: new_state}
-
-            {:prompt, prompt, new_state} ->
-              request_ref = make_ref()
-              mailbox = :queue.in({request_ref, :event, prompt}, data.mailbox)
-              emit_mailbox_queued(data.name, :queue.len(mailbox))
-              %{data | agent_state: new_state, mailbox: mailbox}
-
-            {:halt, new_state} ->
-              transition_to_halted(%{data | agent_state: new_state})
-          end
-
-        drain_pending_events(data)
+        drain_pending_events(apply_pending_event(data, event))
     end
   end
+
+  defp apply_pending_event(data, event) do
+    case safely_handle_event(data.agent_module, event, data.agent_state) do
+      {:noreply, new_state} ->
+        %{data | agent_state: new_state}
+
+      {:prompt, prompt, new_state} ->
+        request_ref = make_ref()
+        data = %{data | agent_state: new_state}
+
+        case enqueue_prompt(data, request_ref, :event, prompt) do
+          {:ok, queued} -> queued
+          {:error, reason} -> reject_generated_prompt(data, request_ref, reason)
+        end
+
+      {:halt, new_state} ->
+        transition_to_halted(%{data | agent_state: new_state})
+    end
+  end
+
+  defp reject_generated_prompt(data, request_ref, reason) do
+    emit_prompt_error(data.name, request_ref, reason, data.agent_state)
+
+    case safely_handle_error(data.agent_module, request_ref, reason, data.agent_state) do
+      {:noreply, new_state} ->
+        %{data | agent_state: new_state}
+
+      {:halt, new_state} ->
+        transition_to_halted(%{data | agent_state: new_state})
+
+      {:prompt, next_prompt, new_state} when is_binary(next_prompt) ->
+        enqueue_error_recovery_prompt(%{data | agent_state: new_state}, next_prompt)
+    end
+  end
+
+  defp enqueue_error_recovery_prompt(%Data{self_chain: nil} = data, prompt) do
+    case enqueue_self_chain(data, prompt) do
+      {:ok, queued} -> queued
+      {:error, _reason} -> data
+    end
+  end
+
+  defp enqueue_error_recovery_prompt(data, _prompt), do: data
 
   # ---------------------------------------------------------------------------
   # Turn outcome -> caller delivery
@@ -928,7 +1155,7 @@ defmodule GenAgent.Server do
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       {:prompt, next_prompt} ->
-        data = drain_pending_events(%{data | self_chain: next_prompt})
+        data = drain_pending_events(accept_self_chain(data, next_prompt))
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       :halt ->
@@ -974,7 +1201,7 @@ defmodule GenAgent.Server do
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       {:prompt, next_prompt} ->
-        data = drain_pending_events(%{data | self_chain: next_prompt})
+        data = drain_pending_events(accept_self_chain(data, next_prompt))
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       :halt ->
@@ -1108,6 +1335,14 @@ defmodule GenAgent.Server do
 
   defp emit_mailbox_queued(name, depth) do
     :telemetry.execute([:gen_agent, :mailbox, :queued], %{depth: depth}, %{agent: name})
+  end
+
+  defp emit_input_rejected(name, reason) do
+    :telemetry.execute(
+      [:gen_agent, :input, :rejected],
+      %{system_time: System.system_time()},
+      %{agent: name, reason: reason}
+    )
   end
 
   defp emit_halted(name, agent_state) do

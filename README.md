@@ -213,6 +213,7 @@ for details.
 | `tell/3` | Async prompt. Returns a ref for `poll/3`. |
 | `poll/3` | Check on a previously-issued `tell/3`. |
 | `notify/2` | Push an external event into `handle_event/2`. |
+| `notify_ack/3` | Wait for an in-memory notification admission result. |
 | `interrupt/1` | Cancel an in-flight turn. |
 | `interrupt_request/3` | Acknowledge cancellation only if the active request ref matches. |
 | `resume/1` | Unhalt an agent and drain its mailbox. |
@@ -234,6 +235,39 @@ prompt, callback state, backend session or event payload. It is a
 point-in-time observation, not durable state or permission to dispatch.
 The older `status/2` API remains available; its `agent_state` is the
 server's latest retained state, not a live read of an in-flight task.
+
+## Pending input bounds
+
+Each agent admits at most 1,000 pending prompts and 1,000 deferred
+notifications by default, with a separate 1,048,576-byte payload cap
+for each queue. Configure `:max_pending_prompts`,
+`:max_pending_prompt_bytes`, `:max_pending_notifications`, and
+`:max_pending_notification_bytes` in `start_agent/2` or `child_spec/2`.
+Values must be non-negative integers; zero disables the corresponding
+pending queue. Byte use is the sum of `:erlang.external_size/1` for
+queued prompt strings or event terms. The active prompt and events
+handled immediately while idle are outside these pending caps.
+
+`ask/3` and `tell/3` return `{:error, {:overloaded, info}}` before
+acceptance when a pending prompt does not fit. A rejected `tell/3`
+returns no pollable ref. `info` identifies the queue, count or byte
+limit, current count and bytes, incoming bytes, and configured maxima.
+`notify_ack/3` returns `:ok` after the event is handled or retained, or
+the same typed overload error if admission fails. It acknowledges
+in-memory processing, not durable delivery. Existing `notify/2` is a
+best-effort cast: its immediate `:ok` does not mean the event fit. Use
+the rejection telemetry event to observe cast overloads.
+
+Deferred event callbacks may generate prompts when a turn finishes.
+Those prompts use the bounded pending-prompt queue; on overload,
+`handle_error/3` receives the reason. Self-chain prompts from
+`handle_response/3` or `handle_error/3` use one reserved slot outside
+the prompt count cap, but must fit the prompt byte cap. A halted agent
+retains admitted work until `resume/1`; interruption or completion
+releases queue capacity as work is drained. These limits bound accepted
+internal storage, not arbitrary messages already waiting in the BEAM
+process mailbox before admission is processed. Stream-output capture
+and external provider cancellation have their own contracts.
 
 ## Event capture bounds
 
@@ -362,6 +396,7 @@ GenAgent emits telemetry events for observability:
 [:gen_agent, :event, :received]  # %{agent, event}
 [:gen_agent, :state, :changed]   # %{agent, from, to}
 [:gen_agent, :mailbox, :queued]  # %{agent, depth}
+[:gen_agent, :input, :rejected]  # %{agent, reason: {:overloaded, info}}
 [:gen_agent, :halted]            # %{agent}
 ```
 
