@@ -53,7 +53,7 @@ defmodule GenAgentCodex.MixProject do
 
   defp gen_agent_dep do
     if System.get_env("GEN_AGENT_HEX") == "1" do
-      {:gen_agent, "~> 0.2.0 or ~> 0.3.0 or ~> 0.4.0"}
+      {:gen_agent, "~> 0.2.0 or ~> 0.3.0 or ~> 0.4.0 or ~> 0.5.0"}
     else
       {:gen_agent, path: "../.."}
     end
