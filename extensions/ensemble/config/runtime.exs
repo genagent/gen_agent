@@ -14,7 +14,7 @@ import Config
 #       raise """
 #       ANTHROPIC_API_KEY is not set. Export it in the shell that
 #       starts iex, or switch the relevant ensembles to a different
-#       backend (e.g. GenAgent.Backends.Mock for local-only use).
+#       backend (e.g. GenAgentEnsemble.Backends.Echo for local-only use).
 #       """
 #
 #   # The backend reads the API key from its own config; this just
