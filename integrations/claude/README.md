@@ -161,10 +161,15 @@ supplied for the first turn, the backend omits it once `--resume` is used.
 
 Options are passed to `ClaudeWrapper.stream/2` unchanged, except that `:cwd`
 is renamed to `:working_dir` and `:include_partial_messages` defaults to
-`true`. `ClaudeWrapper` ignores keys it does not recognize, and ignores
-`:allowed_tools`, `:disallowed_tools`, and `:tools` when they are not lists.
-The lists below cover the commonly used options; see `ClaudeWrapper.Query`
-for the full set.
+`true`. `start_session/1` (and `resume_session/2`) validates the options
+before any turn runs: an unsupported key returns
+`{:error, {:unknown_option, key}}`, and a malformed value (a bad
+`:permission_mode` or `:effort`, a non-binary `:json_schema`, a non-list
+`:allowed_tools`, `:disallowed_tools`, or `:tools`, and so on) returns
+`{:error, {:invalid_option, key, value}}`. A `nil` value is treated as unset.
+The lists below cover common options; the backend also accepts the other
+options handled by `ClaudeWrapper.Query.apply_opts/2` in its supported wrapper
+version.
 
 **Process:**
 - `:binary` -- path to the `claude` executable.
