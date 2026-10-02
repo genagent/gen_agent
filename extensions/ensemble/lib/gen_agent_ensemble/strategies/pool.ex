@@ -3,9 +3,9 @@ defmodule GenAgentEnsemble.Strategies.Pool do
   Fixed-size worker pool strategy.
 
   N identical workers are started on init. Each `tell`/`ask` lands on
-  the next free worker; when all are busy, prompts queue FIFO and
-  dispatch as workers free up. Workers are reused across turns (their
-  `GenAgent` processes stay alive).
+  the next free worker; idle workers rotate FIFO. When all are busy,
+  prompts queue FIFO and dispatch as workers free up. Workers are
+  reused across turns (their `GenAgent` processes stay alive).
 
   ## Options
 
@@ -19,10 +19,13 @@ defmodule GenAgentEnsemble.Strategies.Pool do
     * A worker's turn error fails the token it was running, and the
       worker returns to the free pool (it may recover on the next
       prompt).
-    * If a worker's process dies, it is removed from the pool. If
-      that worker had an in-flight token it is failed as
-      `{:worker_down, reason}`. If the pool size reaches zero, the
-      session halts.
+    * If a worker's process dies, its in-flight token fails as
+      `{:worker_down, reason}`. A fresh worker starts from the template
+      under the same name and can take the next queued prompt. Its
+      previous backend session and conversation history are lost.
+    * If replacement cannot start, that worker is removed from the pool.
+      A queued prompt assigned to it fails; other workers keep running.
+      If none remain, the ensemble halts and closes all pending tokens.
   """
 
   @behaviour GenAgentEnsemble.Strategy
@@ -30,7 +33,6 @@ defmodule GenAgentEnsemble.Strategies.Pool do
   alias GenAgentEnsemble.Queue
 
   defstruct [
-    :worker_prefix,
     :worker_module,
     :worker_opts,
     workers: MapSet.new(),
@@ -48,7 +50,6 @@ defmodule GenAgentEnsemble.Strategies.Pool do
     start_specs = for n <- names, do: {n, mod, w_opts}
 
     state = %__MODULE__{
-      worker_prefix: prefix,
       worker_module: mod,
       worker_opts: w_opts,
       workers: MapSet.new(names),
@@ -116,7 +117,6 @@ defmodule GenAgentEnsemble.Strategies.Pool do
   @impl true
   def handle_agent_down(worker, reason, state) do
     if MapSet.member?(state.workers, worker) do
-      workers = MapSet.delete(state.workers, worker)
       free = Enum.reject(state.free, &(&1 == worker))
       {in_flight_token, busy} = Map.pop(state.busy, worker)
 
@@ -126,16 +126,41 @@ defmodule GenAgentEnsemble.Strategies.Pool do
           token -> [{:reply_error, token, {:worker_down, reason}}]
         end
 
-      state = %{state | workers: workers, free: free, busy: busy}
+      state = %{state | free: free, busy: busy}
+      spec = {worker, state.worker_module, state.worker_opts}
+      {dispatch_ops, state} = maybe_dispatch_next(state, worker, [])
 
-      if MapSet.size(workers) == 0 do
-        {:ok, fail_ops ++ [{:halt, :pool_exhausted}], state}
-      else
-        {:ok, fail_ops, state}
-      end
+      {:ok, fail_ops ++ [{:start, spec}] ++ dispatch_ops, state}
     else
       {:ok, [], state}
     end
+  end
+
+  @impl true
+  def handle_start_rejected(worker, reason, state) do
+    {token, busy} = Map.pop(state.busy, worker)
+
+    state = %{
+      state
+      | workers: MapSet.delete(state.workers, worker),
+        free: Enum.reject(state.free, &(&1 == worker)),
+        busy: busy
+    }
+
+    fail_ops =
+      case token do
+        nil -> []
+        token -> [{:reply_error, token, {:worker_start_failed, reason}}]
+      end
+
+    ops =
+      if MapSet.size(state.workers) == 0 do
+        fail_ops ++ [{:halt, {:pool_exhausted, {:worker_start_failed, reason}}}]
+      else
+        fail_ops
+      end
+
+    {:ok, ops, state}
   end
 
   @impl true
@@ -160,7 +185,7 @@ defmodule GenAgentEnsemble.Strategies.Pool do
         {ops_so_far ++ [{:dispatch, worker, prompt, token}], state}
 
       :empty ->
-        state = %{state | free: [worker | state.free]}
+        state = %{state | free: state.free ++ [worker]}
         {ops_so_far, state}
     end
   end

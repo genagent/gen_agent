@@ -38,9 +38,11 @@ defmodule GenAgentEnsemble.Strategy do
 
   Ops are applied sequentially. A rejected scoped dispatch ends the current
   op batch after notifying the strategy; other op failures are logged and
-  processing continues. Strategies that record token state before dispatch
-  should implement `handle_dispatch_rejected/4` to remove that token and
-  advance any queued work. The framework guarantees a terminal error for
+  processing continues. A failed start also ends its op batch when the
+  strategy implements `handle_start_rejected/3`, so a following dispatch
+  cannot target the absent agent. Strategies that record token state before
+  dispatch should implement `handle_dispatch_rejected/4` to remove that token
+  and advance any queued work. The framework guarantees a terminal error for
   the token even when the callback is absent.
 
   ## Tokens
@@ -76,6 +78,7 @@ defmodule GenAgentEnsemble.Strategy do
   @callback handle_ask(prompt, keyword, token, strategy_state) :: result
   @callback handle_response(agent_name, response, strategy_state) :: result
   @callback handle_error(agent_name, term(), strategy_state) :: result
+  @callback handle_start_rejected(agent_name, term(), strategy_state) :: result
   @callback handle_dispatch_rejected(agent_name, token, term(), strategy_state) :: result
   @callback handle_notify(term(), strategy_state) :: result
   @callback handle_agent_down(agent_name, term(), strategy_state) :: result
@@ -83,6 +86,7 @@ defmodule GenAgentEnsemble.Strategy do
 
   @optional_callbacks [
     handle_error: 3,
+    handle_start_rejected: 3,
     handle_dispatch_rejected: 4,
     handle_agent_down: 3,
     handle_notify: 2,
