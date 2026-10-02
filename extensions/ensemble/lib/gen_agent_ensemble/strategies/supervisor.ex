@@ -211,6 +211,28 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   end
 
   @impl true
+  def handle_cancel(token, state) do
+    state = %{state | queue: Queue.delete(state.queue, token)}
+
+    case state.phase do
+      {:decomposing, ^token} ->
+        cancel_run(state, [])
+
+      {:fanning_out, ^token, progress} ->
+        cancel_run(state, Enum.map(progress, fn {worker, _} -> {:stop, worker} end))
+
+      _ ->
+        {:ok, [], state}
+    end
+  end
+
+  defp cancel_run(state, stop_ops) do
+    state = %{state | phase: :idle, subtasks: [], usage: Usage.new()}
+    {ops, state} = maybe_prepend_next(state, stop_ops)
+    {:ok, ops, state}
+  end
+
+  @impl true
   def handle_dispatch_rejected(agent, token, reason, state) do
     case state.phase do
       {:decomposing, ^token} -> handle_error(agent, reason, state)

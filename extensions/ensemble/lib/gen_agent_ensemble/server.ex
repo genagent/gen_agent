@@ -4,6 +4,8 @@ defmodule GenAgentEnsemble.Server do
   use GenServer
   require Logger
 
+  @cancel_child_timeout 5_000
+
   defstruct [
     :strategy_mod,
     :strategy_state,
@@ -62,6 +64,8 @@ defmodule GenAgentEnsemble.Server do
     {timeout, strategy_opts} = Keyword.pop(opts, :timeout, 30_000)
     GenServer.call(via(name), {:ask, prompt, strategy_opts}, timeout)
   end
+
+  def cancel(name, token), do: GenServer.call(via(name), {:cancel, token}, :infinity)
 
   def poll(name, token), do: GenServer.call(via(name), {:poll, token})
   def inbox(name), do: GenServer.call(via(name), :inbox)
@@ -272,6 +276,23 @@ defmodule GenAgentEnsemble.Server do
 
       _ ->
         {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  defp handle_call_impl({:cancel, token}, _from, state) do
+    cond do
+      Map.has_key?(state.completed, token) ->
+        {:reply, {:error, :already_finished}, state}
+
+      not Map.has_key?(state.pending, token) ->
+        {:reply, {:error, :not_found}, state}
+
+      not function_exported?(state.strategy_mod, :handle_cancel, 2) ->
+        {:reply, {:error, :unsupported}, state}
+
+      true ->
+        {result, state} = cancel_token(drain_completions(state), token, false, true)
+        {:reply, result, state}
     end
   end
 
@@ -695,6 +716,85 @@ defmodule GenAgentEnsemble.Server do
     end
   end
 
+  # Before the first cancellation, preserve completion order across ALL refs:
+  # Solo/Switchboard correlate responses with their per-agent FIFO. Selecting
+  # just this token's completion could pop an unrelated predecessor instead.
+  defp drain_completions(state) do
+    receive do
+      {:gen_agent, :completion, _, _, _} = message ->
+        {:noreply, state} = handle_info_impl(message, state)
+        drain_completions(state)
+    after
+      0 -> state
+    end
+  end
+
+  defp cancel_token(state, token, fenced?, confirmed?) do
+    if Map.has_key?(state.pending, token) do
+      cancel_pending_token(state, token, fenced?, confirmed?)
+    else
+      {{:error, :already_finished}, state}
+    end
+  end
+
+  defp cancel_pending_token(state, token, fenced?, confirmed?) do
+    case Enum.find(state.in_flight, fn {_, {_, current}} -> current == token end) do
+      nil ->
+        finish_cancellation(state, token, confirmed?)
+
+      {ref, {agent, ^token}} ->
+        cancel_token_ref(state, token, ref, agent, fenced?, confirmed?)
+    end
+  end
+
+  defp finish_cancellation(state, token, confirmed?) do
+    {ops, strategy_state} =
+      call_strategy(state.strategy_mod, :handle_cancel, [token, state.strategy_state])
+
+    {:ok, state} =
+      reply_to_token(%{state | strategy_state: strategy_state}, token, {:error, :cancelled})
+
+    outcome = if confirmed?, do: :cancelled, else: :cancelled_unconfirmed
+    {{:ok, outcome}, apply_ops(state, ops)}
+  end
+
+  defp cancel_token_ref(state, token, ref, agent, fenced?, confirmed?) do
+    acknowledged? = cancel_child(state, agent, ref)
+    # A negative acknowledgement can race an already-sent completion.
+    # Once cancellation has begun, never feed partial run results into
+    # strategy state; cancellation owns the terminal result from here.
+    next = if not fenced? and not acknowledged?, do: drain_completions(state), else: state
+
+    if next.in_flight != state.in_flight or next.pending != state.pending do
+      cancel_token(next, token, fenced?, confirmed?)
+    else
+      state = fence_cancelled_ref(state, ref, agent, token)
+      cancel_token(state, token, true, confirmed? and acknowledged?)
+    end
+  end
+
+  defp cancel_child(state, agent, ref) do
+    case GenAgent.cancel_request(namespaced(state, agent), ref, @cancel_child_timeout) do
+      {:ok, :cancelled} ->
+        true
+
+      {:error, :current} ->
+        GenAgent.interrupt_request(namespaced(state, agent), ref, @cancel_child_timeout) ==
+          {:ok, :accepted}
+
+      _ ->
+        false
+    end
+  catch
+    :exit, _ -> false
+  end
+
+  defp fence_cancelled_ref(state, ref, agent, token) do
+    {{started_at, ordinal}, contexts} = Map.pop(state.dispatch_contexts, ref)
+    emit_dispatch(state, :error, agent, token, ref, started_at, ordinal, reason_kind: :cancelled)
+    %{state | in_flight: Map.delete(state.in_flight, ref), dispatch_contexts: contexts}
+  end
+
   defp reply_to_token(state, token, result) do
     case Map.pop(state.pending, token) do
       {nil, _} ->
@@ -869,6 +969,7 @@ defmodule GenAgentEnsemble.Server do
   defp elapsed_ms(started_at),
     do: System.convert_time_unit(System.monotonic_time() - started_at, :native, :millisecond)
 
+  defp reason_kind(:cancelled), do: :cancelled
   defp reason_kind(:normal), do: :normal
   defp reason_kind(:timeout), do: :timeout
   defp reason_kind(:interrupted), do: :interrupted

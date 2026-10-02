@@ -163,6 +163,15 @@ set up by the repo's `.iex.exs`.
 For library code (not iex), call `GenAgentEnsemble` directly -- the
 `IEx` module is a humans-at-the-prompt convenience.
 
+`GenAgentEnsemble.cancel(name, token)` closes a pending token with
+`{:error, :cancelled}` through the existing completion, await, ask, and
+poll/inbox paths while preserving other tokens and the session. It returns
+`{:ok, :cancelled}` for acknowledged child requests or
+`{:ok, :cancelled_unconfirmed}` for uncertain child outcomes; neither proves
+an external provider has settled. Finished/consumed/unknown tokens return
+`:already_finished` or `:not_found` errors. Custom strategies must implement
+`handle_cancel/2`, otherwise cancellation returns `{:error, :unsupported}`.
+
 ## Ad-hoc ensembles from iex
 
 You don't have to use config. Any ensemble can be started
