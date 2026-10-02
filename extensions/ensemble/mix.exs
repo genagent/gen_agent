@@ -1,7 +1,7 @@
 defmodule GenAgentEnsemble.MixProject do
   use Mix.Project
 
-  @version "0.2.1"
+  @version "0.3.0"
   @source_url "https://github.com/genagent/gen_agent"
   @source_path "extensions/ensemble"
 
@@ -43,7 +43,7 @@ defmodule GenAgentEnsemble.MixProject do
 
   defp gen_agent_dep do
     if System.get_env("GEN_AGENT_HEX") == "1" do
-      {:gen_agent, "~> 0.3.0 or ~> 0.4.0 or ~> 0.5.0 or ~> 0.6.0"}
+      {:gen_agent, "~> 0.6.0"}
     else
       {:gen_agent, path: "../.."}
     end
@@ -54,10 +54,10 @@ defmodule GenAgentEnsemble.MixProject do
   # dependencies when building a publishable archive.
   defp backend_deps do
     backends = [
-      {:gen_agent_anthropic, "anthropic", "~> 0.2"},
-      {:gen_agent_claude, "claude", "~> 0.1"},
-      {:gen_agent_openai, "openai", "~> 0.2"},
-      {:gen_agent_codex, "codex", "~> 0.2"}
+      {:gen_agent_anthropic, "anthropic", "~> 0.3.0"},
+      {:gen_agent_claude, "claude", "~> 0.2.0"},
+      {:gen_agent_openai, "openai", "~> 0.3.0"},
+      {:gen_agent_codex, "codex", "~> 0.4.0"}
     ]
 
     for {app, path, hex_constraint} <- backends do

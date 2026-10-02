@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.2.1...gen_agent_ensemble-v0.3.0) (2026-10-02)
+
+
+### Features
+
+* **core:** checkpoint CLI sessions during active turns ([52f2919](https://github.com/genagent/gen_agent/commit/52f2919f2e677a14b428b05f1ad6dd1628741cd0))
+
+
+### Bug Fixes
+
+* **ensemble:** complete dispatches when members halt ([#284](https://github.com/genagent/gen_agent/issues/284)) ([a6bac3d](https://github.com/genagent/gen_agent/commit/a6bac3d855bf188081d6693f9180ecc682f27336))
+* **ensemble:** preserve Supervisor subtask output order ([#275](https://github.com/genagent/gen_agent/issues/275)) ([bd7d1f0](https://github.com/genagent/gen_agent/commit/bd7d1f0cd9802a91da308f59064472dfc5fbb3bc))
+* **ensemble:** reject dispatch when sub-agent is unavailable ([#271](https://github.com/genagent/gen_agent/issues/271)) ([14dc36d](https://github.com/genagent/gen_agent/commit/14dc36dd8c5ffd3104162704d784c611777089f3))
+* **ensemble:** require core 0.6 for completion-aware dispatch ([d5d0d39](https://github.com/genagent/gen_agent/commit/d5d0d3926698858625b4127cc4bd7d94ecbec6bc))
+* **ensemble:** rotate Pool workers and replace dead workers ([#279](https://github.com/genagent/gen_agent/issues/279)) ([d317639](https://github.com/genagent/gen_agent/commit/d317639c654bd5826576a047853d34b692a4f12e))
+* redact sensitive agent state from diagnostics ([#280](https://github.com/genagent/gen_agent/issues/280)) ([3038766](https://github.com/genagent/gen_agent/commit/3038766b00c1854a2db31ca74bba5a48da13c9ad))
+
 ## [0.2.1](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.2.0...gen_agent_ensemble-v0.2.1) (2026-10-01)
 
 

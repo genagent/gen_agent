@@ -131,7 +131,10 @@ every turn after the first.
 ## Backend options
 
 - `:api_key` -- OpenAI API key. Defaults to
-  `System.get_env("OPENAI_API_KEY")`.
+  `System.get_env("OPENAI_API_KEY")`. Starting without a non-empty key
+  returns `{:error, :missing_api_key}` (through `GenAgent.start_agent/2`,
+  `{:error, {:backend_start_failed, :missing_api_key}}`), unless a one-arity
+  `:http_fn` is supplied.
 - `:model` -- model name. Defaults to `"gpt-5"`.
 - `:instructions` -- system prompt (string). Resent every turn.
 - `:reasoning_effort` -- an atom or string passed through as

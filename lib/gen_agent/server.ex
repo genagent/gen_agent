@@ -1209,7 +1209,7 @@ defmodule GenAgent.Server do
       observed_events: 0,
       omitted_events: 0,
       first_omission: nil,
-      text_acc: {[], false},
+      text_acc: Response.new_text_acc(),
       usage: nil,
       terminal: nil
     }

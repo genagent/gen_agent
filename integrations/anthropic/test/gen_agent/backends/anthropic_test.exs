@@ -70,6 +70,38 @@ defmodule GenAgent.Backends.AnthropicTest do
       assert session.api_key == "sk-test"
     end
 
+    test "fails without a key when the default transport is used" do
+      previous = System.get_env("ANTHROPIC_API_KEY")
+      System.delete_env("ANTHROPIC_API_KEY")
+
+      try do
+        assert {:error, :missing_api_key} = Anthropic.start_session([])
+        assert {:error, :missing_api_key} = Anthropic.start_session(api_key: "")
+        assert {:error, :missing_api_key} = Anthropic.start_session(api_key: "   ")
+        assert {:error, :missing_api_key} = Anthropic.start_session(http_fn: nil)
+        assert {:error, :missing_api_key} = Anthropic.start_session(http_fn: :invalid)
+
+        System.put_env("ANTHROPIC_API_KEY", "")
+        assert {:error, :missing_api_key} = Anthropic.start_session([])
+      after
+        if previous,
+          do: System.put_env("ANTHROPIC_API_KEY", previous),
+          else: System.delete_env("ANTHROPIC_API_KEY")
+      end
+    end
+
+    test "starts without a key when :http_fn replaces the transport" do
+      previous = System.get_env("ANTHROPIC_API_KEY")
+      System.delete_env("ANTHROPIC_API_KEY")
+
+      try do
+        assert {:ok, session} = Anthropic.start_session(http_fn: ok_response("hi"))
+        assert session.api_key == nil
+      after
+        if previous, do: System.put_env("ANTHROPIC_API_KEY", previous)
+      end
+    end
+
     test "falls back to ANTHROPIC_API_KEY env var" do
       System.put_env("ANTHROPIC_API_KEY", "env-key")
       {:ok, session} = Anthropic.start_session(http_fn: ok_response("hi"))
@@ -316,6 +348,26 @@ defmodule GenAgent.Backends.AnthropicTest do
                %{role: "user", content: "first"},
                %{role: "assistant", content: "reply"}
              ]
+    end
+
+    test "treats whitespace-only text as empty and removes the unanswered user turn" do
+      {:ok, session} = Anthropic.start_session(api_key: "sk-test", http_fn: ok_response("x"))
+
+      session = %{
+        session
+        | messages: [
+            %{role: "user", content: "first"},
+            %{role: "assistant", content: "reply"},
+            %{role: "user", content: "unanswered"}
+          ]
+      }
+
+      for text <- ["\n", "  ", "\t\n "] do
+        assert Anthropic.update_session(session, %{text: text}).messages == [
+                 %{role: "user", content: "first"},
+                 %{role: "assistant", content: "reply"}
+               ]
+      end
     end
 
     test "removes a refused turn even when the response contains text" do
