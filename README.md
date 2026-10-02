@@ -412,7 +412,7 @@ the agent supervisor. On ordinary shutdown, the agent supervisor stops
 first so its agents can cancel in-flight tasks while their task supervisor
 is still running. An application must reconstruct state and consumed work
 from its own durable records; supervision alone does not provide recovery.
-The [Chaos Lab](examples/chaos_lab) example is a keyless, executable check of
+The [Chaos Lab](https://github.com/genagent/gen_agent/tree/main/examples/chaos_lab) example is a keyless, executable check of
 the supervision contract.
 
 Each prompt turn runs as a Task under its selected `Task.Supervisor`. A
