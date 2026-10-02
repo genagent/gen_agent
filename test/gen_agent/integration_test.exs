@@ -496,7 +496,7 @@ defmodule GenAgent.IntegrationTest do
     test "an omitted handle_event callback ignores notifications without logging errors" do
       name = start_minimal([])
 
-      assert ExUnit.CaptureLog.capture_log(fn ->
+      assert ExUnit.CaptureLog.capture_log([level: :error], fn ->
                assert :ok = GenAgent.notify(name, :unused)
                assert %{state: :idle, agent_state: []} = GenAgent.status(name)
              end) == ""
