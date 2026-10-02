@@ -1038,8 +1038,14 @@ defmodule GenAgent.Server do
     case safely_pre_turn(data.agent_module, prompt, data.agent_state) do
       {:ok, new_prompt, new_state} when is_binary(new_prompt) ->
         data = %{data | agent_state: new_state}
-        data = dispatch(data, request_ref, kind, new_prompt, prompt)
-        {:next_state, :processing, data}
+
+        case dispatch(data, request_ref, kind, new_prompt, prompt) do
+          {:ok, data} ->
+            {:next_state, :processing, data}
+
+          {:error, reason} ->
+            reject_dispatch(data, request_ref, kind, reason)
+        end
 
       {:skip, new_state} ->
         pseudo_current = %{request_ref: request_ref, kind: kind}
@@ -1083,34 +1089,68 @@ defmodule GenAgent.Server do
     # The agent traps exits, so task failures still flow through :DOWN
     # and handle_error/3 without crashing the agent or other agents.
     task =
-      Task.Supervisor.async(task_supervisor, fn ->
-        run_prompt(
-          backend,
-          backend_session,
-          module,
-          agent_state,
-          prompt,
-          {max_events_per_turn, max_event_bytes_per_turn, event_retention},
-          {owner, request_ref}
-        )
-      end)
+      try do
+        {:ok,
+         Task.Supervisor.async(task_supervisor, fn ->
+           run_prompt(
+             backend,
+             backend_session,
+             module,
+             agent_state,
+             prompt,
+             {max_events_per_turn, max_event_bytes_per_turn, event_retention},
+             {owner, request_ref}
+           )
+         end)}
+      catch
+        :exit, {:noproc, _} -> {:error, :task_supervisor_unavailable}
+        :exit, :noproc -> {:error, :task_supervisor_unavailable}
+      end
 
-    started_at = System.monotonic_time(:millisecond)
-    emit_prompt_start(data.name, request_ref, prompt, original_prompt, agent_state)
-    emit_turn_start(data.name, request_ref, kind)
+    case task do
+      {:ok, task} ->
+        started_at = System.monotonic_time(:millisecond)
+        emit_prompt_start(data.name, request_ref, prompt, original_prompt, agent_state)
+        emit_turn_start(data.name, request_ref, kind)
 
-    current = %{
-      request_ref: request_ref,
-      task_ref: task.ref,
-      task_pid: task.pid,
-      kind: kind,
-      prompt: prompt,
-      started_at: started_at,
-      checkpoint_id: nil,
-      checkpoint_error: nil
-    }
+        current = %{
+          request_ref: request_ref,
+          task_ref: task.ref,
+          task_pid: task.pid,
+          kind: kind,
+          prompt: prompt,
+          started_at: started_at,
+          checkpoint_id: nil,
+          checkpoint_error: nil
+        }
 
-    %{data | current_request: current}
+        {:ok, %{data | current_request: current}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp reject_dispatch(%Data{} = data, request_ref, kind, reason) do
+    emit_turn_rejected(data.name, request_ref, kind, reason)
+    emit_prompt_error(data.name, request_ref, reason, data.agent_state)
+
+    # A retry cannot start until the caller restores the task supervisor.
+    # Discard an immediate retry from handle_error/3 to avoid an internal loop.
+    decision = safely_handle_error(data.agent_module, request_ref, reason, data.agent_state)
+    {transition, decision_state} = decision_to_transition(decision)
+
+    {:ok, hooked_state} =
+      safely_post_turn(data.agent_module, {:error, reason}, request_ref, decision_state)
+
+    pseudo_current = %{request_ref: request_ref, kind: kind}
+    {data, reply_actions} = record_error(data, pseudo_current, reason)
+    data = %{data | agent_state: hooked_state}
+
+    data =
+      if transition == :halt, do: transition_to_halted(data), else: data
+
+    {:keep_state, data, with_process_next(reply_actions)}
   end
 
   defp run_prompt(

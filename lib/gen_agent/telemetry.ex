@@ -36,8 +36,8 @@ defmodule GenAgent.Telemetry do
   `reason_kind` is deliberately coarse: terminal errors use
   `:timeout`, `:interrupted`, `:task_crashed`, or
   `:backend_or_callback_error`. Pre-dispatch rejections use
-  `:overloaded`, `:pre_turn_skipped`, `:pre_turn_halted`, or
-  `:pre_turn_invalid`. Queue cancellations use `:caller_cancelled` or
+  `:overloaded`, `:pre_turn_skipped`, `:pre_turn_halted`,
+  `:pre_turn_invalid`, or `:task_supervisor_unavailable`. Queue cancellations use `:caller_cancelled` or
   `:caller_down`. The raw reason, prompt, response, backend
   session, and agent state are never included in these turn events.
   `agent` and especially `ref` can still have high cardinality: use

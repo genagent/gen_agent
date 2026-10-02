@@ -415,6 +415,11 @@ Each prompt turn runs as a Task under its selected `Task.Supervisor`. A
 crashed task delivers `:DOWN` to the owning agent, which turns it into an
 `{:error, {:task_crashed, reason}}` response for the caller -- it does not
 take down the agent process.
+If the selected task supervisor is unavailable before a task can start,
+the request fails with `:task_supervisor_unavailable`, reaches
+`handle_error/3`, and leaves the agent idle. A callback's immediate retry
+is discarded in this case; a later request can run after the supervisor
+returns.
 
 The prompt task belongs to its agent: it is stopped when the agent exits,
 including abrupt exits that bypass termination callbacks. Interruption and
