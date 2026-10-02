@@ -39,9 +39,10 @@ defmodule GenAgent.Backends.Codex do
 
   Options that cannot be preserved on `exec resume` (`:cd`,
   `:add_dirs`, `:search`, `:ephemeral`) are rejected by
-  `start_session/1`. Use `:working_dir` / `:cwd` for a directory that
+  `start_session/1` when enabled. Use `:working_dir` / `:cwd` for a directory that
   persists across turns. The CLI has no global `--verbose` flag, so
-  `:verbose` is also rejected. Session options are translated into supported
+  `verbose: true` is also rejected. Explicit `false` values remain accepted as
+  no-ops. Session options are translated into supported
   resume arguments; `:sandbox` and `:approval_policy` use config
   overrides because resume does not accept their exec flags.
   `:ignore_user_config` applies to both fresh and resumed turns. The CLI
@@ -99,7 +100,7 @@ defmodule GenAgent.Backends.Codex do
   @impl GenAgent.Backend
   def start_session(opts) do
     {exec_fn, opts} = Keyword.pop(opts, :exec_fn, &default_exec/2)
-    opts = normalize_cwd(opts)
+    opts = opts |> normalize_cwd() |> drop_disabled_options()
     {config_opts, exec_opts} = Keyword.split(opts, @config_keys)
 
     with :ok <- validate_exec_opts(exec_opts) do
@@ -306,6 +307,12 @@ defmodule GenAgent.Backends.Codex do
       {nil, rest} -> rest
       {cwd, rest} -> Keyword.put_new(rest, :working_dir, cwd)
     end
+  end
+
+  defp drop_disabled_options(opts) do
+    Enum.reject(opts, fn {key, value} ->
+      key in [:ephemeral, :verbose] and value in [false, nil]
+    end)
   end
 
   defp validate_exec_opts(opts) do

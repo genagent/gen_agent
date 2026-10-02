@@ -111,8 +111,9 @@ turn's `exec resume` command.
 
 These settings are forwarded where the CLI supports them. Sandbox and
 approval policy become supported `-c` overrides on resume.
-The backend rejects `:ephemeral` because its sessions must be resumable, and
-rejects `:verbose` because the CLI has no such global flag.
+The backend rejects `ephemeral: true` because its sessions must be resumable,
+and rejects `verbose: true` because the CLI has no such global flag. Explicit
+`false` values remain accepted as no-ops.
 
 | Configuration option | Fresh turn | Resumed turn |
 | --- | --- | --- |

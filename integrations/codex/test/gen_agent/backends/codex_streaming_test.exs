@@ -93,6 +93,9 @@ defmodule GenAgent.Backends.CodexStreamingTest do
     assert {:error, {:unsupported_resume_option, :ephemeral}} =
              Codex.resume_session("fixture-thread", ephemeral: true)
 
+    assert {:ok, _session} = Codex.start_session(ephemeral: false)
+    assert {:ok, _session} = Codex.resume_session("fixture-thread", ephemeral: false)
+
     assert {:error, {:invalid_approval_policy, :on_failure}} =
              Codex.start_session(approval_policy: :on_failure)
   end
@@ -111,6 +114,9 @@ defmodule GenAgent.Backends.CodexStreamingTest do
 
     assert {:error, {:unsupported_option, :verbose}} =
              Codex.resume_session("fixture-thread", verbose: true)
+
+    assert {:ok, _session} = Codex.start_session(verbose: false)
+    assert {:ok, _session} = Codex.resume_session("fixture-thread", verbose: false)
   end
 
   test "an explicit approval policy wins over a conflicting config override on resume" do
