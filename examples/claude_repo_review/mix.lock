@@ -1,0 +1,6 @@
+%{
+  "claude_wrapper": {:hex, :claude_wrapper, "0.14.5", "b838ca7d47061ddf5b1ed78d40258b5119667682e0de966a155a85da13009fb4", [:mix], [{:forcola, "~> 0.4.0", [hex: :forcola, repo: "hexpm", optional: true]}, {:jason, "~> 1.4", [hex: :jason, repo: "hexpm", optional: false]}, {:telemetry, "~> 1.0", [hex: :telemetry, repo: "hexpm", optional: false]}], "hexpm", "db20f06fdede4d661ea119f44b36b807fbce1951c5046a338c3b7011f23a4c80"},
+  "forcola": {:hex, :forcola, "0.4.0", "deb6d52fc6422fbb06aa004309e1c741b532e1ca0fcec547b349995de3594ac7", [:mix], [], "hexpm", "2ab159e39259bdfa2786e54dcbbebc906eb526aaffb39f94a3339732b184a60a"},
+  "jason": {:hex, :jason, "1.4.5", "2e3a008590b0b8d7388c20293e9dcc9cf3e5d642fd2a114e4cbbb52e595d940a", [:mix], [{:decimal, "~> 1.0 or ~> 2.0 or ~> 3.0", [hex: :decimal, repo: "hexpm", optional: true]}], "hexpm", "b0c823996102bcd0239b3c2444eb00409b72f6a140c1950bc8b457d836b30684"},
+  "telemetry": {:hex, :telemetry, "1.4.2", "a0cb522801dffb1c49fe6e30561badffc7b6d0e180db1300df759faa22062855", [:rebar3], [], "hexpm", "928f6495066506077862c0d1646609eed891a4326bee3126ba54b60af61febb1"},
+}
