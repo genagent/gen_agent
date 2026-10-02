@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.0...gen_agent_codex-v0.4.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **backends:** require compatible core for CLI adapters ([#308](https://github.com/genagent/gen_agent/issues/308)) ([286f578](https://github.com/genagent/gen_agent/commit/286f578461e75de6e32a43a277b2b5150a2b0e44))
+
 ## [0.4.0](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.3.0...gen_agent_codex-v0.4.0) (2026-10-02)
 
 
