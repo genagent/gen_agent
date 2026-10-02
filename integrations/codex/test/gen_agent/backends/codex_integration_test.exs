@@ -15,6 +15,7 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
   @moduletag capture_log: true
 
   alias CodexWrapper.JsonLineEvent
+  alias GenAgent.CodexTranscripts, as: Transcripts
 
   defmodule CodexAgent do
     use GenAgent
@@ -95,6 +96,46 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
     end)
 
     name
+  end
+
+  for recording <- Transcripts.names() do
+    @tag recording: recording
+    test "recorded #{recording} traverses the backend and callbacks", %{recording: recording} do
+      events = Transcripts.load(recording)
+      name = start_codex_agent(fn _, _ -> {:ok, events} end)
+
+      if recording == "failure" do
+        reason = Transcripts.failure()
+        assert {:error, ^reason} = GenAgent.ask(name, recording)
+      else
+        assert {:ok, response} = GenAgent.ask(name, recording)
+        Transcripts.assert_events(response.events, recording)
+        assert response.text == Transcripts.text(recording)
+        assert response.session_id == Transcripts.thread_id(recording)
+        assert response.usage == Keyword.fetch!(Transcripts.expected(recording), :usage)
+      end
+
+      Transcripts.assert_events(GenAgent.status(name).agent_state.stream_events, recording)
+    end
+  end
+
+  test "recorded resume pair retains the initial thread identity" do
+    observer = self()
+
+    name =
+      start_codex_agent(fn recording, session ->
+        send(observer, {:resume_thread, session.thread_id})
+        {:ok, Transcripts.load(recording)}
+      end)
+
+    assert {:ok, initial} = GenAgent.ask(name, "resume-initial")
+    assert_receive {:resume_thread, nil}
+    assert {:ok, followup} = GenAgent.ask(name, "resume-followup")
+    id = initial.session_id
+    assert_receive {:resume_thread, ^id}
+    assert followup.session_id == id
+    assert initial.text == "ok"
+    assert followup.text == "42"
   end
 
   describe "round trip through GenAgent.ask/2" do
@@ -316,7 +357,7 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
       assert_receive {:pulled, "turn.failed"}
     end
 
-    test "parsed action items reach stream callback in order" do
+    test "synthetic: parsed action items reach stream callback in order" do
       lines = [
         ~s({"type":"thread.started","thread_id":"t-mcp"}),
         ~s({"type":"item.started","item":{"type":"mcp_tool_call","id":"call-2","status":"in_progress"}}),

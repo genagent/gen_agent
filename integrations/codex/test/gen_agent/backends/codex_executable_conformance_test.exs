@@ -1,6 +1,8 @@
 defmodule GenAgent.Backends.CodexExecutableConformanceTest do
   use ExUnit.Case, async: false
 
+  alias GenAgent.CodexTranscripts, as: Transcripts
+
   import GenAgent.TestDownAssertions
 
   @moduletag capture_log: true
@@ -44,6 +46,8 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
     binary = Path.join(directory, "codex-fixture")
     File.cp!(Path.expand("../../fixtures/codex_cli.sh", __DIR__), binary)
     File.chmod!(binary, 0o755)
+    File.mkdir_p!(Path.join(directory, "codex"))
+    File.cp_r!(Transcripts.directory(), Path.join(directory, "codex/0.157.1"))
 
     on_exit(fn ->
       if previous_runner do
@@ -113,25 +117,9 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
       )
 
     assert {:ok, first} = GenAgent.ask(name, "first prompt")
-    assert first.text == "fixture-fresh"
-    assert first.session_id == "fixture-thread"
-    assert first.usage == %{input_tokens: 3, output_tokens: 2}
-
-    assert Enum.map(first.events, & &1.kind) ==
-             [
-               :tool_use,
-               :tool_result,
-               :tool_use,
-               :tool_result,
-               :tool_use,
-               :tool_result,
-               :text,
-               :usage,
-               :result
-             ]
-
-    assert Enum.map(Enum.take(first.events, 6), & &1.data["id"]) ==
-             ["call-1", "call-1", "cmd-1", "cmd-1", "file-1", "file-1"]
+    assert first.text == "ok"
+    assert first.session_id == Transcripts.thread_id("resume-initial")
+    Transcripts.assert_events(first.events, "resume-initial")
 
     fresh_args = args(context.directory, :fresh)
     assert hd(fresh_args) == "exec"
@@ -146,12 +134,13 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
     assert File.read!(Path.join(context.directory, "fresh.env")) == "configured\n"
 
     assert {:ok, second} = GenAgent.ask(name, "follow-up prompt")
-    assert second.text == "fixture-resume"
-    assert second.session_id == "fixture-thread"
+    assert second.text == "42"
+    Transcripts.assert_events(second.events, "resume-followup")
+    assert second.session_id == first.session_id
 
     resume_args = args(context.directory, :resume)
     assert Enum.take(resume_args, 2) == ["exec", "resume"]
-    assert "fixture-thread" in resume_args
+    assert first.session_id in resume_args
     assert "fixture-model" in resume_args
     assert "fixture_feature" in resume_args
     assert "other_feature" in resume_args
@@ -166,20 +155,33 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
     assert File.read!(Path.join(context.directory, "resume.env")) == "configured\n"
   end
 
-  test "terminal failure from the executable reaches GenAgent as an error", context do
-    name = start_agent(context)
-    assert {:error, "fixture failure"} = GenAgent.ask(name, "fail")
-    assert GenAgent.status(name).agent_state.errors == ["fixture failure"]
-    assert "fail" == List.last(args(context.directory, :fresh))
-  end
+  for recording <- Transcripts.names() do
+    @tag recording: recording
+    test "replays #{recording} through the wrapper and Port runner", context do
+      recording = context.recording
+      Transcripts.load(recording)
+      name = start_agent(context)
 
-  test "structured CLI failure reaches GenAgent without flattening its fields", context do
-    name = start_agent(context)
+      if recording == "failure" do
+        reason = Transcripts.failure()
+        assert {:error, ^reason} = GenAgent.ask(name, "replay:#{recording}")
+        assert GenAgent.status(name).agent_state.errors == [reason]
+        assert_receive {:stream_event, :error, _}
+        refute_receive {:stream_event, _, _}
+      else
+        assert {:ok, response} = GenAgent.ask(name, "replay:#{recording}")
+        Transcripts.assert_events(response.events, recording)
+        assert response.text == Transcripts.text(recording)
+      end
+    end
 
-    assert {:error, %{"code" => "fixture_error", "message" => "typed fixture failure"}} =
-             GenAgent.ask(name, "typed-fail")
-
-    assert [%{"code" => "fixture_error"}] = GenAgent.status(name).agent_state.errors
+    @tag recording: recording
+    test "fixture preserves #{recording} stdout and exit status", context do
+      recording = context.recording
+      {stdout, status} = System.cmd(context.binary, ["exec", "replay:#{recording}"])
+      assert stdout == File.read!(Path.join(Transcripts.directory(), "#{recording}.jsonl"))
+      assert status == Transcripts.manifest()["scenarios"][recording]["exit_status"]
+    end
   end
 
   for action <- [:interrupt, :watchdog, :stop, :kill] do

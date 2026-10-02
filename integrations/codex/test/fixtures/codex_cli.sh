@@ -2,7 +2,7 @@
 set -eu
 
 fixture_dir=$(cd "$(dirname "$0")" && pwd)
-
+corpus="$fixture_dir/codex/0.157.1"
 mode=fresh
 if [ "${2:-}" = "resume" ]; then
   mode=resume
@@ -11,51 +11,31 @@ fi
 printf '%s\n' "$@" > "$fixture_dir/$mode.args"
 printf '%s\n' "${GEN_AGENT_FIXTURE-unset}" > "$fixture_dir/$mode.env"
 
-case "${*}" in
-  *typed-fail*)
-    fixture_mode=typed_failure
-    ;;
-  *fail*)
-    fixture_mode=failure
-    ;;
-  *hold*)
-    fixture_mode=hold
-    ;;
-  *)
-    fixture_mode=success
-    ;;
+# Explicit selection uses the final prompt argument: replay:<manifest scenario>.
+for prompt do :; done
+hold=false
+case "$prompt" in
+  replay:*) recording=${prompt#replay:} ;;
+  hold) recording=success; hold=true ;;
+  *) if [ "$mode" = resume ]; then recording=resume-followup; else recording=resume-initial; fi ;;
 esac
 
-case "$fixture_mode" in
-  typed_failure)
-    printf '%s\n' '{"type":"thread.started","thread_id":"fixture-thread"}'
-    printf '%s\n' '{"type":"turn.failed","error":{"code":"fixture_error","message":"typed fixture failure"}}'
-    ;;
+# Read the recorded status without requiring another runtime or maintaining a second manifest.
+exit_status=$(awk -v scenario="\"$recording\":" '
+  index($0, scenario) { selected = 1 }
+  selected && /"exit_status":/ { gsub(/[^0-9]/, ""); print; exit }
+' "$corpus/manifest.json")
+if [ -z "$exit_status" ] || [ ! -f "$corpus/$recording.jsonl" ]; then
+  printf 'unknown recording: %s\n' "$recording" >&2
+  exit 2
+fi
 
-  failure)
-    printf '%s\n' '{"type":"thread.started","thread_id":"fixture-thread"}'
-    printf '%s\n' '{"type":"turn.failed","error":"fixture failure"}'
-    ;;
-
-  hold)
-    printf '%s\n' '{"type":"thread.started","thread_id":"fixture-thread"}'
-    printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}'
-    sleep 2
-    printf '%s\n' '{"type":"turn.completed"}' 2>/dev/null || true
-    ;;
-
-  success)
-    printf '%s\n' '{"type":"thread.started","thread_id":"fixture-thread"}'
-    printf '%s\n' '{"type":"turn.started"}'
-    printf '%s\n' '{"type":"item.completed","item":{"type":"mcp_tool_call","id":"call-1","server":"fixture","tool":"read","arguments":{"path":"README.md"},"result":{"content":[]},"status":"completed"}}'
-    printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","id":"cmd-1","command":"pwd","aggregated_output":"/fixture","status":"completed"}}'
-    printf '%s\n' '{"type":"item.completed","item":{"type":"file_change","id":"file-1","changes":[],"status":"completed"}}'
-    printf '{"type":"item.completed","item":{"type":"agent_message","text":"fixture-%s"}}\n' "$mode"
-    printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":2}}'
-    ;;
-
-  *)
-    printf 'unexpected fixture mode: %s\n' "$fixture_mode" >&2
-    exit 2
-    ;;
-esac
+# Cancellation tests pause before the terminal line, preserving the recorded prefix.
+if [ "$hold" = true ]; then
+  sed '$d' "$corpus/$recording.jsonl"
+  sleep 2
+  tail -n 1 "$corpus/$recording.jsonl" 2>/dev/null || true
+else
+  cat "$corpus/$recording.jsonl"
+fi
+exit "$exit_status"
