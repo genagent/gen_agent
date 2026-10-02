@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.2.5...gen_agent_anthropic-v0.3.0) (2026-10-02)
+
+
+### Features
+
+* **core:** checkpoint CLI sessions during active turns ([52f2919](https://github.com/genagent/gen_agent/commit/52f2919f2e677a14b428b05f1ad6dd1628741cd0))
+
+
+### Bug Fixes
+
+* **anthropic:** skip whitespace-only assistant history ([b3e1cb2](https://github.com/genagent/gen_agent/commit/b3e1cb296a85e961b0da4edc56f4c11938bc7df6))
+* **backends:** fail to start HTTP backends without credentials ([3a10e03](https://github.com/genagent/gen_agent/commit/3a10e034176e49a1c138fde95c2d64bcfb9244ad))
+
 ## [0.2.5](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.2.4...gen_agent_anthropic-v0.2.5) (2026-10-02)
 
 
