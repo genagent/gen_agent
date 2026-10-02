@@ -3,6 +3,7 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
 
   alias GenAgent.Backends.Mock
   alias GenAgent.Event
+  alias GenAgentEnsemble.{ControlledAgent, ControlledBackend}
   alias GenAgentEnsemble.Strategies.Pool
   alias GenAgentEnsemble.TestAgent
 
@@ -26,6 +27,24 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
       strategy: Pool,
       opts: [worker_count: count, worker_template: worker]
     )
+  end
+
+  test "sequential requests rotate across every worker" do
+    {:ok, state, _specs} =
+      Pool.init(worker_count: 3, worker_template: {"worker", TestAgent, []})
+
+    {workers, _state} =
+      Enum.map_reduce(1..6, state, fn turn, state ->
+        token = "token-#{turn}"
+
+        {:ok, [{:dispatch, worker, _prompt, ^token}], state} =
+          Pool.handle_ask("prompt-#{turn}", [], token, state)
+
+        {:ok, [{:reply, ^token, :done}], state} = Pool.handle_response(worker, :done, state)
+        {worker, state}
+      end)
+
+    assert workers == ["worker-1", "worker-2", "worker-3", "worker-1", "worker-2", "worker-3"]
   end
 
   test "dispatches across free workers first", %{name: name} do
@@ -81,16 +100,53 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
     assert {:ok, %{text: "ok:good"}} = GenAgentEnsemble.ask(name, "good", timeout: 5_000)
   end
 
-  test "worker death shrinks pool; zero workers halts session", %{name: name} do
+  test "idle worker death starts a fresh worker under the same name", %{name: name} do
     echo = fn _ -> [Event.new(:result, %{text: "x"})] end
-    {:ok, pid} = start_pool(name, 1, [echo])
-    ref = Process.monitor(pid)
+    {:ok, _pid} = start_pool(name, 2, [echo])
 
-    # Kill the only worker. The Server namespaces sub-agent names internally
-    # as "<session>/<bare>", so we reach it by the registered name.
-    Process.exit(GenAgent.whereis("#{name}/#{name}-w-1"), :kill)
+    worker_name = "#{name}/#{name}-w-1"
+    old_worker = GenAgent.whereis(worker_name)
+    Process.exit(old_worker, :kill)
+    new_worker = await_replacement(worker_name, old_worker)
 
-    assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
+    assert Process.alive?(new_worker)
+    {:ok, info} = GenAgentEnsemble.status(name)
+    assert info.free == 2
+    assert length(info.workers) == 2
+    assert {:ok, %{text: "x"}} = GenAgentEnsemble.ask(name, "on surviving worker")
+    assert {:ok, %{text: "x"}} = GenAgentEnsemble.ask(name, "on replacement")
+  end
+
+  test "busy worker death fails its token and runs queued work on replacement", %{name: name} do
+    worker =
+      {"#{name}-w", ControlledAgent,
+       [backend: ControlledBackend, observer: self(), tag: "worker"]}
+
+    {:ok, _pid} =
+      GenAgentEnsemble.start_link(
+        name: name,
+        strategy: Pool,
+        opts: [worker_count: 1, worker_template: worker]
+      )
+
+    {:ok, first} = GenAgentEnsemble.tell(name, "first")
+    assert_receive {:controlled_prompt, "worker", "first", _first_task}, 2_000
+    {:ok, second} = GenAgentEnsemble.tell(name, "second")
+
+    worker_name = "#{name}/#{name}-w-1"
+    old_worker = GenAgent.whereis(worker_name)
+    Process.exit(old_worker, :kill)
+
+    assert {:error, {:worker_down, :killed}} = await_outcome(name, first)
+    assert_receive {:controlled_prompt, "worker", "second", second_task}, 2_000
+    assert await_replacement(worker_name, old_worker) != old_worker
+
+    send(second_task, {:result, "recovered"})
+    assert {:ok, %{text: "recovered"}} = await_outcome(name, second)
+    {:ok, info} = GenAgentEnsemble.status(name)
+    assert info.free == 1
+    assert info.busy == 0
+    assert info.queued == 0
   end
 
   test "status reports pool shape", %{name: name} do
@@ -114,6 +170,34 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
 
       other ->
         flunk("expected completion, got: #{inspect(other)}")
+    end
+  end
+
+  defp await_outcome(name, token, retries \\ 100) do
+    case GenAgentEnsemble.poll(name, token) do
+      {:ok, :pending} when retries > 0 ->
+        Process.sleep(20)
+        await_outcome(name, token, retries - 1)
+
+      {:ok, :completed, response} ->
+        {:ok, response}
+
+      other ->
+        other
+    end
+  end
+
+  defp await_replacement(name, old_pid, retries \\ 100) do
+    case GenAgent.whereis(name) do
+      pid when is_pid(pid) and pid != old_pid ->
+        pid
+
+      _ when retries > 0 ->
+        Process.sleep(20)
+        await_replacement(name, old_pid, retries - 1)
+
+      other ->
+        flunk("expected a replacement for #{name}, got: #{inspect(other)}")
     end
   end
 end

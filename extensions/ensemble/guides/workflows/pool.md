@@ -76,9 +76,9 @@ iex> E.drain("qa-pool")
 
 Fire the tells in a single pipeline (`for` comprehension or
 `Enum.map`) so they land at the Pool before any can finish.
-Otherwise the first one completes and frees its worker, which then
-picks up the second, and you lose parallelism -- see the gotcha
-below.
+Otherwise a worker may finish before the next request arrives, and
+the requests will run sequentially instead of in parallel. Idle
+workers rotate, so sequential requests are spread across the pool.
 
 ### Overflow queueing
 
@@ -112,18 +112,15 @@ Uses whichever worker is free. If all are busy, queues behind them.
 
 - **Workers retain per-worker conversation history.** The Pool
   recycles workers across turns, and each worker's backend session
-  persists. If you fire three sequential tells slowly enough that
-  each finishes before the next arrives, all three land on the same
-  worker and accumulate as a multi-turn conversation -- you'll see
-  input-token counts grow and the worker's system prompt drift under
-  the accumulated context. Fire tells in one shot (`Enum.map`) to
-  spread across workers, or swap in a fresh-session callback module
-  if you need isolated single turns.
+  persists. Sequential requests rotate among idle workers, then
+  return to each worker's existing conversation. Use a fresh-session
+  callback module if you need isolated single turns.
 - **`status` races against fast turns.** If you call `E.status` in a
   separate iex line after firing tells, a sub-second turn may have
   already completed, showing `busy: 0`. Capture status right after
   dispatch in the same expression if you want to see the in-flight
   state.
-- **Worker death shrinks the pool.** If all workers die, the session
-  halts (`{:halt, :pool_exhausted}`). Restart the ensemble to
-  recover.
+- **Worker death starts a fresh worker.** An in-flight token fails
+  with `{:worker_down, reason}`; queued requests can continue on the
+  replacement. The new worker has a fresh backend session and loses
+  the dead worker's conversation history.
