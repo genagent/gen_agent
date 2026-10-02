@@ -124,6 +124,7 @@ defmodule GenAgent.EventCaptureTest do
     {ref, :ok, 4} = tell_and_wait(name, "fallback")
     assert {:ok, :completed, response} = GenAgent.poll(name, ref)
     assert response.text == "first\n\nsecond"
+    assert response.final_message == "second"
     assert response.usage == %{output_tokens: 2}
     assert response.events == [first]
     assert response.event_coverage.omitted_events == 3
@@ -131,6 +132,7 @@ defmodule GenAgent.EventCaptureTest do
     {next_ref, :ok, 7} = tell_and_wait(name, "empty terminal")
     assert {:ok, :completed, next_response} = GenAgent.poll(name, next_ref)
     assert next_response.text == ""
+    assert next_response.final_message == ""
   end
 
   test "lossless retention rejects a terminal result after many small events" do

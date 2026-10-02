@@ -6,6 +6,10 @@ defmodule GenAgent.Response do
   (`:result` or `:error`) arrives from the backend. It carries:
 
     * `:text` -- the full assembled assistant text for the turn.
+    * `:final_message` -- the terminal text when provided, otherwise the
+      last boundary-marked assistant message (or all text if no boundary
+      was marked). This remains available when compact retention omits
+      the text events.
     * `:events` -- retained normalized events in arrival order. Check
       `:event_coverage` before treating this as a complete log.
     * `:terminal` -- the original terminal result event, even if compact
@@ -21,6 +25,7 @@ defmodule GenAgent.Response do
 
   @type t :: %__MODULE__{
           text: String.t(),
+          final_message: String.t(),
           events: [Event.t()],
           terminal: Event.t() | nil,
           event_coverage: map(),
@@ -30,6 +35,7 @@ defmodule GenAgent.Response do
         }
 
   defstruct text: "",
+            final_message: "",
             events: [],
             terminal: nil,
             event_coverage: %{},
@@ -44,14 +50,15 @@ defmodule GenAgent.Response do
   `:error`). Text is taken from the `:result` event's `:text` field if
   present, otherwise assembled from any `:text` deltas. Deltas concatenate
   directly; a text event with `message_boundary: true` starts a separate
-  assistant message after a blank line. Usage is taken from the most recent
-  `:usage` event, if any.
+  assistant message after a blank line. `:final_message` selects the terminal
+  text when present, otherwise the last boundary-marked message. Usage is
+  taken from the most recent `:usage` event, if any.
   """
   @spec from_events([Event.t()], keyword()) :: t()
   def from_events(events, opts \\ []) when is_list(events) do
     terminal = Enum.find(events, &Event.terminal?/1)
     usage = latest_usage(events)
-    text_acc = Enum.reduce(events, {[], false}, &append_text/2)
+    text_acc = Enum.reduce(events, new_text_acc(), &append_text/2)
 
     coverage = %{
       mode: :exact,
@@ -75,6 +82,7 @@ defmodule GenAgent.Response do
   def from_capture(events, terminal, usage, text_acc, opts) when is_list(events) do
     %__MODULE__{
       text: text_from_capture(terminal, text_acc),
+      final_message: final_message_from_capture(terminal, text_acc),
       events: events,
       terminal: terminal,
       event_coverage: Keyword.fetch!(opts, :event_coverage),
@@ -89,21 +97,45 @@ defmodule GenAgent.Response do
       when is_binary(text),
       do: text
 
-  def text_from_capture(_terminal, {reversed_chunks, _seen_text?}),
-    do: reversed_chunks |> Enum.reverse() |> IO.iodata_to_binary()
+  def text_from_capture(_terminal, %{chunks: chunks}),
+    do: chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
   @doc false
-  def append_text(%Event{kind: :text, data: data}, {chunks, seen_text?}) do
+  def final_message_from_capture(%Event{kind: :result, data: %{text: text}}, _acc)
+      when is_binary(text),
+      do: text
+
+  def final_message_from_capture(terminal, %{saw_boundary?: false} = acc),
+    do: text_from_capture(terminal, acc)
+
+  def final_message_from_capture(_terminal, %{final_chunks: chunks}),
+    do: chunks |> Enum.reverse() |> IO.iodata_to_binary()
+
+  @doc false
+  def new_text_acc,
+    do: %{chunks: [], seen_text?: false, final_chunks: [], saw_boundary?: false}
+
+  @doc false
+  def append_text(%Event{kind: :text, data: data}, acc) do
     text = Map.get(data, :text, "")
+    boundary? = Map.get(data, :message_boundary, false)
 
     chunks =
-      if Map.get(data, :message_boundary, false) and seen_text? and text != "" do
-        [text, "\n\n" | chunks]
+      if boundary? and acc.seen_text? and text != "" do
+        [text, "\n\n" | acc.chunks]
       else
-        [text | chunks]
+        [text | acc.chunks]
       end
 
-    {chunks, seen_text? or text != ""}
+    final_chunks = if boundary?, do: [text], else: [text | acc.final_chunks]
+
+    %{
+      acc
+      | chunks: chunks,
+        seen_text?: acc.seen_text? or text != "",
+        final_chunks: final_chunks,
+        saw_boundary?: acc.saw_boundary? or boundary?
+    }
   end
 
   def append_text(_event, acc), do: acc
