@@ -74,12 +74,21 @@ IO.puts(response.text)
 
 ## Session continuation
 
-Claude CLI tracks multi-turn state via a server-side `session_id`. The
+Claude CLI tracks multi-turn state through a `session_id`. The
 backend checkpoints it from a raw `system` or terminal event as soon as
 the CLI provides it, then threads it through `--resume` on subsequent
 turns, including after a failed or interrupted turn. No caller code is
 required. If the CLI fails before providing an ID, the next turn starts
 without `--resume`.
+
+The conversation behind a session ID is not stored by a server. The CLI
+writes it as a local transcript file under
+`~/.claude/projects/<slug derived from the working directory>/<session_id>.jsonl`
+in the home directory of the user that runs the CLI. A saved ID can be
+resumed when the CLI runs as the same user, on the same host, with the same
+working directory, and the transcript file still exists. This backend
+rejects `no_session_persistence: true` for this reason (see
+[Backend options](#backend-options)).
 
 Claude emits text deltas and tool results as normalized events. A long or
 tool-heavy turn can exceed GenAgent's default retained-log budget of 1,000
@@ -99,6 +108,49 @@ options. See the root README's event capture section for the contract.
 # r2.text == "42"
 ```
 
+### Resuming after an agent restart
+
+GenAgent does not call `resume_session/2`; every agent start calls
+`start_session/1` with the options returned from `init_agent/1`. To continue
+a prior conversation after the agent process restarts, save
+`response.session_id` and pass it back as `:resume` in those options, with
+the same `:cwd` as before:
+
+```elixir
+defmodule MyApp.Reviewer do
+  use GenAgent
+
+  @impl true
+  def init_agent(opts) do
+    cwd = Keyword.fetch!(opts, :cwd)
+
+    backend_opts =
+      case MyApp.SessionStore.get("reviewer") do
+        nil -> [cwd: cwd]
+        saved_id -> [cwd: cwd, resume: saved_id]
+      end
+
+    {:ok, backend_opts, %{}}
+  end
+
+  @impl true
+  def handle_response(_ref, response, state) do
+    if response.session_id, do: MyApp.SessionStore.put("reviewer", response.session_id)
+    {:noreply, state}
+  end
+end
+```
+
+`MyApp.SessionStore` stands for whatever storage the application uses.
+The first turn after the restart runs with `--resume <saved_id>`. Once the
+CLI reports a session ID, the backend uses that ID for later turns in place
+of the one you supplied. Resume needs the CLI's saved transcript for that
+session, which lives under the user's home directory, so the CLI must run as
+the same user on the same machine; if the transcript is missing, the turn
+returns an error. Keep `:cwd` the same across restarts: the backend forwards
+`:resume` unchanged, and the CLI's own documentation describes how it finds
+a session's transcript.
+
 ## Backend options
 
 `start_session/1` accepts `ClaudeWrapper.stream/2` options with one exception:
@@ -107,20 +159,119 @@ options. See the root README's event capture section for the contract.
 turns resume the CLI session. If `:session_id` or `:continue_session` is
 supplied for the first turn, the backend omits it once `--resume` is used.
 
-**Config:**
-- `:binary`, `:working_dir` (aliased as `:cwd`), `:env`, `:timeout`,
-  `:verbose`, `:debug`
+Options are passed to `ClaudeWrapper.stream/2` unchanged, except that `:cwd`
+is renamed to `:working_dir` and `:include_partial_messages` defaults to
+`true`. `ClaudeWrapper` ignores keys it does not recognize, and ignores
+`:allowed_tools`, `:disallowed_tools`, and `:tools` when they are not lists.
+The lists below cover the commonly used options; see `ClaudeWrapper.Query`
+for the full set.
 
-**Query:**
-- `:model`, `:system_prompt`, `:append_system_prompt`, `:max_turns`,
-  `:max_budget_usd`, `:permission_mode`, `:dangerously_skip_permissions`,
-  `:effort`, `:json_schema`, `:agent`, `:brief`,
-  `:include_partial_messages` (enabled by default)
+**Process:**
+- `:binary` -- path to the `claude` executable.
+- `:working_dir` (aliased as `:cwd`) -- directory the CLI runs in.
+- `:env` -- environment variables set on top of the inherited environment.
+  See [Environment and working directory](#environment-and-working-directory).
+- `:debug` -- passes `--debug` to the CLI.
+
+**Model and prompt:**
+- `:model` -- model name or alias, for example `"sonnet"`.
+- `:fallback_model` -- model the CLI falls back to when the primary model
+  is unavailable (`--fallback-model`).
+- `:system_prompt` -- replaces the default system prompt.
+- `:system_prompt_file` -- reads the system prompt from a file
+  (`--system-prompt-file`), which avoids passing a large prompt in argv.
+- `:append_system_prompt` -- text appended to the default system prompt.
+- `:effort` -- `:low`, `:medium`, `:high`, `:xhigh`, or `:max`.
+- `:max_turns` -- cap on agentic turns per prompt.
+- `:max_budget_usd` -- cap on spend per prompt.
+- `:json_schema` -- JSON schema string for structured output.
+- `:agent` -- name of a Claude Code agent to run as.
+- `:brief` -- enables the `SendUserMessage` tool (`--brief`).
+
+**Tools and permissions:**
+- `:tools` -- list of built-in tools the agent can use (`--tools`). Tools
+  not in the list are not available to the agent. An empty list is not a
+  restriction: the wrapper omits `--tools` entirely for `[]`, so the CLI's
+  default tools stay available.
+- `:allowed_tools` -- list of tools or tool patterns, such as
+  `"Bash(git log:*)"`, that run without a permission prompt
+  (`--allowed-tools`). This does not remove other tools.
+- `:disallowed_tools` -- list of tools or tool patterns the agent may not
+  use (`--disallowed-tools`).
+- `:permission_mode`, `:dangerously_skip_permissions` -- see
+  [Permissions](#permissions).
+- `:add_dir` -- directory or list of directories tools may access in
+  addition to the working directory (`--add-dir`).
+
+**MCP:**
+- `:mcp_config` -- path or list of paths to MCP server config files
+  (`--mcp-config`).
+- `:strict_mcp_config` -- `true` uses only the servers from `:mcp_config`
+  and ignores MCP servers configured in Claude settings
+  (`--strict-mcp-config`).
+
+**Settings isolation:**
+- `:setting_sources` -- comma-separated string of the settings sources the
+  CLI loads, from `"user"`, `"project"`, and `"local"`
+  (`--setting-sources`). An empty string loads none of them.
+- `:hermetic` -- a preset over three flags. `true` or `:full` sets
+  `--setting-sources ""`, which drops user, project, and local settings
+  (hooks, MCP servers, and permission rules from `~/.claude` and the
+  project's `.claude` directory). `:project` sets `--setting-sources user`,
+  which drops project and local settings and keeps the user's `~/.claude`
+  settings. Both scopes also set `--strict-mcp-config` and
+  `--exclude-dynamic-system-prompt-sections`. An explicit
+  `:setting_sources` takes precedence over the scope's value. `:hermetic`
+  does not change authentication, the inherited environment, or where the
+  CLI stores session transcripts.
+
+**Session:**
+- `:resume` -- session ID to resume on the first turn. See
+  [Resuming after an agent restart](#resuming-after-an-agent-restart).
+- `:session_id`, `:continue_session` -- applied to the first turn only.
+
+**Streaming:**
+- `:include_partial_messages` -- streams text deltas as they arrive.
+  Enabled by default.
+
+**No effect on the default streamed turn:**
+- `:timeout` -- `ClaudeWrapper.stream/2` does not apply it. Each turn is
+  bounded by a fixed idle deadline instead; see
+  [Cancellation and timeouts](#cancellation-and-timeouts). It reaches a
+  custom `:stream_fn`, which can read it.
+- `:verbose` -- `ClaudeWrapper.stream/2` always passes `--verbose`, which
+  stream-json output requires.
+- `:output_format` -- `ClaudeWrapper.stream/2` always uses `stream-json`.
 
 **Backend-only:**
 - `:stream_fn` -- a 2-arity function `(prompt, opts) -> Enumerable.t()`
   that replaces the default `&ClaudeWrapper.stream/2`. Intended for tests
   that want to stub out the subprocess.
+
+### Read-only agent
+
+`:tools` limits the tools the agent has. `:allowed_tools` lets the listed
+tools run without a permission prompt. Setting both gives an agent that can
+read the project and cannot edit files or run shell commands:
+
+```elixir
+@impl true
+def init_agent(opts) do
+  backend_opts = [
+    cwd: Keyword.fetch!(opts, :cwd),
+    system_prompt: "You review code. Do not modify files.",
+    tools: ["Read", "Grep", "Glob"],
+    allowed_tools: ["Read", "Grep", "Glob"],
+    hermetic: :project
+  ]
+
+  {:ok, backend_opts, %{}}
+end
+```
+
+`hermetic: :project` keeps the project's `.claude` settings, hooks, and MCP
+servers out of the run. Use `hermetic: true` to also drop the user's
+`~/.claude` settings.
 
 ### Permissions
 
@@ -151,11 +302,24 @@ The subprocess inherits the BEAM's full environment and current directory.
 it does not replace or sanitize the rest. Set `:cwd` (or `:working_dir`) to
 run the CLI in a specific directory instead of the BEAM's.
 
-### Cancellation
+### Cancellation and timeouts
+
+Two independent bounds apply to a turn:
+
+- `ClaudeWrapper`'s runner ends the stream when the CLI writes no output
+  line for 300,000 ms (5 minutes). The deadline resets on each line and is
+  the same under the Port and Forcola runners. It is not configurable
+  through backend options; `:timeout` does not change it. The turn then
+  fails with reason `"stream_truncated"`. A tool call that runs longer than
+  five minutes without the CLI emitting output can end the turn this way.
+- GenAgent's `:watchdog_ms` (a `start_agent/2` option, default ten
+  minutes) bounds the whole turn. A watchdog longer than five minutes does
+  not extend the idle deadline.
 
 On interrupt, watchdog, and stop, GenAgent cancels its prompt task. With
 the default Port runner this closes the pipes but does not guarantee that
-the CLI and the MCP servers it spawned have exited. To terminate the whole
+the CLI and the MCP servers it spawned have exited. The same applies when
+the idle deadline ends the stream. To terminate the whole
 process group, add `forcola` and select its runner:
 
 ```elixir
@@ -195,6 +359,52 @@ Failed results reach `handle_error/3` and return `{:error, reason}` from
 `ask/3` or `poll/3`. They are not retried automatically. Tool calls
 are emitted from completed assistant blocks so full input is retained;
 partial tool-input JSON is not emitted on its own.
+
+### Event data
+
+`event.data` for each kind the translator emits. `:text`, `:usage`,
+`:result`, and `:error` carry atom-keyed maps. `:tool_use` and
+`:tool_result` carry the CLI's content block unchanged, with string keys,
+so one turn's events mix both key types.
+
+- `:text` -- `%{text: String.t()}`.
+- `:tool_use` -- the raw block, for example
+  `%{"type" => "tool_use", "id" => "toolu_...", "name" => "Read", "input" => %{"file_path" => "lib/foo.ex"}}`.
+  `"input"` is the tool's argument map. Other fields the CLI includes, such
+  as `"caller"`, are kept.
+- `:tool_result` -- the raw block, for example
+  `%{"type" => "tool_result", "tool_use_id" => "toolu_...", "content" => "..."}`.
+  `"content"` is a string or a list of content blocks. `"is_error"` is
+  present only when the CLI includes it.
+- `:usage` -- `%{input_tokens: integer, output_tokens: integer}`. A count
+  the CLI omits is omitted. Cache token counts are not included.
+- `:result` -- `%{text: String.t(), session_id: String.t(), cost_usd: number, duration_ms: integer, num_turns: integer, is_error: false}`.
+  Fields the CLI omits are omitted, except `:text` (defaults to `""`) and
+  `:is_error`.
+- `:error` from a failed `"result"` -- `%{reason: reason, data: raw}`,
+  where `raw` is the string-keyed result event and `reason` is
+  `%{provider: :claude, subtype: String.t(), message: term, session_id: String.t(), cost_usd: number, usage: map}`
+  with absent fields omitted. `:message` is the result's `"result"` or
+  `"error"` field, or `:unknown` when neither is present. A max-turns
+  failure reports its text only in `raw["errors"]`, so its `:message` is
+  `:unknown`.
+- `:error` from an `"error"` event -- `%{reason: reason, data: raw}`, where
+  `reason` is the event's `"error"` or `"message"` field, or `:unknown`.
+  When the CLI exits without a terminal result (idle deadline, non-zero
+  exit, or spawn failure), `reason` is `"stream_truncated"`.
+
+The translator emits nothing for:
+
+- thinking content: `"thinking"` blocks in assistant messages, and
+  `thinking_delta` and `signature_delta` stream deltas
+- partial tool-input JSON (`input_json_delta`) and other non-text stream
+  deltas, message start and stop events, and content block start and stop
+  events
+- `"system"` events, including the `init` event (model, tools, MCP server
+  status, and similar session metadata) and later subtypes such as
+  `status`, `thinking_tokens`, and task progress. The backend still reads
+  `session_id` from them for checkpointing.
+- `"rate_limit_event"` and any other unrecognized event type
 
 ## Testing
 
