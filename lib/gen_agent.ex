@@ -983,6 +983,18 @@ defmodule GenAgent do
     end
   end
 
+  @doc """
+  Return an unordered list of registered agent names.
+
+  This is a point-in-time view of `GenAgent.Registry`; agents running without
+  registration are excluded. Returned agents are not guaranteed to remain
+  alive, and registry cleanup may briefly lag agent termination.
+  """
+  @spec list() :: [name()]
+  def list do
+    Registry.select(GenAgent.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+  end
+
   defp via(name), do: {:via, Registry, {GenAgent.Registry, name}}
 
   defp maybe_put(list, _key, nil), do: list
