@@ -131,6 +131,51 @@ Codex has no equivalent of Claude's `--system-prompt`; if you need
 system-level instructions, pass them via `AGENTS.md` in the working
 directory or through Codex's configuration layer.
 
+### Sandbox and approvals
+
+The backend adds no sandbox or approval flag unless you set one. With no
+`:sandbox`, `:approval_policy`, `:full_auto`, or
+`:dangerously_bypass_approvals_and_sandbox`, the `codex` CLI applies its own
+configuration: the host's Codex config and its default sandbox and approval
+behavior. The backend does not choose a posture for you.
+
+The sandbox limits what commands can touch. The approval policy decides when
+the CLI asks before running something. They are set separately.
+
+- `sandbox: :read_only` -- commands cannot write. The quick start uses it.
+- `sandbox: :workspace_write` -- commands can write inside the workspace.
+- `sandbox: :danger_full_access` -- no sandbox.
+- `approval_policy: :untrusted | :on_request | :never` -- when the CLI asks
+  before acting.
+- `full_auto: true` -- the wrapper emits `--sandbox workspace-write`, unless
+  an explicit `:sandbox` is given, which wins.
+- `dangerously_bypass_approvals_and_sandbox: true` -- skips both. Use it only
+  in an environment you already trust the agent with.
+
+### Environment and working directory
+
+The subprocess inherits the BEAM's full environment and current directory.
+`:env` overrides individual variables on top of the inherited environment;
+it does not replace or sanitize the rest. Set `:cwd` (or `:working_dir`) to
+run the CLI in a specific directory instead of the BEAM's.
+
+### Cancellation
+
+On interrupt, watchdog, and stop, GenAgent cancels its prompt task. With
+the default Port runner this closes the pipes but does not guarantee that
+the CLI and the MCP servers it spawned have exited. To terminate the whole
+process group, add `forcola` and select its runner:
+
+```elixir
+# mix.exs
+{:forcola, "~> 0.3.5"}
+
+# config/config.exs
+config :codex_wrapper, runner: CodexWrapper.Runner.Forcola
+```
+
+See `CodexWrapper.Runner` for details.
+
 See `GenAgent.Backends.Codex` for the full module docs.
 
 ## Event translation
