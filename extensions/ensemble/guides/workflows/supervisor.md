@@ -59,11 +59,16 @@ For homogeneous batch work with user-supplied sub-prompts, use
 Pool. For a linear chain with a fixed number of stages, use
 Pipeline.
 
-## Ad hoc (not config-driveable)
+## Starting it
 
-Supervisor's `:decomposer` and `:synthesizer` are functions, which
-don't serialise into `config/config.exs`. Start it from iex or from
-code instead:
+Supervisor's `:decomposer` and `:synthesizer` are functions. In
+`config/config.exs` pass them as function references to a module you
+define (for example `&MyApp.Research.decompose/1`). Named references
+are preferred there: they survive release config handling and any
+serialization of application config better than anonymous functions.
+The Supervisor template in the package's `config/config.exs` shows the
+shape. From iex or application code you can also pass anonymous
+functions:
 
 ```elixir
 iex> E.start_link(
@@ -93,9 +98,9 @@ iex> E.start_link(
 ...> )
 ```
 
-If you want persistent supervisor ensembles, put the `start_link/1`
-call in your application's `start/2` callback (or any supervision
-tree), passing the functions as module references.
+If you want persistent supervisor ensembles, either use the config
+form above or put the `start_link/1` call in your application's
+`start/2` callback (or any supervision tree).
 
 ## Canonical workflow
 
@@ -118,10 +123,10 @@ workers in parallel + synthesis).
 ```elixir
 iex> {:ok, tok} = E.tell("research", "big question")
 iex> E.status("research")
-{:ok, %{phase: {:decomposing, "tok-7"}, ...}}
+{:ok, %{phase: :decomposing, ...}}
 
 iex> E.status("research")
-{:ok, %{phase: {:fanout, "tok-7", 3, 0}, ...}}  # 3 workers dispatched, 0 returned
+{:ok, %{phase: {:fanning_out, 0, 3}, ...}}  # 0 of 3 workers returned
 
 iex> E.status("research")
 {:ok, %{phase: :idle, ...}}
@@ -162,9 +167,12 @@ iex> E.await("research", tok) |> E.puts()
 - **Coordinator is persistent.** The coordinator agent's session
   lives across runs, so its input tokens grow as you reuse the
   ensemble. Restart if you want a clean coordinator.
-- **Decomposer/synthesizer errors fail the session.** If your
-  user-supplied function raises, the ensemble halts. Wrap
-  defensively if the coordinator output might be malformed.
+- **Decomposer/synthesizer exceptions stop the ensemble.** If your
+  user-supplied function raises, the strategy does not convert it into
+  a `:halt` or an error reply. The Server's callback wrapper catches
+  it, logs a sanitized message, and stops the ensemble with
+  `{:callback_failed, kind, reason_kind}`. Wrap defensively if the
+  coordinator output might be malformed.
 - **Decomposition determines synthesizer order.** The synthesizer
   receives `[{worker_name, output_text}]` in the original sub-prompt
   order, regardless of worker completion order. For two-argument

@@ -117,9 +117,11 @@ can see which stage is currently executing.
 ## Gotchas
 
 - **Only the last stage's response is returned.** Intermediate
-  outputs are consumed silently. If you need to see them, read
-  telemetry events (`[:gen_agent, :prompt, :stop]`) or write a
-  custom strategy.
+  outputs are consumed silently. The
+  `[:gen_agent, :prompt, :stop]` telemetry event does not carry
+  response text, so it cannot be used to read them. If you need
+  intermediate outputs, write a custom strategy that captures each
+  stage's response.
 - **Errors short-circuit the pipeline.** If any stage's turn errors,
   the whole ensemble replies `{:error, {stage_name, reason}}` and
   the later stages never run.

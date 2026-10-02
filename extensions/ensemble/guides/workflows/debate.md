@@ -38,7 +38,7 @@ establishes the topic.
   single model is overconfidence.
 
 For more than two agents or a moderator/synthesizer, Consensus
-(planned) is the better fit. For parallel fan-out, use Supervisor.
+is the better fit. For parallel fan-out, use Supervisor.
 
 ## Config
 
@@ -53,7 +53,7 @@ config :gen_agent_ensemble,
           {"pro-redis", GenAgentEnsemble.Agents.Simple,
             backend: GenAgent.Backends.Anthropic,
             system: "You argue for Redis as the primary store. Be concrete, cite tradeoffs, respond directly to the other side's points."},
-          {"pro-postgres", GenAgentEnsemble.Agents.Anthropic,
+          {"pro-postgres", GenAgentEnsemble.Agents.Simple,
             backend: GenAgent.Backends.Anthropic,
             system: "You argue for Postgres as the primary store. Same rules."}
         ],
