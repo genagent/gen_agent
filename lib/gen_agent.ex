@@ -137,6 +137,34 @@ defmodule GenAgent do
   The `use GenAgent` macro provides default implementations of the optional
   callbacks and lifecycle hooks.
 
+  ### Where callbacks run
+
+  | Callback or step | Runs in |
+  | --- | --- |
+  | `c:init_agent/1`, `c:pre_run/1`, `c:pre_turn/2` | agent process |
+  | `c:handle_response/3`, `c:handle_error/3`, `c:handle_event/2` | agent process |
+  | `c:post_turn/3`, `c:post_run/1`, `c:terminate_agent/2` | agent process |
+  | `c:handle_stream_event/2` | prompt task |
+  | Backend `prompt/2,3`, its event stream, `update_session/2` | prompt task |
+  | Backend `start_session/1`, `terminate_session/1`, `checkpoint_session/2` | agent process |
+
+  Anything that runs in the agent process blocks the agent from handling
+  other messages while it runs. Synchronous calls such as `status/2`,
+  `poll/3`, `tell/3`, `runtime_snapshot/2` and `notify_ack/3` are handled
+  by that process, so they wait until the callback returns. Their default
+  timeout is `:infinity`, so a caller waits as long as the callback takes
+  unless it passes a shorter timeout. Asynchronous casts such as
+  `notify/2` return immediately (the event is handled after the callback),
+  and `whereis/1` reads the registry without messaging the agent. Work in
+  the prompt task does not block the agent process, with one exception: a
+  backend's `prompt/3` can request a session checkpoint through the
+  `:checkpoint` function in its options. That call is synchronous, so the
+  prompt task waits while the agent process runs `checkpoint_session/2`,
+  and synchronous agent calls wait for it too. The agent also runs
+  `checkpoint_session/2` when restoring a stored checkpoint after a prompt
+  task returns a success or error. If the task crashes, the agent keeps the
+  earlier checkpoint without invoking the callback again.
+
   ## Process lifecycle
 
   Agents use `restart: :temporary`. A crashed or stopped agent must be
@@ -307,7 +335,10 @@ defmodule GenAgent do
 
   Runs in the agent process, so it blocks the first turn until it
   returns -- but does NOT block `start_agent/2` from returning to the
-  caller. This is the right home for slow async setup that would
+  caller. Every synchronous call to the agent (`status/2`, `poll/3`,
+  `tell/3`, `runtime_snapshot/2`, and so on) waits until the hook
+  returns, and their default timeout is `:infinity`. `notify/2` and
+  `whereis/1` do not wait. This is the right home for slow async setup that would
   otherwise freeze the starter: cloning a repo, creating a worktree,
   spinning up a sandbox, fetching secrets.
 
@@ -334,6 +365,13 @@ defmodule GenAgent do
 
   Use cases: prompt templating (inject context), rate limiting (sleep
   on a budget), gating (halt if an external signal says stop).
+
+  The hook runs synchronously in the agent process before the prompt task
+  is started. While it runs, synchronous calls to the agent (`status/2`,
+  `poll/3`, `tell/3`, `runtime_snapshot/2`, and so on) wait, with a
+  default timeout of `:infinity`. A sleep for rate limiting therefore
+  delays those calls on every dispatch. `notify/2` and `whereis/1` do not
+  wait.
 
   When the prompt is rewritten, `[:gen_agent, :prompt, :start]`
   telemetry carries both the original and rewritten prompt plus a
