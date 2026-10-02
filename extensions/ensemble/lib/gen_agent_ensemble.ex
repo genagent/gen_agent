@@ -77,6 +77,23 @@ defmodule GenAgentEnsemble do
   defdelegate await(name, token, timeout \\ 30_000), to: GenAgentEnsemble.Server
 
   @doc """
+  Cancel one pending token without stopping the ensemble or unrelated work.
+
+  Returns `{:ok, :cancelled}` when child requests acknowledge cancellation,
+  or `{:ok, :cancelled_unconfirmed}` when any child result is uncertain or
+  unsupported. Both close the token with `{:error, :cancelled}` through the
+  usual ask reply, tell completion, await, and poll/inbox paths. Late child
+  events are fenced. Acknowledgement covers BEAM/request cancellation, not
+  settlement of an external provider process.
+
+  Returns `{:error, :already_finished}` for a retained result or a completion
+  that wins the race, `{:error, :not_found}` for unknown/consumed tokens
+  (including finished asks), and `{:error, :unsupported}` when the strategy
+  lacks `handle_cancel/2`. Unsupported strategies are left unchanged.
+  """
+  defdelegate cancel(name, token), to: GenAgentEnsemble.Server
+
+  @doc """
   Synchronous prompt. Blocks until the strategy replies or the
   default timeout expires.
   """

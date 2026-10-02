@@ -365,6 +365,20 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   end
 
   @impl true
+  def handle_cancel(token, state) do
+    state = %{state | queue: Queue.delete(state.queue, token)}
+
+    case state.phase do
+      {:running, ^token, _, _, _} ->
+        {ops, state} = maybe_start_next(%{state | phase: :idle, usage: Usage.new()}, [])
+        {:ok, ops, state}
+
+      _ ->
+        {:ok, [], state}
+    end
+  end
+
+  @impl true
   def handle_dispatch_rejected(agent, token, reason, state) do
     case state.phase do
       {:running, ^token, _, _, _} -> handle_error(agent, reason, state)

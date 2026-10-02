@@ -103,11 +103,20 @@ defmodule GenAgentEnsemble.Strategy do
   @callback handle_error(agent_name, term(), strategy_state) :: result
   @callback handle_start_rejected(agent_name, term(), strategy_state) :: result
   @callback handle_dispatch_rejected(agent_name, token, term(), strategy_state) :: result
+  @doc """
+  Remove a cancelled token and advance queued work. Return operations for
+  successors, but never reply to the cancelled token: the server closes it.
+  Child refs are fenced before these operations execute. Implementations must
+  use token-scoped dispatches to support cancellation safely. Without this
+  callback cancellation returns `{:error, :unsupported}` without changes.
+  """
+  @callback handle_cancel(token, strategy_state) :: result
   @callback handle_notify(term(), strategy_state) :: result
   @callback handle_agent_down(agent_name, term(), strategy_state) :: result
   @callback handle_status(strategy_state) :: map()
 
   @optional_callbacks [
+    handle_cancel: 2,
     handle_error: 3,
     handle_start_rejected: 3,
     handle_dispatch_rejected: 4,

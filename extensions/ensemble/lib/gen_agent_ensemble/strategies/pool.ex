@@ -104,6 +104,22 @@ defmodule GenAgentEnsemble.Strategies.Pool do
   end
 
   @impl true
+  def handle_cancel(token, state) do
+    state = %{state | queue: Queue.delete(state.queue, token)}
+
+    case Enum.find(state.busy, fn {_worker, current} -> current == token end) do
+      nil ->
+        {:ok, [], state}
+
+      {worker, ^token} ->
+        {ops, state} =
+          maybe_dispatch_next(%{state | busy: Map.delete(state.busy, worker)}, worker, [])
+
+        {:ok, ops, state}
+    end
+  end
+
+  @impl true
   def handle_dispatch_rejected(worker, token, reason, state) do
     if Map.get(state.busy, worker) == token do
       state = %{state | busy: Map.delete(state.busy, worker)}
