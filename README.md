@@ -234,6 +234,8 @@ backends acknowledge a session ID during an active turn, so a later failure
 or interruption does not discard it. `update_session/2` and
 `resume_session/2` remain optional. See `GenAgent.Backend` for details.
 
+See the [Backends guide](guides/backends.md) for backend implementation rules and a capability and option comparison.
+
 ## Public API
 
 | Function | What it does |
