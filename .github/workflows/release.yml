@@ -5,19 +5,20 @@ on:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 jobs:
   release-please:
     name: Release Please
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
       paths_released: ${{ steps.release.outputs.paths_released }}
     steps:
-      - uses: googleapis/release-please-action@v5
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
         id: release
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
@@ -27,25 +28,36 @@ jobs:
   publish-core:
     name: Publish core
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     needs: release-please
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: erlef/setup-beam@v1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           elixir-version: "1.19"
           otp-version: "27"
 
-      - name: Publish core if released
+      - name: Prepare core if released
+        id: prepare
         if: ${{ contains(fromJSON(needs.release-please.outputs.paths_released), '.') }}
+        run: scripts/publish-package.sh . prepare
+
+      - name: Publish core if absent from Hex
+        if: ${{ contains(fromJSON(needs.release-please.outputs.paths_released), '.') && steps.prepare.outputs.already_published == 'false' }}
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
-        run: scripts/publish-package.sh .
+        run: scripts/publish-package.sh . publish
 
   publish-integrations:
     name: Publish ${{ matrix.package }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     needs: [release-please, publish-core]
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     strategy:
@@ -57,33 +69,49 @@ jobs:
           - integrations/anthropic
           - integrations/openai
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: erlef/setup-beam@v1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           elixir-version: "1.19"
           otp-version: "27"
 
-      - name: Publish integration if released
+      - name: Prepare integration if released
+        id: prepare
         if: ${{ contains(fromJSON(needs.release-please.outputs.paths_released), matrix.package) }}
+        run: scripts/publish-package.sh "${{ matrix.package }}" prepare
+
+      - name: Publish integration if absent from Hex
+        if: ${{ contains(fromJSON(needs.release-please.outputs.paths_released), matrix.package) && steps.prepare.outputs.already_published == 'false' }}
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
-        run: scripts/publish-package.sh "${{ matrix.package }}"
+        run: scripts/publish-package.sh "${{ matrix.package }}" publish
 
   publish-ensemble:
     name: Publish Ensemble
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     needs: [release-please, publish-integrations]
     if: ${{ needs.release-please.outputs.releases_created == 'true' && contains(fromJSON(needs.release-please.outputs.paths_released), 'extensions/ensemble') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: erlef/setup-beam@v1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           elixir-version: "1.19"
           otp-version: "27"
 
-      - name: Publish Ensemble
+      - name: Prepare Ensemble
+        id: prepare
+        run: scripts/publish-package.sh extensions/ensemble prepare
+
+      - name: Publish Ensemble if absent from Hex
+        if: ${{ steps.prepare.outputs.already_published == 'false' }}
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
-        run: scripts/publish-package.sh extensions/ensemble
+        run: scripts/publish-package.sh extensions/ensemble publish
