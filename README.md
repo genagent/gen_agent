@@ -185,7 +185,9 @@ idle <--- handle_response --- processing (turn done)
   mailbox. A halted agent ignores queued prompts until `GenAgent.resume/1`
   is called.
 - **Watchdog** -- a `:state_timeout` kills any turn that runs longer than
-  the configured deadline (default 10 minutes). Configurable per agent.
+  the `:watchdog_ms` deadline (positive integer milliseconds or `:infinity`,
+  default 10 minutes). `:max_tell_results` (non-negative integer, default 100)
+  bounds how many `tell/2` results `poll/2` retains; zero retains none.
 
 ## Lifecycle hooks
 

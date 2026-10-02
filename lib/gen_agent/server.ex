@@ -154,6 +154,8 @@ defmodule GenAgent.Server do
     max_pending_notification_bytes =
       Keyword.get(opts, :max_pending_notification_bytes, @default_max_pending_notification_bytes)
 
+    validate_watchdog!(watchdog_ms)
+    validate_pending_limit!(max_tell_results, :max_tell_results)
     validate_capture_limit!(max_events_per_turn, :max_events_per_turn)
     validate_capture_limit!(max_event_bytes_per_turn, :max_event_bytes_per_turn)
     validate_event_retention!(event_retention)
@@ -1470,6 +1472,14 @@ defmodule GenAgent.Server do
 
   defp validate_capture_limit!(value, name) do
     raise ArgumentError, "#{name} must be a positive integer, got: #{inspect(value)}"
+  end
+
+  defp validate_watchdog!(:infinity), do: :ok
+  defp validate_watchdog!(value) when is_integer(value) and value > 0, do: :ok
+
+  defp validate_watchdog!(value) do
+    raise ArgumentError,
+          "watchdog_ms must be a positive integer or :infinity, got: #{inspect(value)}"
   end
 
   defp validate_event_retention!(mode) when mode in [:compact, :lossless], do: :ok
