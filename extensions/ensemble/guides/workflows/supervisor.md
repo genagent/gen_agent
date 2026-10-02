@@ -6,7 +6,7 @@ A coordinator agent receives the original prompt and emits a
 decomposition. A user-supplied `:decomposer` function turns that
 into a list of sub-prompts. The strategy then spawns N workers in
 parallel, each with one sub-prompt. When every worker has responded,
-a `:synthesizer` function (or the default newline join) combines
+a `:synthesizer` function (or the default subtask-labeled join) combines
 their outputs and replies to the caller.
 
 ```
@@ -134,13 +134,16 @@ iex> E.await("research", tok) |> E.puts()
 - **Decomposer shape.** Any `String.t -> [String.t]`. Newline
   splitting is the simplest; regex or JSON parsing (if the
   coordinator is prompted to emit JSON) are common next steps.
-- **Synthesizer shape.** `[{worker_name, String.t}] -> String.t`.
-  Default joins worker outputs with `\n\n`. Common custom
+- **Synthesizer shape.** A one-argument function receives ordered
+  `[{worker_name, output_text}]`, preserving the original callback API.
+  A two-argument function also receives the corresponding ordered
+  sub-prompts. The default labels each worker response with its sub-prompt.
+  Common custom
   synthesizers: markdown bullet list, JSON merge, "elect the
   strongest answer" with a second LLM call.
 - **Worker count is dynamic.** Decomposer output length determines
   how many workers run. If it returns an empty list, the ensemble
-  replies with the default synthesizer output (an empty string).
+  replies with the coordinator's response without invoking a synthesizer.
 
 ## Gotchas
 
@@ -164,7 +167,8 @@ iex> E.await("research", tok) |> E.puts()
   defensively if the coordinator output might be malformed.
 - **Decomposition determines synthesizer order.** The synthesizer
   receives `[{worker_name, output_text}]` in the original sub-prompt
-  order, regardless of worker completion order.
+  order, regardless of worker completion order. For two-argument
+  synthesizers, the second list has sub-prompts in that same order.
 
 ## Usage accounting
 
