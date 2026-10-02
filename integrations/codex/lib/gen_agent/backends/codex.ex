@@ -2,7 +2,7 @@ defmodule GenAgent.Backends.Codex do
   @moduledoc """
   `GenAgent.Backend` implementation backed by `CodexWrapper`.
 
-  CodexWrapper 0.5.3 streams NDJSON while closing CLI stdin. This
+  CodexWrapper 0.5.4 streams NDJSON while closing CLI stdin. This
   backend forwards translated events as they arrive, so
   `handle_stream_event/2` can observe progress during a turn.
 

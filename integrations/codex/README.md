@@ -179,7 +179,7 @@ process group, add `forcola` and select its runner:
 
 ```elixir
 # mix.exs
-{:forcola, "~> 0.3.5"}
+{:forcola, "~> 0.4.0"}
 
 # config/config.exs
 config :codex_wrapper, runner: CodexWrapper.Runner.Forcola
