@@ -118,7 +118,7 @@ defmodule GenAgent.LifecycleHooksTest do
           notify_pid: self()
         )
 
-      assert_receive {:EXIT, ^pid, {:pre_run_crashed, %RuntimeError{message: "boom"}}}, 500
+      assert_receive {:EXIT, ^pid, {:pre_run_crashed, RuntimeError}}, 500
       assert_received {:test_agent, :terminate_agent, {:pre_run_crashed, _}}
     end
   end

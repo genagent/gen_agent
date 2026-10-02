@@ -303,7 +303,7 @@ defmodule GenAgent.Server do
         {:stop, {:pre_run_failed, reason}, data}
 
       {:crashed, exception} ->
-        {:stop, {:pre_run_crashed, exception}, data}
+        {:stop, {:pre_run_crashed, callback_failure_kind(exception)}, data}
     end
   end
 
@@ -947,10 +947,10 @@ defmodule GenAgent.Server do
         data = transition_to_halted(data)
         {:keep_state, data, with_process_next(reply_actions)}
 
-      other ->
+      _other ->
         # Malformed pre_turn return -- treat as skip with a warning.
         require Logger
-        Logger.error("GenAgent pre_turn/2 returned unexpected shape: #{inspect(other)}")
+        Logger.error("GenAgent pre_turn/2 returned unexpected shape")
         pseudo_current = %{request_ref: request_ref, kind: kind}
         emit_turn_rejected(data.name, request_ref, kind, :pre_turn_invalid)
         {data, reply_actions} = record_error(data, pseudo_current, :pre_turn_invalid)
@@ -1155,12 +1155,16 @@ defmodule GenAgent.Server do
   rescue
     e ->
       require Logger
-      Logger.error("GenAgent handle_event/2 raised: #{Exception.message(e)}")
+      Logger.error("GenAgent handle_event/2 raised #{inspect(callback_failure_kind(e))}")
       {:noreply, state}
   catch
     kind, reason ->
       require Logger
-      Logger.error("GenAgent handle_event/2 threw #{kind}: #{inspect(reason)}")
+
+      Logger.error(
+        "GenAgent handle_event/2 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
+      )
+
       {:noreply, state}
   end
 
@@ -1181,12 +1185,16 @@ defmodule GenAgent.Server do
       rescue
         e ->
           require Logger
-          Logger.error("GenAgent pre_run/1 raised: #{Exception.message(e)}")
+          Logger.error("GenAgent pre_run/1 raised #{inspect(callback_failure_kind(e))}")
           {:crashed, e}
       catch
         kind, reason ->
           require Logger
-          Logger.error("GenAgent pre_run/1 threw #{kind}: #{inspect(reason)}")
+
+          Logger.error(
+            "GenAgent pre_run/1 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
+          )
+
           {:crashed, {kind, reason}}
       end
     else
@@ -1201,13 +1209,19 @@ defmodule GenAgent.Server do
       rescue
         e ->
           require Logger
-          Logger.error("GenAgent pre_turn/2 raised: #{Exception.message(e)} -- skipping turn")
+
+          Logger.error(
+            "GenAgent pre_turn/2 raised #{inspect(callback_failure_kind(e))} -- skipping turn"
+          )
+
           {:skip, state}
       catch
         kind, reason ->
           require Logger
 
-          Logger.error("GenAgent pre_turn/2 threw #{kind}: #{inspect(reason)} -- skipping turn")
+          Logger.error(
+            "GenAgent pre_turn/2 threw #{kind}: #{inspect(callback_failure_kind(reason))} -- skipping turn"
+          )
 
           {:skip, state}
       end
@@ -1226,12 +1240,16 @@ defmodule GenAgent.Server do
       rescue
         e ->
           require Logger
-          Logger.error("GenAgent post_turn/3 raised: #{Exception.message(e)}")
+          Logger.error("GenAgent post_turn/3 raised #{inspect(callback_failure_kind(e))}")
           {:ok, state}
       catch
         kind, reason ->
           require Logger
-          Logger.error("GenAgent post_turn/3 threw #{kind}: #{inspect(reason)}")
+
+          Logger.error(
+            "GenAgent post_turn/3 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
+          )
+
           {:ok, state}
       end
     else
@@ -1247,12 +1265,16 @@ defmodule GenAgent.Server do
       rescue
         e ->
           require Logger
-          Logger.error("GenAgent post_run/1 raised: #{Exception.message(e)}")
+          Logger.error("GenAgent post_run/1 raised #{inspect(callback_failure_kind(e))}")
           :ok
       catch
         kind, reason ->
           require Logger
-          Logger.error("GenAgent post_run/1 threw #{kind}: #{inspect(reason)}")
+
+          Logger.error(
+            "GenAgent post_run/1 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
+          )
+
           :ok
       end
     else

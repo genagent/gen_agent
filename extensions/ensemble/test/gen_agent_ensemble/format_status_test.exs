@@ -117,7 +117,7 @@ defmodule GenAgentEnsemble.FormatStatusTest do
     log =
       capture_log(fn ->
         assert {:error, {:init_failed, :error, KeyError}} =
-                 GenServer.start(Server, [name: @prompt, api_key: @secret])
+                 GenServer.start(Server, name: @prompt, api_key: @secret)
 
         Logger.flush()
       end)

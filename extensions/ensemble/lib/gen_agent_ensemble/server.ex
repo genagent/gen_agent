@@ -112,7 +112,11 @@ defmodule GenAgentEnsemble.Server do
   catch
     kind, reason ->
       reason_kind = callback_failure_kind(reason)
-      Logger.error("[gen_agent_ensemble] initialization failed (#{kind}: #{inspect(reason_kind)})")
+
+      Logger.error(
+        "[gen_agent_ensemble] initialization failed (#{kind}: #{inspect(reason_kind)})"
+      )
+
       {:stop, {:init_failed, kind, reason_kind}}
   end
 

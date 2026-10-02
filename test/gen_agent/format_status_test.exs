@@ -187,6 +187,62 @@ defmodule GenAgent.FormatStatusTest do
     refute log =~ @prompt
   end
 
+  test "lifecycle callback errors do not render exception messages", %{task_sup: task_sup} do
+    {:ok, pid} =
+      Server.start_link(
+        name: "redacted-hook-#{System.unique_integer([:positive])}",
+        backend: Backend,
+        module: TestAgent,
+        task_supervisor: task_sup,
+        init_opts: [
+          pre_turn: fn prompt, _state -> raise "#{@secret}: #{prompt}" end
+        ]
+      )
+
+    on_exit(fn ->
+      try do
+        if Process.alive?(pid), do: :gen_statem.stop(pid)
+      catch
+        :exit, _ -> :ok
+      end
+    end)
+
+    log =
+      capture_log(fn ->
+        assert {:error, :pre_turn_skipped} = :gen_statem.call(pid, {:ask, @prompt})
+        Logger.flush()
+      end)
+
+    assert log =~ "pre_turn/2 raised RuntimeError"
+    refute log =~ @secret
+    refute log =~ @prompt
+  end
+
+  test "explicit pre_run error is redacted from OTP termination report", %{task_sup: task_sup} do
+    log =
+      capture_log(fn ->
+        {:ok, pid} =
+          :gen_statem.start(
+            Server,
+            [
+              name: "redacted-pre-run-#{System.unique_integer([:positive])}",
+              backend: Backend,
+              module: TestAgent,
+              task_supervisor: task_sup,
+              init_opts: [pre_run: fn _state -> {:error, {@secret, @prompt}} end]
+            ],
+            []
+          )
+
+        monitor = Process.monitor(pid)
+        assert_receive {:DOWN, ^monitor, :process, ^pid, {:pre_run_failed, _}}
+        Logger.flush()
+      end)
+
+    refute log =~ @secret
+    refute log =~ @prompt
+  end
+
   test "malformed status maps remain safe and keep their keys" do
     for status <- [%{state: :idle}, %{data: %{api_key: @secret}, log: @prompt}] do
       formatted = Server.format_status(status)
