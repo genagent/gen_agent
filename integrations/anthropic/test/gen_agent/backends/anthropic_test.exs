@@ -318,6 +318,26 @@ defmodule GenAgent.Backends.AnthropicTest do
              ]
     end
 
+    test "treats whitespace-only text as empty and removes the unanswered user turn" do
+      {:ok, session} = Anthropic.start_session(api_key: "sk-test", http_fn: ok_response("x"))
+
+      session = %{
+        session
+        | messages: [
+            %{role: "user", content: "first"},
+            %{role: "assistant", content: "reply"},
+            %{role: "user", content: "unanswered"}
+          ]
+      }
+
+      for text <- ["\n", "  ", "\t\n "] do
+        assert Anthropic.update_session(session, %{text: text}).messages == [
+                 %{role: "user", content: "first"},
+                 %{role: "assistant", content: "reply"}
+               ]
+      end
+    end
+
     test "removes a refused turn even when the response contains text" do
       {:ok, session} = Anthropic.start_session(api_key: "sk-test", http_fn: ok_response("x"))
       session = %{session | messages: [%{role: "user", content: "refused"}]}
