@@ -1,36 +1,27 @@
 defmodule GenAgent.Backends.ClaudeExecutableConformanceTest do
-  use ExUnit.Case, async: false
+  use GenAgent.Test.BackendConformance, async: false, lifecycle: true
+
+  alias GenAgent.Test.BackendConformance.Agent
 
   import GenAgent.TestDownAssertions
 
   @moduletag capture_log: true
 
-  defmodule Agent do
-    use GenAgent
-
-    @impl true
-    def init_agent(opts) do
-      {observer, backend_opts} = Keyword.pop!(opts, :observer)
-      {:ok, backend_opts, %{observer: observer, responses: [], errors: []}}
-    end
-
-    @impl true
-    def handle_stream_event(event, state) do
-      send(state.observer, {:stream_event, event.kind, self()})
-      state
-    end
-
-    @impl true
-    def handle_response(ref, response, state) do
-      send(state.observer, {:completed, ref})
-      {:noreply, %{state | responses: [response | state.responses]}}
-    end
-
-    @impl true
-    def handle_error(ref, reason, state) do
-      send(state.observer, {:failed, ref, reason})
-      {:noreply, %{state | errors: [reason | state.errors]}}
-    end
+  defp conformance_setup(context) do
+    %{
+      backend: GenAgent.Backends.Claude,
+      agent_opts: [binary: context.binary, working_dir: context.directory],
+      first_prompt: "first prompt",
+      second_prompt: "follow-up prompt",
+      error_prompt: "fail",
+      hold_prompt: "hold",
+      assert_error: fn reason ->
+        assert match?(%{provider: :claude, subtype: "error_max_turns"}, reason)
+      end,
+      assert_threaded: fn first, _second ->
+        assert flag_value(args(context.directory, :resume), "--resume") == first.session_id
+      end
+    }
   end
 
   setup do
@@ -201,37 +192,6 @@ defmodule GenAgent.Backends.ClaudeExecutableConformanceTest do
 
     refute File.exists?(Path.join(context.directory, "fresh.args"))
     refute File.exists?(Path.join(context.directory, "resume.args"))
-  end
-
-  for action <- [:interrupt, :watchdog, :stop, :kill] do
-    @tag action: action
-    test "#{action} stops the BEAM task on the executable streaming path", context do
-      action = context.action
-      watchdog_ms = if action == :watchdog, do: 500, else: 5_000
-      name = start_agent(context, watchdog_ms: watchdog_ms)
-      assert {:ok, ref} = GenAgent.tell(name, "hold")
-      assert_receive {:stream_event, :text, task_pid}, 1_000
-      task_monitor = Process.monitor(task_pid)
-
-      case action do
-        :interrupt ->
-          assert :ok = GenAgent.interrupt(name)
-          assert_receive {:failed, ^ref, :interrupted}, 1_000
-          assert {:error, :interrupted} = GenAgent.poll(name, ref)
-
-        :watchdog ->
-          assert_receive {:failed, ^ref, :timeout}, 1_000
-          assert {:error, :timeout} = GenAgent.poll(name, ref)
-
-        :stop ->
-          assert :ok = GenAgent.stop(name)
-
-        :kill ->
-          Process.exit(GenAgent.whereis(name), :kill)
-      end
-
-      assert_killed_or_gone(task_monitor, task_pid, 1_000)
-    end
   end
 
   test "named recordings preserve bytes and recorded exit status", context do
