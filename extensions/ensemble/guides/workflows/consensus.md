@@ -125,6 +125,11 @@ to your verdict space.
     * `:majority` -- more than N/2 agents agree on the same
       verdict.
     * `{:at_least, n}` -- at least `n` agents agree.
+
+  Convergence needs a unique leading verdict that meets the
+  threshold. When two verdicts tie for the highest count (for
+  example 2-2 with `{:at_least, 2}`), the round does not converge:
+  the panel is re-prompted, or diverges at the round cap.
 - `:rounds` (optional) -- hard cap on rounds. Defaults to 3.
 - `:reply` (optional) -- response shape:
     * `:synthesis` (default) -- converged: verdict header +
@@ -220,6 +225,16 @@ iex> E.await("arch-review", tok, 600_000) |> E.puts()
   for `nil` verdicts in the `responses` of a `{:synthesize, fun}`
   summary (or the abstains in the default reply), then tighten the
   system prompt or parser.
+- **Turn errors are tolerated while the threshold is reachable.**
+  A provider error (rate limit, timeout) from one agent is recorded
+  as an abstain for that round, with a `nil` verdict and a rationale
+  describing the error. The threshold is computed from the fixed
+  panel size, so errors do not lower the votes required. If the
+  largest vote count plus the turns still outstanding can no longer
+  meet the threshold, the ask fails with the first `{agent, reason}`
+  seen in the round. `:unanimous` therefore fails on any turn error.
+  Errors are tracked per round: a re-prompted round starts clean and
+  dispatches to the failed agent again.
 - **Re-prompts are pure text.** The strategy inserts the others'
   rationales into each agent's next prompt. The agent's own
   previous response stays in its backend's conversation memory.
