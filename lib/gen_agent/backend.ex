@@ -10,9 +10,10 @@ defmodule GenAgent.Backend do
       session id assigned by the backend after the first response).
 
   The state machine owns backend lifecycle. It calls `start_session/1`
-  once when the agent boots, `prompt/2` on each turn, and
+  once when the agent boots, `prompt/2` (or optional `prompt/3`) on each turn, and
   `terminate_session/1` from its termination callback. These three callbacks
-  are required; `update_session/2` and `resume_session/2` are optional.
+  are required; `prompt/3`, `checkpoint_session/2`, `update_session/2`, and
+  `resume_session/2` are optional.
 
   ## Session values
 
@@ -83,6 +84,29 @@ defmodule GenAgent.Backend do
               | {:error, term()}
 
   @doc """
+  Dispatch a prompt with a request-scoped session checkpoint.
+
+  `context.checkpoint.(id)` synchronously acknowledges a nonempty CLI session
+  identifier while this prompt task is active. The first identifier wins;
+  repeated identical identifiers are accepted. Invalid, conflicting, stale,
+  or caller-mismatched checkpoints return `{:error, reason}`. A backend must
+  fail its turn when a present identifier is rejected. The checkpoint is
+  independent of the normalized event stream and its capture limits.
+
+  Optional. Backends without this callback continue to use `prompt/2`.
+  """
+  @callback prompt(
+              session(),
+              prompt :: String.t(),
+              context :: %{checkpoint: (term() -> :ok | {:error, atom()})}
+            ) ::
+              {:ok, Enumerable.t(Event.t()), session()}
+              | {:error, term()}
+
+  @doc "Apply an acknowledged CLI identifier to a backend session."
+  @callback checkpoint_session(session(), session_id :: String.t()) :: session()
+
+  @doc """
   Fold a terminal event's data into the session.
 
   Called once per turn, when the terminal `:result` event arrives,
@@ -113,5 +137,5 @@ defmodule GenAgent.Backend do
   """
   @callback terminate_session(session()) :: :ok
 
-  @optional_callbacks [resume_session: 2, update_session: 2]
+  @optional_callbacks [prompt: 3, checkpoint_session: 2, resume_session: 2, update_session: 2]
 end

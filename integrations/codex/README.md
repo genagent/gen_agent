@@ -152,7 +152,9 @@ Codex CLI's NDJSON output is translated into `GenAgent.Event` values by
 
 Unlike Claude, Codex emits `thread_id` in the **first** event of a turn,
 not the terminal one. The streaming translator retains it and injects
-it into the `:result` event emitted at the end. `item.started` and
+it into the `:result` event emitted at the end. The backend also
+checkpoints this raw ID immediately, so a failed or interrupted turn
+can resume the same thread. `item.started` and
 `item.updated` are ignored; completed items are reported once. Unknown
 item categories are filtered. A stream that ends without a terminal
 event returns `:no_terminal_event`; the wrapper stream API does not

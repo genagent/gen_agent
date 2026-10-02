@@ -30,7 +30,9 @@ defmodule GenAgent.Backends.Claude do
 
   On the first turn, no `:resume` flag is passed. When the terminal
   `:result` event arrives, `update_session/2` captures `session_id`
-  from the event data and stores it on the session struct. Subsequent
+  from the event data and stores it on the session struct. Under GenAgent,
+  `prompt/3` also checkpoints a raw `system` or terminal ID as soon as it
+  arrives, so failed and interrupted turns can resume. Subsequent
   turns pass that id through Claude's `--resume` flag, without forwarding
   the first turn's `:session_id` or `:continue_session` options.
 
@@ -75,10 +77,23 @@ defmodule GenAgent.Backends.Claude do
 
   @impl GenAgent.Backend
   def prompt(%__MODULE__{} = session, prompt) when is_binary(prompt) do
+    do_prompt(session, prompt, nil)
+  end
+
+  # Older supported core versions do not declare these optional callbacks.
+  if {:prompt, 3} in GenAgent.Backend.behaviour_info(:callbacks), do: @impl(GenAgent.Backend)
+
+  def prompt(%__MODULE__{} = session, prompt, %{checkpoint: checkpoint})
+      when is_binary(prompt) and is_function(checkpoint, 1) do
+    do_prompt(session, prompt, checkpoint)
+  end
+
+  defp do_prompt(session, prompt, checkpoint) do
     call_opts = merge_resume(session.opts, session.session_id)
 
     stream =
       session.stream_fn.(prompt, call_opts)
+      |> Stream.each(&checkpoint_raw(&1, checkpoint))
       |> EventTranslator.translate_stream()
 
     {:ok, stream, session}
@@ -92,6 +107,11 @@ defmodule GenAgent.Backends.Claude do
   end
 
   def update_session(%__MODULE__{} = session, _data), do: session
+
+  if {:checkpoint_session, 2} in GenAgent.Backend.behaviour_info(:callbacks),
+    do: @impl(GenAgent.Backend)
+
+  def checkpoint_session(%__MODULE__{} = session, sid), do: %{session | session_id: sid}
 
   @impl GenAgent.Backend
   def resume_session(session_id, opts) when is_binary(session_id) do
@@ -122,5 +142,23 @@ defmodule GenAgent.Backends.Claude do
     opts
     |> Keyword.drop([:session_id, :continue_session])
     |> Keyword.put(:resume, session_id)
+  end
+
+  defp checkpoint_raw(_event, nil), do: :ok
+
+  defp checkpoint_raw(%{type: type, data: %{"session_id" => id}}, checkpoint)
+       when type in ["system", "result", "error"] do
+    checkpoint_present_id(id, checkpoint)
+  end
+
+  defp checkpoint_raw(_event, _checkpoint), do: :ok
+
+  defp checkpoint_present_id(nil, _checkpoint), do: :ok
+
+  defp checkpoint_present_id(id, checkpoint) do
+    case checkpoint.(id) do
+      :ok -> :ok
+      {:error, reason} -> raise ArgumentError, "Claude session checkpoint rejected: #{reason}"
+    end
   end
 end

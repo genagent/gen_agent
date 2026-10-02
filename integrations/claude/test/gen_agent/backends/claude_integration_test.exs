@@ -126,6 +126,78 @@ defmodule GenAgent.Backends.ClaudeIntegrationTest do
       assert_receive {:claude_call, "turn 3", "sess-persist"}
     end
 
+    test "resumes after a failed Claude result using its raw session ID" do
+      observer = self()
+
+      stream_fn = fn prompt, opts ->
+        send(observer, {:claude_call, prompt, Keyword.get(opts, :resume)})
+
+        if prompt == "fail" do
+          [
+            stream_event("system", %{"session_id" => "failed-session"}),
+            stream_event("result", %{
+              "is_error" => true,
+              "subtype" => "error_max_turns",
+              "result" => "turn limit reached",
+              "session_id" => "failed-session"
+            })
+          ]
+        else
+          [stream_event("result", %{"result" => "continued", "session_id" => "failed-session"})]
+        end
+      end
+
+      name = start_claude_agent(stream_fn)
+      assert {:error, %{subtype: "error_max_turns"}} = GenAgent.ask(name, "fail")
+      assert_receive {:claude_call, "fail", nil}
+      assert {:ok, response} = GenAgent.ask(name, "next")
+      assert_receive {:claude_call, "next", "failed-session"}
+      assert response.text == "continued"
+    end
+
+    test "an early system ID survives an interrupted Claude stream" do
+      observer = self()
+
+      stream_fn = fn prompt, opts ->
+        send(observer, {:claude_call, prompt, Keyword.get(opts, :resume)})
+
+        if prompt == "hold" do
+          Stream.concat(
+            [stream_event("system", %{"session_id" => "interrupted-session"})],
+            Stream.map([:wait], fn _ ->
+              send(observer, :claude_waiting)
+              Process.sleep(30_000)
+              stream_event("result", %{"result" => "late"})
+            end)
+          )
+        else
+          [stream_event("result", %{"result" => "resumed"})]
+        end
+      end
+
+      name = start_claude_agent(stream_fn)
+      assert {:ok, ref} = GenAgent.tell(name, "hold")
+      assert_receive :claude_waiting
+      assert {:ok, :accepted} = GenAgent.interrupt_request(name, ref)
+      assert {:error, :interrupted} = GenAgent.poll(name, ref)
+      assert {:ok, _} = GenAgent.ask(name, "next")
+      assert_receive {:claude_call, "next", "interrupted-session"}
+    end
+
+    test "conflicting raw Claude IDs fail the turn without replacing the first ID" do
+      stream_fn = fn _prompt, _opts ->
+        [
+          stream_event("system", %{"session_id" => "first-id"}),
+          stream_event("result", %{"result" => "done", "session_id" => "different-id"})
+        ]
+      end
+
+      name = start_claude_agent(stream_fn)
+      assert {:error, :conflicting_session_id} = GenAgent.ask(name, "go")
+      session = :gen_statem.call(GenAgent.whereis(name), :get_backend_session)
+      assert session.session_id == "first-id"
+    end
+
     test "resumes after compacting more than 1,000 Claude text deltas" do
       test_pid = self()
 

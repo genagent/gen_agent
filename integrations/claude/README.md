@@ -75,9 +75,11 @@ IO.puts(response.text)
 ## Session continuation
 
 Claude CLI tracks multi-turn state via a server-side `session_id`. The
-backend captures it from the terminal `:result` event and threads it
-through `--resume` on subsequent turns -- transparently, no caller code
-required.
+backend checkpoints it from a raw `system` or terminal event as soon as
+the CLI provides it, then threads it through `--resume` on subsequent
+turns, including after a failed or interrupted turn. No caller code is
+required. If the CLI fails before providing an ID, the next turn starts
+without `--resume`.
 
 Claude emits text deltas and tool results as normalized events. A long or
 tool-heavy turn can exceed GenAgent's default retained-log budget of 1,000

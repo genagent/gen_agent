@@ -485,6 +485,53 @@ defmodule GenAgent.Server do
     {:keep_state_and_data, [{:reply, from, data.backend_session}]}
   end
 
+  defp dispatch_event(
+         {:call, {task_pid, _} = from},
+         {:checkpoint_session, request_ref, session_id},
+         :processing,
+         %Data{current_request: %{request_ref: request_ref, task_pid: task_pid} = current} = data
+       ) do
+    cond do
+      not function_exported?(data.backend, :checkpoint_session, 2) ->
+        current = %{
+          current
+          | checkpoint_error: current.checkpoint_error || :unsupported_checkpoint
+        }
+
+        {:keep_state, %{data | current_request: current},
+         [{:reply, from, {:error, :unsupported_checkpoint}}]}
+
+      not valid_session_id?(session_id) ->
+        current = %{current | checkpoint_error: current.checkpoint_error || :invalid_session_id}
+
+        {:keep_state, %{data | current_request: current},
+         [{:reply, from, {:error, :invalid_session_id}}]}
+
+      current.checkpoint_id == session_id ->
+        {:keep_state_and_data, [{:reply, from, :ok}]}
+
+      current.checkpoint_id != nil ->
+        current = %{
+          current
+          | checkpoint_error: current.checkpoint_error || :conflicting_session_id
+        }
+
+        {:keep_state, %{data | current_request: current},
+         [{:reply, from, {:error, :conflicting_session_id}}]}
+
+      true ->
+        session = checkpoint_session(data.backend, data.backend_session, session_id)
+        current = %{current | checkpoint_id: session_id}
+
+        {:keep_state, %{data | backend_session: session, current_request: current},
+         [{:reply, from, :ok}]}
+    end
+  end
+
+  defp dispatch_event({:call, from}, {:checkpoint_session, _ref, _id}, _state, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :not_current}}]}
+  end
+
   defp dispatch_event({:call, from}, :status, state, %Data{} = data) do
     status = %{
       state: state,
@@ -674,7 +721,7 @@ defmodule GenAgent.Server do
        when is_reference(ref) and is_map(current) do
     case current do
       %{task_ref: ^ref} ->
-        finish_error(data, current, {:task_crashed, reason})
+        finish_error(data, current, current.checkpoint_error || {:task_crashed, reason})
 
       _ ->
         :keep_state_and_data
@@ -689,14 +736,20 @@ defmodule GenAgent.Server do
   defp request_origin(kind) when kind in [:tell, :event, :self_chain], do: kind
 
   defp handle_task_result({:ok, response, new_session, new_agent_state}, current, data) do
-    emit_prompt_stop(data.name, current.request_ref, response.duration_ms, new_agent_state)
-    emit_turn_stop(data.name, current)
-    finish_turn(data, current, response, new_session, new_agent_state)
+    if current.checkpoint_error do
+      finish_error(%{data | agent_state: new_agent_state}, current, current.checkpoint_error)
+    else
+      new_session = restore_checkpoint(data.backend, new_session, current)
+      emit_prompt_stop(data.name, current.request_ref, response.duration_ms, new_agent_state)
+      emit_turn_stop(data.name, current)
+      finish_turn(data, current, response, new_session, new_agent_state)
+    end
   end
 
   defp handle_task_result({:error, reason, new_session, new_agent_state}, current, data) do
+    new_session = restore_checkpoint(data.backend, new_session, current)
     data = %{data | backend_session: new_session, agent_state: new_agent_state}
-    finish_error(data, current, reason)
+    finish_error(data, current, current.checkpoint_error || reason)
   end
 
   # ---------------------------------------------------------------------------
@@ -1023,6 +1076,7 @@ defmodule GenAgent.Server do
     max_events_per_turn = data.max_events_per_turn
     max_event_bytes_per_turn = data.max_event_bytes_per_turn
     event_retention = data.event_retention
+    owner = self()
 
     # Link the task to its owning agent as well as the shared supervisor.
     # Even an untrappable agent exit must take its in-flight turn down.
@@ -1036,9 +1090,8 @@ defmodule GenAgent.Server do
           module,
           agent_state,
           prompt,
-          max_events_per_turn,
-          max_event_bytes_per_turn,
-          event_retention
+          {max_events_per_turn, max_event_bytes_per_turn, event_retention},
+          {owner, request_ref}
         )
       end)
 
@@ -1052,7 +1105,9 @@ defmodule GenAgent.Server do
       task_pid: task.pid,
       kind: kind,
       prompt: prompt,
-      started_at: started_at
+      started_at: started_at,
+      checkpoint_id: nil,
+      checkpoint_error: nil
     }
 
     %{data | current_request: current}
@@ -1064,13 +1119,23 @@ defmodule GenAgent.Server do
          module,
          agent_state,
          prompt,
-         max_events_per_turn,
-         max_event_bytes_per_turn,
-         event_retention
+         {max_events_per_turn, max_event_bytes_per_turn, event_retention},
+         {owner, request_ref}
        ) do
     started = System.monotonic_time(:millisecond)
 
-    case backend.prompt(backend_session, prompt) do
+    checkpoint = fn id ->
+      :gen_statem.call(owner, {:checkpoint_session, request_ref, id})
+    end
+
+    prompt_result =
+      if function_exported?(backend, :prompt, 3) do
+        backend.prompt(backend_session, prompt, %{checkpoint: checkpoint})
+      else
+        backend.prompt(backend_session, prompt)
+      end
+
+    case prompt_result do
       {:ok, stream, backend_session} ->
         consume_stream(
           stream,
@@ -1310,6 +1375,25 @@ defmodule GenAgent.Server do
       session
     end
   end
+
+  defp valid_session_id?(id) when is_binary(id) and byte_size(id) in 1..1024 do
+    String.valid?(id) and not String.match?(id, ~r/[\x00-\x1F\x7F]/)
+  end
+
+  defp valid_session_id?(_), do: false
+
+  defp checkpoint_session(backend, session, id) do
+    if function_exported?(backend, :checkpoint_session, 2) do
+      backend.checkpoint_session(session, id)
+    else
+      session
+    end
+  end
+
+  defp restore_checkpoint(_backend, session, %{checkpoint_id: nil}), do: session
+
+  defp restore_checkpoint(backend, session, %{checkpoint_id: id}),
+    do: checkpoint_session(backend, session, id)
 
   defp cleanup_task(%{task_pid: pid, task_ref: ref}) do
     if is_pid(pid) and Process.alive?(pid), do: Process.exit(pid, :kill)

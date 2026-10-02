@@ -228,10 +228,11 @@ stream into the normalized `GenAgent.Event` values the state machine
 consumes, and carries any state it needs (session id, message history) in
 an opaque session term.
 
-The contract is deliberately small: five callbacks
-(`start_session/1`, `prompt/2`, `update_session/2`, `resume_session/2`,
-`terminate_session/1`), of which two are optional. See `GenAgent.Backend`
-for details.
+The contract has three required callbacks (`start_session/1`, `prompt/2`,
+`terminate_session/1`). `prompt/3` and `checkpoint_session/2` let CLI
+backends acknowledge a session ID during an active turn, so a later failure
+or interruption does not discard it. `update_session/2` and
+`resume_session/2` remain optional. See `GenAgent.Backend` for details.
 
 ## Public API
 
