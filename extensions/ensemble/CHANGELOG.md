@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.5.0...gen_agent_ensemble-v0.6.0) (2026-10-02)
+
+
+### Features
+
+* **ensemble:** cancel tokens without stopping the session ([#339](https://github.com/genagent/gen_agent/issues/339)) ([e5cf390](https://github.com/genagent/gen_agent/commit/e5cf39039c246c10ae8b550c31f96cbd8c90fa68))
+* **ensemble:** notify token completion and await without polling ([#337](https://github.com/genagent/gen_agent/issues/337)) ([521f62d](https://github.com/genagent/gen_agent/commit/521f62d9ff619fcb01c20d35a8fc5bf2ec02563f))
+
 ## [0.5.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.4.0...gen_agent_ensemble-v0.5.0) (2026-10-02)
 
 
