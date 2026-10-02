@@ -20,18 +20,19 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
 
   defp decomposer_newlines, do: fn text -> String.split(text, "\n", trim: true) end
 
-  defp start_session(name, coord_scripts, worker_scripts) do
+  defp start_session(name, coord_scripts, worker_scripts, extra_opts \\ []) do
     coord = {"#{name}-coord", TestAgent, [backend: Mock, scripts: coord_scripts]}
     worker = {"#{name}-w", TestAgent, [backend: Mock, scripts: worker_scripts]}
 
     GenAgentEnsemble.start_link(
       name: name,
       strategy: SupStrat,
-      opts: [
-        coordinator: coord,
-        worker_template: worker,
-        decomposer: decomposer_newlines()
-      ]
+      opts:
+        [
+          coordinator: coord,
+          worker_template: worker,
+          decomposer: decomposer_newlines()
+        ] ++ extra_opts
     )
   end
 
@@ -51,9 +52,39 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
 
     {:ok, resp} = GenAgentEnsemble.ask(name, "big question", timeout: 5_000)
 
-    # Worker names sort as w-1, w-2, w-3; each got one prompt in order.
     assert resp.text ==
              "answer: what\n\nanswer: why\n\nanswer: how"
+  end
+
+  test "default synthesizer keeps decomposition order with two-digit worker names", %{name: name} do
+    prompts = Enum.map(1..12, &"task-#{&1}")
+    coord_script = [Event.new(:result, %{text: Enum.join(prompts, "\n")})]
+    worker_script = fn prompt -> [Event.new(:result, %{text: "answer: #{prompt}"})] end
+
+    {:ok, _} = start_session(name, [coord_script], List.duplicate(worker_script, 12))
+
+    {:ok, resp} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
+    assert resp.text == Enum.map_join(prompts, "\n\n", &"answer: #{&1}")
+  end
+
+  test "custom synthesizer receives outputs in decomposition order", %{name: name} do
+    prompts = Enum.map(1..12, &"task-#{&1}")
+    coord_script = [Event.new(:result, %{text: Enum.join(prompts, "\n")})]
+    worker_script = fn prompt -> [Event.new(:result, %{text: "answer: #{prompt}"})] end
+    synthesizer = &inspect/1
+
+    {:ok, _} =
+      start_session(name, [coord_script], List.duplicate(worker_script, 12),
+        synthesizer: synthesizer
+      )
+
+    {:ok, resp} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
+
+    expected =
+      Enum.with_index(prompts, 1)
+      |> Enum.map(fn {prompt, index} -> {"#{name}-w-#{index}", "answer: #{prompt}"} end)
+
+    assert resp.text == inspect(expected)
   end
 
   test "status reports phase transitions", %{name: name} do

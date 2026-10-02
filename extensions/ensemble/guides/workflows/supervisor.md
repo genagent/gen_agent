@@ -162,8 +162,6 @@ iex> E.await("research", tok) |> E.puts()
 - **Decomposer/synthesizer errors fail the session.** If your
   user-supplied function raises, the ensemble halts. Wrap
   defensively if the coordinator output might be malformed.
-- **Worker names determine synthesizer order.** The synthesizer
-  receives `[{worker_name, output_text}]` sorted by worker name,
-  regardless of completion order. If your fan-out can exceed nine
-  workers, account for lexical ordering (`worker-10` precedes
-  `worker-2`) in a custom synthesizer.
+- **Decomposition determines synthesizer order.** The synthesizer
+  receives `[{worker_name, output_text}]` in the original sub-prompt
+  order, regardless of worker completion order.
