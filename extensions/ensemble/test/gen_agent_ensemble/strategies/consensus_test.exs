@@ -324,7 +324,7 @@ defmodule GenAgentEnsemble.Strategies.ConsensusTest do
         ]
       )
 
-    assert {:error, {%KeyError{key: :verdict_parser}, _}} = result
+    assert {:error, {:init_failed, :error, KeyError}} = result
   end
 
   test "init requires 2+ agents", %{name: name} do
@@ -340,7 +340,7 @@ defmodule GenAgentEnsemble.Strategies.ConsensusTest do
         ]
       )
 
-    assert {:error, {%ArgumentError{message: "Consensus requires at least 2" <> _}, _}} = result
+    assert {:error, {:init_failed, :error, ArgumentError}} = result
   end
 
   test "init rejects invalid threshold", %{name: name} do
@@ -360,7 +360,7 @@ defmodule GenAgentEnsemble.Strategies.ConsensusTest do
         ]
       )
 
-    assert {:error, {%ArgumentError{message: "Consensus invalid :threshold" <> _}, _}} = result
+    assert {:error, {:init_failed, :error, ArgumentError}} = result
   end
 
   test "duplicate agent names rejected", %{name: name} do
@@ -379,6 +379,6 @@ defmodule GenAgentEnsemble.Strategies.ConsensusTest do
         ]
       )
 
-    assert {:error, {%ArgumentError{message: "Consensus duplicate agent names" <> _}, _}} = result
+    assert {:error, {:init_failed, :error, ArgumentError}} = result
   end
 end

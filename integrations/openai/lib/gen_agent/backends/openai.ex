@@ -337,3 +337,25 @@ defmodule GenAgent.Backends.OpenAI do
     |> Map.new()
   end
 end
+
+defimpl Inspect, for: GenAgent.Backends.OpenAI do
+  import Inspect.Algebra
+
+  def inspect(session, opts) do
+    fields = [
+      model: session.model,
+      reasoning_effort: session.reasoning_effort,
+      max_output_tokens: session.max_output_tokens,
+      receive_timeout: session.receive_timeout,
+      connect_timeout: session.connect_timeout,
+      client_session_id: session.client_session_id
+    ]
+
+    docs =
+      Enum.map(fields, fn {key, value} ->
+        concat([Atom.to_string(key), ": ", to_doc(value, opts)])
+      end)
+
+    concat(["#GenAgent.Backends.OpenAI<", concat(Enum.intersperse(docs, ", ")), ">"])
+  end
+end
