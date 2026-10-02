@@ -6,10 +6,12 @@ defmodule GenAgent.Response do
   (`:result` or `:error`) arrives from the backend. It carries:
 
     * `:text` -- the full assembled assistant text for the turn.
-    * `:events` -- the complete retained event log for a successful turn,
-      in arrival order. A turn exceeding configured capture limits fails
-      with `{:event_capture_overflow, diagnostics}` instead of returning a
-      response with silently missing events.
+    * `:events` -- retained normalized events in arrival order. Check
+      `:event_coverage` before treating this as a complete log.
+    * `:terminal` -- the original terminal result event, even if compact
+      retention omitted it from `:events`.
+    * `:event_coverage` -- counts and the first omission reason for the
+      retained log. `mode: :exact` means no event was omitted.
     * `:usage` -- token usage if the backend reported any, otherwise `nil`.
     * `:duration_ms` -- wall-clock time from prompt dispatch to terminal event.
     * `:session_id` -- the backend's session identifier, if any.
@@ -20,6 +22,8 @@ defmodule GenAgent.Response do
   @type t :: %__MODULE__{
           text: String.t(),
           events: [Event.t()],
+          terminal: Event.t() | nil,
+          event_coverage: map(),
           usage: map() | nil,
           duration_ms: non_neg_integer(),
           session_id: String.t() | nil
@@ -27,6 +31,8 @@ defmodule GenAgent.Response do
 
   defstruct text: "",
             events: [],
+            terminal: nil,
+            event_coverage: %{},
             usage: nil,
             duration_ms: 0,
             session_id: nil
@@ -43,31 +49,51 @@ defmodule GenAgent.Response do
   """
   @spec from_events([Event.t()], keyword()) :: t()
   def from_events(events, opts \\ []) when is_list(events) do
+    terminal = Enum.find(events, &Event.terminal?/1)
+    usage = latest_usage(events)
+    text_acc = Enum.reduce(events, {[], false}, &append_text/2)
+
+    coverage = %{
+      mode: :exact,
+      observed_events: length(events),
+      retained_events: length(events),
+      omitted_events: 0,
+      retained_bytes: Enum.reduce(events, 0, &(:erlang.external_size(&1) + &2)),
+      first_omission: nil
+    }
+
+    from_capture(
+      events,
+      terminal,
+      usage,
+      text_acc,
+      Keyword.put_new(opts, :event_coverage, coverage)
+    )
+  end
+
+  @doc false
+  def from_capture(events, terminal, usage, text_acc, opts) when is_list(events) do
     %__MODULE__{
-      text: assemble_text(events),
+      text: text_from_capture(terminal, text_acc),
       events: events,
-      usage: extract_usage(events),
+      terminal: terminal,
+      event_coverage: Keyword.fetch!(opts, :event_coverage),
+      usage: usage,
       duration_ms: Keyword.get(opts, :duration_ms, 0),
       session_id: Keyword.get(opts, :session_id)
     }
   end
 
-  defp assemble_text(events) do
-    case Enum.find(events, fn e -> e.kind == :result end) do
-      %Event{data: %{text: text}} when is_binary(text) ->
-        text
+  @doc false
+  def text_from_capture(%Event{kind: :result, data: %{text: text}}, _acc)
+      when is_binary(text),
+      do: text
 
-      _ ->
-        assemble_deltas(events)
-    end
-  end
+  def text_from_capture(_terminal, {reversed_chunks, _seen_text?}),
+    do: reversed_chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
-  defp assemble_deltas(events) do
-    {reversed_chunks, _seen_text?} = Enum.reduce(events, {[], false}, &append_text/2)
-    reversed_chunks |> Enum.reverse() |> IO.iodata_to_binary()
-  end
-
-  defp append_text(%Event{kind: :text, data: data}, {chunks, seen_text?}) do
+  @doc false
+  def append_text(%Event{kind: :text, data: data}, {chunks, seen_text?}) do
     text = Map.get(data, :text, "")
 
     chunks =
@@ -80,9 +106,9 @@ defmodule GenAgent.Response do
     {chunks, seen_text? or text != ""}
   end
 
-  defp append_text(_event, acc), do: acc
+  def append_text(_event, acc), do: acc
 
-  defp extract_usage(events) do
+  defp latest_usage(events) do
     events
     |> Enum.reverse()
     |> Enum.find_value(fn

@@ -15,6 +15,11 @@ defmodule GenAgent.ResponseTest do
 
       assert response.text == "hello"
       assert response.events == events
+      assert response.terminal == List.last(events)
+      assert response.event_coverage.mode == :exact
+      assert response.event_coverage.observed_events == 3
+      assert response.event_coverage.retained_events == 3
+      assert response.event_coverage.omitted_events == 0
     end
 
     test "falls back to assembling :text deltas when :result has no text" do
