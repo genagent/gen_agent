@@ -514,6 +514,10 @@ mix credo --strict
 mix dialyzer
 ```
 
+These commands check the root package. Run `scripts/quality.sh` to validate
+all six packages; see the [contributor guide](https://github.com/genagent/gen_agent/blob/main/CONTRIBUTING.md)
+for setup and release conventions.
+
 The test suite uses an in-process `GenAgent.Backends.Mock` (in
 `test/support/`) that lets you script backend responses without any
 external process. See `test/gen_agent/server_test.exs` for examples.
