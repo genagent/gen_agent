@@ -14,6 +14,29 @@ defmodule GenAgentEnsemble.Strategy do
   See `GenAgentEnsemble.Strategies.Solo` for a minimal reference
   implementation.
 
+  ## Usage accounting
+
+  Debate, Consensus, Supervisor, and Pipeline return `Response.usage` as
+  summed numeric fields from every successful turn in the current run.
+  Provider keys are preserved (for example, `:input_tokens` and
+  `:output_tokens`). The reserved `:by_agent` key contains
+  `%{agent_name => summed_numeric_usage_map}`; these maps sum to the top-level
+  totals. Supervisor includes the coordinator and all completed workers.
+  Pipeline preserves the final stage's other response fields.
+
+  Missing or non-map usage is ignored. If no turn reports a usage map,
+  `usage` remains `nil`. Empty maps or maps containing only nonnumeric
+  fields produce an empty per-agent entry. Nonnumeric fields, including
+  nested provider metadata, are dropped; `:by_agent` is reserved even if a
+  provider supplies a numeric value for it. Each new or queued run starts
+  fresh, including after a failed run. Solo, Pool, and Switchboard keep
+  passing through the selected response's usage unchanged.
+
+  Accounting assumes **per-turn** usage: core uses the latest `:usage` event
+  within a turn. A backend reporting session-cumulative usage will therefore
+  overcount. Failed turns deliver no successful response to the strategy, so
+  their usage is not observable and is not included.
+
   ## Operations
 
     * `{:start, start_spec}` -- start a new sub-agent. `start_spec` is

@@ -67,6 +67,7 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
 
   alias GenAgent.Response
   alias GenAgentEnsemble.Queue
+  alias GenAgentEnsemble.Usage
 
   defstruct [
     :agents,
@@ -75,7 +76,8 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     :rounds,
     :reply_kind,
     phase: :idle,
-    queue: nil
+    queue: nil,
+    usage: Usage.new()
   ]
 
   @impl true
@@ -138,7 +140,7 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
 
   defp start_or_queue(prompt, token, %{phase: :idle} = state) do
     ops = for agent <- state.agents, do: {:dispatch, agent, prompt, token}
-    {:ok, ops, %{state | phase: {:running, token, prompt, 1, %{}}}}
+    {:ok, ops, %{state | usage: Usage.new(), phase: {:running, token, prompt, 1, %{}}}}
   end
 
   defp start_or_queue(prompt, token, state) do
@@ -149,6 +151,7 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   def handle_response(agent, response, state) do
     case state.phase do
       {:running, token, original, round, pending} ->
+        state = %{state | usage: Usage.add(state.usage, agent, response.usage)}
         parsed = parse_response(state.verdict_parser, response.text)
         pending = Map.put(pending, agent, parsed)
 
@@ -278,7 +281,7 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
           })
       end
 
-    response = %Response{text: text}
+    response = %Response{text: text, usage: Usage.to_usage(state.usage)}
     state = %{state | phase: :idle}
     {ops, state} = maybe_start_next(state, [{:reply, token, response}])
     {:ok, ops, state}
@@ -333,7 +336,14 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     case Queue.pop(state.queue) do
       {:ok, {token, prompt}, rest} ->
         dispatch_ops = for agent <- state.agents, do: {:dispatch, agent, prompt, token}
-        state = %{state | phase: {:running, token, prompt, 1, %{}}, queue: rest}
+
+        state = %{
+          state
+          | usage: Usage.new(),
+            phase: {:running, token, prompt, 1, %{}},
+            queue: rest
+        }
+
         {ops_so_far ++ dispatch_ops, state}
 
       :empty ->

@@ -71,3 +71,35 @@ iex> E.list()
 - [Supervisor](supervisor.md) -- coordinator decomposes, workers fan out
 - [Debate](debate.md) -- two agents alternate until convergence or round cap
 - [Consensus](consensus.md) -- N peer agents vote with a structured verdict until they converge
+
+## Usage accounting
+
+Debate, Consensus, Supervisor, and Pipeline sum numeric usage fields over
+all successful turns in one invocation, preserving provider keys:
+
+```elixir
+%{
+  input_tokens: 30,
+  output_tokens: 12,
+  by_agent: %{
+    "reviewer" => %{input_tokens: 10, output_tokens: 4},
+    "writer" => %{input_tokens: 20, output_tokens: 8}
+  }
+}
+```
+
+`Response.usage` remains a map or `nil`, compatible with `gen_agent ~> 0.6.0`.
+The reserved `:by_agent` map attributes totals by configured agent name
+(including Supervisor's coordinator and generated worker names). Its numeric
+fields sum to the top-level totals. Repeated turns by the same agent accumulate;
+fresh and queued invocations each start at zero, including after errors.
+
+If no turn reports usage, `usage` stays `nil`. Non-map usage is ignored.
+A reported empty map, or a map with only nonnumeric values, retains an empty
+entry for that agent. Nonnumeric fields and nested metadata are dropped;
+`:by_agent` is reserved and never treated as a numeric provider total.
+Solo, Pool, and Switchboard pass their selected response through unchanged.
+
+Only successful responses can be counted: failed turns expose no response to
+the strategy. Usage must be **per turn**. Core keeps the latest usage event
+within each turn; summing session-cumulative backend reports would overcount.

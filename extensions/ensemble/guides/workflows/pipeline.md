@@ -131,3 +131,15 @@ can see which stage is currently executing.
   `ask!` on the same pipeline replays all stage turns with
   accumulated context. Restart the ensemble if you want clean stages
   for the next run.
+
+## Usage accounting
+
+Every completed stage counts. The final stage's response keeps its other
+fields, with `usage` replaced by the full pipeline totals.
+
+`Response.usage` contains summed numeric provider fields and a reserved
+`:by_agent` map of agent names to their summed numeric fields. It stays `nil`
+when no turn reports usage. Nonnumeric fields are dropped, and each invocation
+starts fresh. Failed turns cannot be counted; session-cumulative backend usage
+would overcount. See [usage accounting](overview.md#usage-accounting) for the
+complete shape and per-turn reporting assumption.

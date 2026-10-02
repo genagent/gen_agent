@@ -39,6 +39,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
 
   alias GenAgent.Response
   alias GenAgentEnsemble.Queue
+  alias GenAgentEnsemble.Usage
 
   defstruct [
     :coordinator,
@@ -48,7 +49,8 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     :decomposer,
     :synthesizer,
     phase: :idle,
-    queue: nil
+    queue: nil,
+    usage: Usage.new()
   ]
 
   @impl true
@@ -78,7 +80,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   def handle_ask(prompt, _opts, token, state), do: start_or_queue(prompt, token, state)
 
   defp start_or_queue(prompt, token, %{phase: :idle} = state) do
-    state = %{state | phase: {:decomposing, token}}
+    state = %{state | usage: Usage.new(), phase: {:decomposing, token}}
     {:ok, [{:dispatch, state.coordinator, prompt, token}], state}
   end
 
@@ -101,6 +103,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   end
 
   defp decompose(token, response, state) do
+    state = %{state | usage: Usage.add(state.usage, state.coordinator, response.usage)}
     sub_prompts = state.decomposer.(response.text)
 
     {op_lists, progress} =
@@ -117,6 +120,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
 
     case map_size(progress) do
       0 ->
+        response = %{response | usage: Usage.to_usage(state.usage)}
         # Nothing to fan out; reply immediately with coordinator's text.
         state = %{state | phase: :idle}
         {ops, state} = maybe_prepend_next(state, [{:reply, token, response}])
@@ -128,6 +132,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   end
 
   defp collect_worker(agent, response, token, progress, state) do
+    state = %{state | usage: Usage.add(state.usage, agent, response.usage)}
     progress = Map.put(progress, agent, {:done, response})
 
     if Enum.all?(progress, fn {_, v} -> match?({:done, _}, v) end) do
@@ -148,7 +153,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
       end)
 
     combined = state.synthesizer.(worker_outputs)
-    final_response = %Response{text: combined}
+    final_response = %Response{text: combined, usage: Usage.to_usage(state.usage)}
     stop_ops = Enum.map(progress, fn {worker, _} -> {:stop, worker} end)
 
     state = %{state | phase: :idle}
@@ -159,7 +164,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   defp maybe_prepend_next(%{phase: :idle} = state, ops_so_far) do
     case Queue.pop(state.queue) do
       {:ok, {token, prompt}, rest} ->
-        state = %{state | phase: {:decomposing, token}, queue: rest}
+        state = %{state | usage: Usage.new(), phase: {:decomposing, token}, queue: rest}
         {ops_so_far ++ [{:dispatch, state.coordinator, prompt, token}], state}
 
       :empty ->

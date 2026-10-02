@@ -26,10 +26,12 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
   @behaviour GenAgentEnsemble.Strategy
 
   alias GenAgentEnsemble.Queue
+  alias GenAgentEnsemble.Usage
 
   defstruct stages: [],
             phase: :idle,
-            queue: nil
+            queue: nil,
+            usage: Usage.new()
 
   @impl true
   def init(opts) do
@@ -51,7 +53,9 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
 
   defp dispatch_or_queue(prompt, token, %{phase: :idle} = state) do
     first = hd(state.stages)
-    {:ok, [{:dispatch, first, prompt, token}], %{state | phase: {:in_stage, 0, token}}}
+
+    {:ok, [{:dispatch, first, prompt, token}],
+     %{state | usage: Usage.new(), phase: {:in_stage, 0, token}}}
   end
 
   defp dispatch_or_queue(prompt, token, state) do
@@ -76,6 +80,8 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
   end
 
   defp advance(idx, token, response, state) do
+    stage = Enum.at(state.stages, idx)
+    state = %{state | usage: Usage.add(state.usage, stage, response.usage)}
     next_idx = idx + 1
 
     if next_idx < length(state.stages) do
@@ -84,6 +90,7 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
       {:ok, [{:dispatch, next_stage, response.text, token}],
        %{state | phase: {:in_stage, next_idx, token}}}
     else
+      response = %{response | usage: Usage.to_usage(state.usage)}
       state = %{state | phase: :idle}
       {ops, state} = maybe_start_next(state, [{:reply, token, response}])
       {:ok, ops, state}
@@ -135,7 +142,7 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
       {:ok, {token, prompt}, rest} ->
         first = hd(state.stages)
 
-        state = %{state | phase: {:in_stage, 0, token}, queue: rest}
+        state = %{state | usage: Usage.new(), phase: {:in_stage, 0, token}, queue: rest}
         {ops_so_far ++ [{:dispatch, first, prompt, token}], state}
 
       :empty ->
