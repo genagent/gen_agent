@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.2.0...gen_agent_claude-v0.2.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **backends:** require compatible core for CLI adapters ([#308](https://github.com/genagent/gen_agent/issues/308)) ([286f578](https://github.com/genagent/gen_agent/commit/286f578461e75de6e32a43a277b2b5150a2b0e44))
+
 ## [0.2.0](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.1.5...gen_agent_claude-v0.2.0) (2026-10-02)
 
 
