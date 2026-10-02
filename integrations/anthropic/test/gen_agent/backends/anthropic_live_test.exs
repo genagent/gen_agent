@@ -1,19 +1,25 @@
 defmodule GenAgent.Backends.AnthropicLiveTest do
   @moduledoc """
-  Integration tests that call the real Anthropic Messages API.
+  Live tests that call the real Anthropic Messages API.
 
-  Tagged `:integration` so they do not run in the default suite.
+  Tagged `:live` so they do not run in the default suite.
   Requires `ANTHROPIC_API_KEY` to be set in the environment.
 
   Run with:
 
-      mix test --only integration
+      mix test --only live
   """
 
   use ExUnit.Case, async: false
 
-  @moduletag :integration
+  @moduletag :live
   @moduletag timeout: 120_000
+
+  case System.get_env("ANTHROPIC_API_KEY") do
+    nil -> @moduletag skip: "ANTHROPIC_API_KEY not set"
+    "" -> @moduletag skip: "ANTHROPIC_API_KEY is empty"
+    _key -> :ok
+  end
 
   defmodule LiveAnthropicAgent do
     use GenAgent
@@ -36,17 +42,8 @@ defmodule GenAgent.Backends.AnthropicLiveTest do
 
   defp unique_name(prefix), do: "#{prefix}-#{System.unique_integer([:positive])}"
 
-  defp require_api_key do
-    case System.get_env("ANTHROPIC_API_KEY") do
-      nil -> flunk("ANTHROPIC_API_KEY not set -- skipping live Anthropic tests")
-      "" -> flunk("ANTHROPIC_API_KEY is empty -- skipping live Anthropic tests")
-      _key -> :ok
-    end
-  end
-
   describe "full stack through GenAgent.ask/2" do
     test "round-trips a trivial prompt via the real Anthropic API" do
-      require_api_key()
       name = unique_name("anthropic-live")
 
       {:ok, _pid} =
@@ -86,7 +83,6 @@ defmodule GenAgent.Backends.AnthropicLiveTest do
     end
 
     test "second turn sends the full conversation history" do
-      require_api_key()
       name = unique_name("anthropic-live-multi")
 
       {:ok, _pid} =

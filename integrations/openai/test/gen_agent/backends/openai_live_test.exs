@@ -1,19 +1,25 @@
 defmodule GenAgent.Backends.OpenAILiveTest do
   @moduledoc """
-  Integration tests that call the real OpenAI Responses API.
+  Live tests that call the real OpenAI Responses API.
 
-  Tagged `:integration` so they do not run in the default suite.
+  Tagged `:live` so they do not run in the default suite.
   Requires `OPENAI_API_KEY` to be set in the environment.
 
   Run with:
 
-      mix test --only integration
+      mix test --only live
   """
 
   use ExUnit.Case, async: false
 
-  @moduletag :integration
+  @moduletag :live
   @moduletag timeout: 120_000
+
+  case System.get_env("OPENAI_API_KEY") do
+    nil -> @moduletag skip: "OPENAI_API_KEY not set"
+    "" -> @moduletag skip: "OPENAI_API_KEY is empty"
+    _key -> :ok
+  end
 
   defmodule LiveOpenAIAgent do
     use GenAgent
@@ -38,17 +44,8 @@ defmodule GenAgent.Backends.OpenAILiveTest do
 
   defp unique_name(prefix), do: "#{prefix}-#{System.unique_integer([:positive])}"
 
-  defp require_api_key do
-    case System.get_env("OPENAI_API_KEY") do
-      nil -> flunk("OPENAI_API_KEY not set -- skipping live OpenAI tests")
-      "" -> flunk("OPENAI_API_KEY is empty -- skipping live OpenAI tests")
-      _key -> :ok
-    end
-  end
-
   describe "full stack through GenAgent.ask/2" do
     test "round-trips a trivial prompt via the real OpenAI Responses API" do
-      require_api_key()
       name = unique_name("openai-live")
 
       {:ok, _pid} =
@@ -89,7 +86,6 @@ defmodule GenAgent.Backends.OpenAILiveTest do
     end
 
     test "second turn threads previous_response_id for server-side context" do
-      require_api_key()
       name = unique_name("openai-live-multi")
 
       {:ok, _pid} =

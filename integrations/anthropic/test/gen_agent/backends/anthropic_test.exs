@@ -1,5 +1,5 @@
 defmodule GenAgent.Backends.AnthropicTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias GenAgent.Backends.Anthropic
   alias GenAgent.Event
@@ -103,11 +103,17 @@ defmodule GenAgent.Backends.AnthropicTest do
     end
 
     test "falls back to ANTHROPIC_API_KEY env var" do
+      previous = System.get_env("ANTHROPIC_API_KEY")
       System.put_env("ANTHROPIC_API_KEY", "env-key")
-      {:ok, session} = Anthropic.start_session(http_fn: ok_response("hi"))
-      assert session.api_key == "env-key"
-    after
-      System.delete_env("ANTHROPIC_API_KEY")
+
+      try do
+        {:ok, session} = Anthropic.start_session(http_fn: ok_response("hi"))
+        assert session.api_key == "env-key"
+      after
+        if previous,
+          do: System.put_env("ANTHROPIC_API_KEY", previous),
+          else: System.delete_env("ANTHROPIC_API_KEY")
+      end
     end
 
     test "starts with empty messages and a generated client_session_id" do

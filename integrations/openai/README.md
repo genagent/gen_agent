@@ -172,11 +172,11 @@ mix test
 Unit tests stub the HTTP layer via the `:http_fn` backend option,
 so no tokens are burned during `mix test`.
 
-Live tests (tagged `:integration`) hit the real API and require
+Live tests (tagged `:live`) hit the real API and require
 `OPENAI_API_KEY` in the environment:
 
 ```bash
-mix test --only integration
+mix test --only live
 ```
 
 ## License

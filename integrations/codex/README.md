@@ -166,11 +166,11 @@ report the subprocess exit code.
 # Unit tests only (default, no CLI invocation)
 mix test
 
-# Include live integration tests that actually call the codex CLI
-mix test --only integration
+# Run live tests that actually call the codex CLI
+mix test --only live
 ```
 
-Integration tests are tagged `:integration` so they do not run by
+Live tests are tagged `:live` so they do not run by
 default. They burn real tokens -- keep them cheap.
 
 ## License

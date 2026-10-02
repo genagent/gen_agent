@@ -1,5 +1,5 @@
 defmodule GenAgent.Backends.OpenAITest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias GenAgent.Backends.OpenAI
   alias GenAgent.Event
@@ -129,11 +129,17 @@ defmodule GenAgent.Backends.OpenAITest do
     end
 
     test "falls back to OPENAI_API_KEY env var" do
+      previous = System.get_env("OPENAI_API_KEY")
       System.put_env("OPENAI_API_KEY", "env-key")
-      {:ok, session} = OpenAI.start_session(http_fn: ok_response("hi"))
-      assert session.api_key == "env-key"
-    after
-      System.delete_env("OPENAI_API_KEY")
+
+      try do
+        {:ok, session} = OpenAI.start_session(http_fn: ok_response("hi"))
+        assert session.api_key == "env-key"
+      after
+        if previous,
+          do: System.put_env("OPENAI_API_KEY", previous),
+          else: System.delete_env("OPENAI_API_KEY")
+      end
     end
 
     test "starts with nil previous_response_id and a generated client_session_id" do
