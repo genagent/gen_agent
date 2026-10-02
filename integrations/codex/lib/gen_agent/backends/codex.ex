@@ -32,7 +32,7 @@ defmodule GenAgent.Backends.Codex do
 
     * `:model`, `:sandbox`, `:approval_policy`, `:full_auto`,
       `:dangerously_bypass_approvals_and_sandbox`, `:skip_git_repo_check`,
-      `:ephemeral`,
+      `:ephemeral`, `:ignore_user_config`, `:profile`,
       `:config_overrides`, `:enabled_features`, `:disabled_features`,
       `:images`, `:output_schema`
 
@@ -42,6 +42,9 @@ defmodule GenAgent.Backends.Codex do
   persists across turns. Session options are translated into supported
   resume arguments; `:sandbox` and `:approval_policy` use config
   overrides because resume does not accept their exec flags.
+  `:ignore_user_config` applies to both fresh and resumed turns. The CLI
+  accepts `:profile` only on the initial `exec`, so it applies to the
+  first turn only.
 
   Backend-only:
 
@@ -69,6 +72,8 @@ defmodule GenAgent.Backends.Codex do
     :dangerously_bypass_approvals_and_sandbox,
     :skip_git_repo_check,
     :ephemeral,
+    :ignore_user_config,
+    :profile,
     :config_overrides,
     :enabled_features,
     :disabled_features,
@@ -176,6 +181,12 @@ defmodule GenAgent.Backends.Codex do
       {:ephemeral, true}, e ->
         Exec.ephemeral(e)
 
+      {:ignore_user_config, true}, e ->
+        Exec.ignore_user_config(e)
+
+      {:profile, v}, e ->
+        Exec.profile(e, v)
+
       {:config_overrides, v}, e ->
         Enum.reduce(v, e, &Exec.config(&2, &1))
 
@@ -221,6 +232,9 @@ defmodule GenAgent.Backends.Codex do
 
         {:ephemeral, true}, r ->
           ExecResume.ephemeral(r)
+
+        {:ignore_user_config, true}, r ->
+          ExecResume.ignore_user_config(r)
 
         {:config_overrides, values}, r ->
           Enum.reduce(values, r, &ExecResume.config(&2, &1))
