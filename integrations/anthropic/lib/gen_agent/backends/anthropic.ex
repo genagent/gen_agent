@@ -127,13 +127,12 @@ defmodule GenAgent.Backends.Anthropic do
     drop_last_user_message(session)
   end
 
-  def update_session(%__MODULE__{} = session, %{text: text})
-      when is_binary(text) and text != "" do
-    append_message(session, "assistant", text)
-  end
-
-  def update_session(%__MODULE__{} = session, %{text: ""}) do
-    drop_last_user_message(session)
+  # Text that is empty or only whitespace is not a usable assistant turn:
+  # remove the unanswered user message so history keeps alternating.
+  def update_session(%__MODULE__{} = session, %{text: text}) when is_binary(text) do
+    if String.trim(text) == "",
+      do: drop_last_user_message(session),
+      else: append_message(session, "assistant", text)
   end
 
   def update_session(%__MODULE__{} = session, _data), do: session
