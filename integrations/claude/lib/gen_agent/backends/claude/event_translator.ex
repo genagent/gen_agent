@@ -29,6 +29,12 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
       error subtype is reported. Failure reason keeps subtype, message,
       session ID, cost and usage. Claude reports cost as
       `total_cost_usd`; we normalize it to `:cost_usd`.
+      Success `:result` data also carries the raw result map under `:raw`
+      (`structured_output`, `stop_reason`, `permission_denials`, ...). An
+      empty or absent result omits `:text`, so `GenAgent.Response` assembles
+      the turn's emitted assistant text. Failure `:message` is the non-empty
+      `result`, else joined `errors`, else `error`; `:errors` and `:num_turns`
+      are kept on the reason.
     * `"error"` -- emits a terminal `:error` event with `:reason` extracted
       from `data["error"]` or `data["message"]`.
     * Unknown types -- filtered out.
@@ -97,12 +103,13 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
 
   defp success_result_event(data) do
     event_data = %{
-      text: data["result"] || "",
+      text: nonempty_string(data["result"]),
       session_id: data["session_id"],
       cost_usd: data["total_cost_usd"] || data["cost_usd"],
       duration_ms: data["duration_ms"],
       num_turns: data["num_turns"],
-      is_error: data["is_error"] || false
+      is_error: data["is_error"] || false,
+      raw: data
     }
 
     Event.new(:result, drop_nil_values(event_data))
@@ -112,7 +119,9 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
     reason = %{
       provider: :claude,
       subtype: data["subtype"],
-      message: data["result"] || data["error"] || :unknown,
+      message: error_message(data),
+      errors: nonempty_list(data["errors"]),
+      num_turns: data["num_turns"],
       session_id: data["session_id"],
       cost_usd: data["total_cost_usd"] || data["cost_usd"],
       usage: extract_usage(data)
@@ -127,7 +136,9 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
   """
   @spec translate_stream(Enumerable.t()) :: Enumerable.t()
   def translate_stream(stream) do
-    Stream.transform(stream, %{partial_text: "", seen_calls: MapSet.new()}, fn raw, state ->
+    initial = %{partial_text: "", seen_calls: MapSet.new()}
+
+    Stream.transform(stream, initial, fn raw, state ->
       events = translate(raw)
 
       events =
@@ -182,6 +193,30 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
 
   defp text_event(""), do: []
   defp text_event(text), do: [Event.new(:text, %{text: text})]
+
+  defp error_message(data) do
+    nonempty_string(data["result"]) ||
+      errors_message(data["errors"]) ||
+      nonempty_string(data["error"]) ||
+      :unknown
+  end
+
+  defp errors_message(errors) do
+    case nonempty_list(errors) do
+      nil -> nil
+      list -> Enum.map_join(list, "; ", &error_text/1)
+    end
+  end
+
+  defp error_text(error) when is_binary(error), do: error
+  defp error_text(%{"message" => message}) when is_binary(message), do: message
+  defp error_text(error), do: inspect(error)
+
+  defp nonempty_list([_ | _] = list), do: list
+  defp nonempty_list(_), do: nil
+
+  defp nonempty_string(value) when is_binary(value) and value != "", do: value
+  defp nonempty_string(_), do: nil
 
   defp failed_result?(data) do
     subtype = data["subtype"]

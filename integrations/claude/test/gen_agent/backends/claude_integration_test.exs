@@ -26,7 +26,17 @@ defmodule GenAgent.Backends.ClaudeIntegrationTest do
 
     @impl true
     def init_agent(opts) do
-      backend_opts = Keyword.take(opts, [:stream_fn, :working_dir, :cwd, :model, :system_prompt])
+      backend_opts =
+        Keyword.take(opts, [
+          :stream_fn,
+          :working_dir,
+          :cwd,
+          :model,
+          :system_prompt,
+          :permission_mode,
+          :json_schema
+        ])
+
       {:ok, backend_opts, %State{}}
     end
 
@@ -280,6 +290,117 @@ defmodule GenAgent.Backends.ClaudeIntegrationTest do
       name = start_claude_agent(stream_fn)
 
       assert {:error, "rate limited"} = GenAgent.ask(name, "boom")
+    end
+
+    test "empty or absent result text falls back to assistant text after ExitPlanMode" do
+      for result <- [%{"result" => ""}, %{}] do
+        stream_fn = fn _prompt, _opts ->
+          [
+            stream_event("assistant", %{
+              "message" => %{"content" => [%{"type" => "text", "text" => "Here is the plan"}]}
+            }),
+            stream_event("assistant", %{
+              "message" => %{
+                "content" => [
+                  %{
+                    "type" => "tool_use",
+                    "id" => "tu_1",
+                    "name" => "ExitPlanMode",
+                    "input" => %{"plan" => "1. do x"}
+                  }
+                ]
+              }
+            }),
+            stream_event("result", Map.merge(%{"session_id" => "s"}, result))
+          ]
+        end
+
+        name = start_claude_agent(stream_fn, permission_mode: :plan)
+
+        assert {:ok, response} = GenAgent.ask(name, "plan it")
+        assert response.text == "Here is the plan"
+        assert Enum.map(response.events, & &1.kind) == [:text, :tool_use, :result]
+      end
+    end
+
+    test "tool-only plan turn keeps empty text and exposes the plan on the tool event" do
+      stream_fn = fn _prompt, _opts ->
+        [
+          stream_event("assistant", %{
+            "message" => %{
+              "content" => [
+                %{
+                  "type" => "tool_use",
+                  "id" => "tu_1",
+                  "name" => "ExitPlanMode",
+                  "input" => %{"plan" => "1. do x"}
+                }
+              ]
+            }
+          }),
+          stream_event("result", %{"result" => "", "session_id" => "s"})
+        ]
+      end
+
+      name = start_claude_agent(stream_fn, permission_mode: :plan)
+
+      assert {:ok, response} = GenAgent.ask(name, "plan it")
+      assert response.text == ""
+
+      assert %{data: %{"input" => %{"plan" => "1. do x"}}} =
+               Enum.find(response.events, &(&1.kind == :tool_use))
+    end
+
+    test "nonempty result text wins over assistant text" do
+      stream_fn = fn _prompt, _opts ->
+        [
+          stream_event("assistant", %{"content" => [%{"type" => "text", "text" => "draft"}]}),
+          stream_event("result", %{"result" => "final", "session_id" => "s"})
+        ]
+      end
+
+      name = start_claude_agent(stream_fn)
+      assert {:ok, %{text: "final"}} = GenAgent.ask(name, "q")
+    end
+
+    test "structured output and extended fields reach the terminal :result event" do
+      stream_fn = fn _prompt, _opts ->
+        [
+          stream_event("result", %{
+            "result" => "",
+            "session_id" => "s",
+            "structured_output" => %{"answer" => 42},
+            "stop_reason" => "end_turn",
+            "permission_denials" => [%{"tool_name" => "Bash"}]
+          })
+        ]
+      end
+
+      name = start_claude_agent(stream_fn, json_schema: ~s({"type":"object"}))
+
+      assert {:ok, response} = GenAgent.ask(name, "q")
+      result = Enum.find(response.events, &(&1.kind == :result))
+      assert result.data.raw["structured_output"] == %{"answer" => 42}
+      assert result.data.raw["stop_reason"] == "end_turn"
+      assert result.data.raw["permission_denials"] == [%{"tool_name" => "Bash"}]
+    end
+
+    test "errors-array failure reaches ask callers and handle_error with a message" do
+      failure =
+        stream_event("result", %{
+          "subtype" => "error_during_execution",
+          "is_error" => true,
+          "errors" => ["something broke"],
+          "num_turns" => 2,
+          "session_id" => "s"
+        })
+
+      name = start_claude_agent(fn _prompt, _opts -> [failure] end)
+
+      assert {:error, %{message: "something broke", errors: ["something broke"], num_turns: 2}} =
+               GenAgent.ask(name, "q")
+
+      assert [%{message: "something broke"}] = GenAgent.status(name).agent_state.errors
     end
 
     test "failed Claude result reaches handle_error for ask and poll" do

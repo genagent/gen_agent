@@ -137,11 +137,94 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
       assert data.is_error == false
     end
 
-    test "defaults empty text when :result field is missing" do
-      event = stream_event("result", %{"session_id" => "sess-x"})
+    test "omits :text when the result field is missing or empty" do
+      for extra <- [%{}, %{"result" => ""}] do
+        event = stream_event("result", Map.put(extra, "session_id", "sess-x"))
 
-      assert [%Event{kind: :result, data: %{text: "", session_id: "sess-x"}}] =
-               EventTranslator.translate(event)
+        assert [%Event{kind: :result, data: data}] = EventTranslator.translate(event)
+        assert data.session_id == "sess-x"
+        refute Map.has_key?(data, :text)
+        assert data.raw == Map.put(extra, "session_id", "sess-x")
+      end
+    end
+
+    test "keeps the raw result map on success" do
+      data = %{
+        "result" => "",
+        "structured_output" => %{"answer" => 42},
+        "stop_reason" => "end_turn",
+        "permission_denials" => [%{"tool_name" => "Bash"}],
+        "duration_api_ms" => 9
+      }
+
+      assert [%Event{kind: :result, data: %{raw: ^data}}] =
+               EventTranslator.translate(stream_event("result", data))
+    end
+
+    test "stream leaves :text off the result so Response falls back to text events" do
+      for result <- [%{"result" => ""}, %{}] do
+        events =
+          [
+            stream_event("assistant", %{"content" => [%{"type" => "text", "text" => "the plan"}]}),
+            stream_event("result", result)
+          ]
+          |> EventTranslator.translate_stream()
+          |> Enum.to_list()
+
+        assert %Event{kind: :result, data: data} = List.last(events)
+        refute Map.has_key?(data, :text)
+        assert data.raw == result
+        assert GenAgent.Response.from_events(events).text == "the plan"
+      end
+    end
+
+    test "stream keeps a nonempty result over assistant text" do
+      events =
+        [
+          stream_event("assistant", %{"content" => [%{"type" => "text", "text" => "draft"}]}),
+          stream_event("result", %{"result" => "final"})
+        ]
+        |> EventTranslator.translate_stream()
+        |> Enum.to_list()
+
+      assert %Event{data: %{text: "final"}} = List.last(events)
+    end
+
+    test "failed result message uses errors when result is absent or empty" do
+      for extra <- [%{}, %{"result" => ""}] do
+        data =
+          Map.merge(extra, %{
+            "subtype" => "error_during_execution",
+            "is_error" => true,
+            "errors" => ["something broke", "again"],
+            "num_turns" => 2,
+            "session_id" => "s"
+          })
+
+        assert [%Event{kind: :error, data: %{reason: reason}}] =
+                 EventTranslator.translate(stream_event("result", data))
+
+        assert reason.message == "something broke; again"
+        assert reason.errors == ["something broke", "again"]
+        assert reason.num_turns == 2
+      end
+    end
+
+    test "failed result prefers result string, then falls back from empty errors" do
+      with_result = %{"is_error" => true, "result" => "text", "errors" => ["e"]}
+
+      assert [%Event{data: %{reason: %{message: "text"}}}] =
+               EventTranslator.translate(stream_event("result", with_result))
+
+      empty = %{"is_error" => true, "errors" => [], "error" => "plain"}
+
+      assert [%Event{data: %{reason: %{message: "plain"} = reason}}] =
+               EventTranslator.translate(stream_event("result", empty))
+
+      refute Map.has_key?(reason, :errors)
+
+      assert [%Event{data: %{reason: %{message: :unknown}}}] =
+               EventTranslator.translate(stream_event("result", %{"is_error" => true}))
     end
 
     test "falls back to cost_usd when total_cost_usd is absent" do

@@ -231,10 +231,17 @@ defmodule GenAgent.Backends.ClaudeExecutableConformanceTest do
         assert response.session_id == recorded_result["session_id"]
         assert response.text == recorded_result["result"]
       else
-        # Issue #118: the recorded errors array currently yields message :unknown.
-        assert {:error, %{message: :unknown, subtype: "error_max_turns", session_id: session_id}} =
-                 GenAgent.ask(name, "replay")
+        assert {:error,
+                %{
+                  message: message,
+                  errors: errors,
+                  subtype: "error_max_turns",
+                  session_id: session_id
+                }} = GenAgent.ask(name, "replay")
 
+        assert errors == recorded_result["errors"]
+        assert message == Enum.join(recorded_result["errors"], "; ")
+        assert message == "Reached maximum number of turns (1)"
         assert session_id == recorded_result["session_id"]
       end
     end

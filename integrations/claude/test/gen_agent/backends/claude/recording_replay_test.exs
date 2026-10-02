@@ -68,7 +68,7 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
       assert Enum.join(texts) == Enum.join(expected_texts)
       assert_scenario(context.scenario, parsed, events, texts)
 
-      # Issue #118: normalized usage currently omits the recorded cache token fields.
+      # Normalized usage omits the recorded cache token fields.
       usage = %{
         input_tokens: result.data["usage"]["input_tokens"],
         output_tokens: result.data["usage"]["output_tokens"]
@@ -84,13 +84,15 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
   defp assert_terminal(%{kind: :error, data: data}, raw, usage) do
     assert raw["errors"] == ["Reached maximum number of turns (1)"]
     refute Map.has_key?(raw, "result")
-    # Issue #118: the errors array currently yields message :unknown.
+
     assert data == %{
              data: raw,
              reason: %{
                provider: :claude,
                subtype: "error_max_turns",
-               message: :unknown,
+               message: "Reached maximum number of turns (1)",
+               errors: raw["errors"],
+               num_turns: raw["num_turns"],
                session_id: raw["session_id"],
                cost_usd: raw["total_cost_usd"],
                usage: usage
@@ -99,14 +101,19 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
   end
 
   defp assert_terminal(%{kind: :result, data: data}, raw, _usage) do
-    assert data == %{
-             text: raw["result"],
-             session_id: raw["session_id"],
-             cost_usd: raw["total_cost_usd"],
-             duration_ms: raw["duration_ms"],
-             num_turns: raw["num_turns"],
-             is_error: false
-           }
+    expected = %{
+      session_id: raw["session_id"],
+      cost_usd: raw["total_cost_usd"],
+      duration_ms: raw["duration_ms"],
+      num_turns: raw["num_turns"],
+      is_error: false,
+      raw: raw
+    }
+
+    expected =
+      if raw["result"] in [nil, ""], do: expected, else: Map.put(expected, :text, raw["result"])
+
+    assert data == expected
   end
 
   defp assert_scenario("text", _parsed, _events, texts), do: assert(texts == ["pong"])
