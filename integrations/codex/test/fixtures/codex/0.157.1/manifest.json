@@ -1,0 +1,83 @@
+{
+  "cli": "codex",
+  "cli_version": "codex-cli 0.157.1",
+  "recorded": "2026-10-01",
+  "platform": "darwin",
+  "workspace": "empty git repository; --ignore-user-config; CLI default model",
+  "sanitization": "Absolute paths replaced: the workspace with /workspace, temporary directories with /tmp/codex, and the home directory with /home/user. Thread ids and item ids are the CLI's own values. No other edits.",
+  "not_recorded": "file_change and mcp_tool_call items, and a recovered transient error, were not captured in this corpus.",
+  "scenarios": {
+    "success": {
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ignore-user-config",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "Reply exactly pong."
+      ],
+      "exit_status": 0,
+      "lines": 4
+    },
+    "command": {
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ignore-user-config",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "Run printf codex-fixture using the shell tool, then report its output."
+      ],
+      "exit_status": 0,
+      "lines": 7
+    },
+    "resume-initial": {
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ignore-user-config",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "Remember 42. Reply exactly ok."
+      ],
+      "exit_status": 0,
+      "lines": 4
+    },
+    "resume-followup": {
+      "argv": [
+        "codex",
+        "exec",
+        "resume",
+        "--json",
+        "--ignore-user-config",
+        "--skip-git-repo-check",
+        "<thread_id from resume-initial>",
+        "What number did I ask you to remember? Reply with only the number."
+      ],
+      "exit_status": 0,
+      "lines": 4
+    },
+    "failure": {
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ignore-user-config",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "-m",
+        "codex-fixture-nonexistent-model",
+        "Reply exactly pong."
+      ],
+      "exit_status": 1,
+      "lines": 5
+    }
+  }
+}
