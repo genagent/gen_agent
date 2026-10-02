@@ -58,6 +58,22 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
     %{binary: binary, directory: directory}
   end
 
+  test "config isolation reaches both CLI calls; profile applies only to fresh", context do
+    name = start_agent(context, ignore_user_config: true, profile: "fixture-profile")
+
+    assert {:ok, _first} = GenAgent.ask(name, "first prompt")
+    fresh_args = args(context.directory, :fresh)
+    assert "--ignore-user-config" in fresh_args
+
+    assert Enum.chunk_every(fresh_args, 2, 1, :discard)
+           |> Enum.member?(["--profile", "fixture-profile"])
+
+    assert {:ok, _second} = GenAgent.ask(name, "follow-up prompt")
+    resume_args = args(context.directory, :resume)
+    assert "--ignore-user-config" in resume_args
+    refute "--profile" in resume_args
+  end
+
   defp start_agent(context, opts \\ []) do
     name = "codex-executable-#{System.unique_integer([:positive])}"
 

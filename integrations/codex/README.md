@@ -102,12 +102,18 @@ turn's `exec resume` command.
 **Exec:**
 - `:model`, `:sandbox`, `:approval_policy`, `:full_auto`,
   `:dangerously_bypass_approvals_and_sandbox`, `:skip_git_repo_check`,
-  `:ephemeral`,
+  `:ephemeral`, `:ignore_user_config`, `:profile`,
   `:config_overrides`, `:enabled_features`, `:disabled_features`,
   `:images`, `:output_schema`
 
-These settings are forwarded on fresh and resumed turns. Sandbox and
+These settings are forwarded where the CLI supports them. Sandbox and
 approval policy become supported `-c` overrides on resume.
+
+| Configuration option | Fresh turn | Resumed turn |
+| --- | --- | --- |
+| `ignore_user_config: true` | Skips the host's Codex configuration | Skips the host's Codex configuration |
+| `profile: "name"` | Selects a named configuration profile | Not supported by `codex exec resume` |
+
 `:working_dir` / `:cwd` remains the subprocess directory on both turns.
 Options that the resume command cannot preserve (`:cd`, `:add_dirs`,
 `:search`) fail at session startup with
