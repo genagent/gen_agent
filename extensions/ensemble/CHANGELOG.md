@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.1](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.6.0...gen_agent_ensemble-v0.6.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **ensemble:** bound Supervisor fan-out ([#358](https://github.com/genagent/gen_agent/issues/358)) ([cd32dbc](https://github.com/genagent/gen_agent/commit/cd32dbc5bf3b7bc42f0b25534813358227898906))
+* **ensemble:** keep original topic in debate turns ([#364](https://github.com/genagent/gen_agent/issues/364)) ([4d84f1c](https://github.com/genagent/gen_agent/commit/4d84f1c5da42dc0ff0be34e116f03f02797dc7fd))
+* **ensemble:** require unique consensus and tolerate reachable errors ([#365](https://github.com/genagent/gen_agent/issues/365)) ([c5b689a](https://github.com/genagent/gen_agent/commit/c5b689a8219ae3eb827042e90bf48af564528cbb))
+
 ## [0.6.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.5.0...gen_agent_ensemble-v0.6.0) (2026-10-02)
 
 
