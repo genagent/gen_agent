@@ -123,7 +123,15 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
 
     assert {:ok, second} = GenAgent.ask(name, "follow-up prompt")
     assert second.text == "42"
-    Transcripts.assert_events(second.events, "resume-followup")
+
+    Transcripts.assert_events(second.events, "resume-followup", %{
+      input_tokens: 14_982,
+      cached_input_tokens: 12_160,
+      cache_write_input_tokens: 0,
+      output_tokens: 5,
+      reasoning_output_tokens: 0
+    })
+
     assert second.session_id == first.session_id
 
     resume_args = args(context.directory, :resume)

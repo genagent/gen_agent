@@ -56,6 +56,106 @@ defmodule GenAgent.Backends.CodexTest do
     end
   end
 
+  describe "usage deltas across turns" do
+    defp completed_turn(input, output) do
+      [
+        event("thread.started", %{"thread_id" => "thread-u"}),
+        event("turn.completed", %{
+          "usage" => %{"input_tokens" => input, "output_tokens" => output}
+        })
+      ]
+    end
+
+    # Runs one turn and applies the terminal :result like GenAgent.Server.
+    defp run_turn(session, events) do
+      {:ok, stream, session} = Codex.prompt(%{session | exec_fn: fake_exec(events)}, "go")
+      translated = Enum.to_list(stream)
+      result = List.last(translated)
+
+      usage =
+        Enum.find_value(translated, fn
+          %{kind: :usage, data: data} -> data
+          _ -> nil
+        end)
+
+      session =
+        if result.kind == :result, do: Codex.update_session(session, result.data), else: session
+
+      {session, usage}
+    end
+
+    test "first turn reports the full total, resumed turn reports the delta" do
+      {:ok, session} = Codex.start_session(exec_fn: fake_exec([]))
+
+      {session, first} = run_turn(session, completed_turn(14_956, 5))
+      assert first == %{input_tokens: 14_956, output_tokens: 5}
+
+      {session, second} = run_turn(session, completed_turn(29_938, 15))
+      assert second == %{input_tokens: 14_982, output_tokens: 10}
+
+      {_session, third} = run_turn(session, completed_turn(29_938, 15))
+      assert third == %{input_tokens: 0, output_tokens: 0}
+    end
+
+    test "externally resumed session omits usage on the first turn, then reports deltas" do
+      {:ok, session} = Codex.resume_session("thread-u", exec_fn: fake_exec([]))
+
+      {session, first} = run_turn(session, completed_turn(31_279, 11))
+      assert first == nil
+      assert session.usage_total == %{input_tokens: 31_279, output_tokens: 11}
+
+      {_session, second} = run_turn(session, completed_turn(40_000, 20))
+      assert second == %{input_tokens: 8721, output_tokens: 9}
+    end
+
+    test "a failed turn keeps the baseline so the next delta includes it" do
+      {:ok, session} = Codex.start_session(exec_fn: fake_exec([]))
+      {session, _} = run_turn(session, completed_turn(100, 10))
+
+      failed = [
+        event("thread.started", %{"thread_id" => "thread-u"}),
+        event("turn.failed", %{"error" => "boom"})
+      ]
+
+      {session, nil} = run_turn(session, failed)
+      assert session.usage_total.input_tokens == 100
+
+      {_session, usage} = run_turn(session, completed_turn(180, 16))
+      assert usage == %{input_tokens: 80, output_tokens: 6}
+    end
+
+    test "checkpoint_session keeps the usage baseline" do
+      {:ok, session} = Codex.start_session(exec_fn: fake_exec([]))
+      {session, _} = run_turn(session, completed_turn(100, 10))
+      session = Codex.checkpoint_session(session, "thread-u")
+
+      {_session, usage} = run_turn(session, completed_turn(130, 12))
+      assert usage == %{input_tokens: 30, output_tokens: 2}
+    end
+
+    test "a reset total suppresses the delta and rebaselines" do
+      {:ok, session} = Codex.start_session(exec_fn: fake_exec([]))
+      {session, _} = run_turn(session, completed_turn(1000, 100))
+
+      {session, reset} = run_turn(session, completed_turn(50, 5))
+      assert reset == nil
+      assert session.usage_total == %{input_tokens: 50, output_tokens: 5}
+
+      {_session, usage} = run_turn(session, completed_turn(70, 9))
+      assert usage == %{input_tokens: 20, output_tokens: 4}
+    end
+
+    test "a turn without usage clears the baseline instead of leaving it stale" do
+      {:ok, session} = Codex.start_session(exec_fn: fake_exec([]))
+      {session, _} = run_turn(session, completed_turn(100, 10))
+
+      {session, nil} = run_turn(session, [event("turn.completed", %{})])
+      assert session.usage_total == %{}
+
+      {_session, nil} = run_turn(session, completed_turn(300, 30))
+    end
+  end
+
   describe "prompt/2" do
     test "forwards prompt and session to the exec_fn" do
       ref = make_ref()

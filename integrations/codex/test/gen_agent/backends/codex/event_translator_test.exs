@@ -281,7 +281,116 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
 
     test "skips :usage when no token counts are present" do
       events = [event("turn.completed", %{})]
-      assert [%Event{kind: :result}] = EventTranslator.translate(events)
+      assert [%Event{kind: :result, data: data}] = EventTranslator.translate(events)
+      assert data.usage_total == %{}
+    end
+  end
+
+  describe "turn.completed usage" do
+    @all_fields %{
+      "input_tokens" => 626_594,
+      "cached_input_tokens" => 567_936,
+      "cache_write_input_tokens" => 7,
+      "output_tokens" => 2634,
+      "reasoning_output_tokens" => 799
+    }
+
+    defp completed(usage), do: [event("turn.completed", %{"usage" => usage})]
+
+    test "first turn preserves all five fields and reports the raw total" do
+      total = %{
+        input_tokens: 626_594,
+        cached_input_tokens: 567_936,
+        cache_write_input_tokens: 7,
+        output_tokens: 2634,
+        reasoning_output_tokens: 799
+      }
+
+      assert [
+               %Event{kind: :usage, data: ^total},
+               %Event{kind: :result, data: %{usage_total: ^total}}
+             ] = EventTranslator.translate(completed(@all_fields))
+
+      events = EventTranslator.translate(completed(@all_fields))
+      assert Response.from_events(events, []).usage == total
+    end
+
+    test "resumed turn reports the delta from the previous completed total" do
+      baseline = %{
+        input_tokens: 14_956,
+        cached_input_tokens: 12_160,
+        cache_write_input_tokens: 0,
+        output_tokens: 5,
+        reasoning_output_tokens: 0
+      }
+
+      usage = %{
+        "input_tokens" => 29_938,
+        "cached_input_tokens" => 24_320,
+        "cache_write_input_tokens" => 0,
+        "output_tokens" => 10,
+        "reasoning_output_tokens" => 0
+      }
+
+      assert [%Event{kind: :usage, data: delta}, %Event{kind: :result, data: result}] =
+               EventTranslator.translate(completed(usage), usage_baseline: baseline)
+
+      assert delta == %{
+               input_tokens: 14_982,
+               cached_input_tokens: 12_160,
+               cache_write_input_tokens: 0,
+               output_tokens: 5,
+               reasoning_output_tokens: 0
+             }
+
+      assert result.usage_total.input_tokens == 29_938
+    end
+
+    test "unknown baseline omits usage but still reports the total" do
+      assert [%Event{kind: :result, data: %{usage_total: %{input_tokens: 5}}}] =
+               EventTranslator.translate(completed(%{"input_tokens" => 5}), usage_baseline: %{})
+    end
+
+    test "missing fields produce no delta and no zeros" do
+      baseline = %{input_tokens: 10, output_tokens: 2}
+
+      assert [%Event{kind: :usage, data: data}, %Event{kind: :result}] =
+               EventTranslator.translate(
+                 completed(%{"input_tokens" => 25, "reasoning_output_tokens" => 3}),
+                 usage_baseline: baseline
+               )
+
+      assert data == %{input_tokens: 15}
+    end
+
+    test "maps with only optional counters are kept, including zeros" do
+      assert [%Event{kind: :usage, data: %{reasoning_output_tokens: 0}}, %Event{}] =
+               EventTranslator.translate(completed(%{"reasoning_output_tokens" => 0}))
+    end
+
+    test "decreased counters are suppressed and never negative" do
+      baseline = %{input_tokens: 100, output_tokens: 10}
+
+      assert [%Event{kind: :usage, data: data}, %Event{kind: :result, data: result}] =
+               EventTranslator.translate(
+                 completed(%{"input_tokens" => 40, "output_tokens" => 15}),
+                 usage_baseline: baseline
+               )
+
+      assert data == %{output_tokens: 5}
+      assert result.usage_total == %{input_tokens: 40, output_tokens: 15}
+
+      assert [%Event{kind: :result}] =
+               EventTranslator.translate(completed(%{"input_tokens" => 1}),
+                 usage_baseline: baseline
+               )
+    end
+
+    test "non-integer and negative counters are ignored" do
+      usage = %{"input_tokens" => "9", "output_tokens" => 4, "cached_input_tokens" => -1}
+
+      assert [%Event{kind: :usage, data: %{output_tokens: 4}}, %Event{}] =
+               EventTranslator.translate(completed(usage))
     end
   end
 
