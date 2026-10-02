@@ -12,13 +12,16 @@ defmodule GenAgentEnsemble do
       {:ok, pid} = GenAgentEnsemble.start_link(
         name: "research-1",
         strategy: GenAgentEnsemble.Strategies.Solo,
-        opts: [agent: {"worker-a", MyAgent, backend: GenAgent.Backends.Mock}]
+        opts: [
+          agent:
+            {"worker-a", GenAgentEnsemble.Agents.Simple,
+             backend: GenAgentEnsemble.Backends.Echo}
+        ]
       )
 
       {:ok, token} = GenAgentEnsemble.tell("research-1", "hello")
-      {:ok, :pending} = GenAgentEnsemble.poll("research-1", token)
-      # ...later...
-      {:ok, :completed, response} = GenAgentEnsemble.poll("research-1", token)
+      {:ok, response} = GenAgentEnsemble.await("research-1", token)
+      {:ok, :completed, ^response} = GenAgentEnsemble.poll("research-1", token)
 
       {:ok, response} = GenAgentEnsemble.ask("research-1", "quick question", timeout: 30_000)
 
