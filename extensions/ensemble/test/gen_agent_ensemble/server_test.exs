@@ -6,6 +6,23 @@ defmodule GenAgentEnsemble.ServerTest do
   alias GenAgentEnsemble.Strategies.Solo
   alias GenAgentEnsemble.TestAgent
 
+  defmodule InitErrorStrategy do
+    @behaviour GenAgentEnsemble.Strategy
+    def init(_opts), do: {:error, :bad_configuration}
+    def handle_tell(_prompt, _opts, _token, state), do: {:ok, [], state}
+    def handle_ask(_prompt, _opts, _token, state), do: {:ok, [], state}
+    def handle_response(_agent, _response, state), do: {:ok, [], state}
+  end
+
+  defmodule StatusOverrideStrategy do
+    @behaviour GenAgentEnsemble.Strategy
+    def init(_opts), do: {:ok, %{}, []}
+    def handle_status(_state), do: %{session: :overridden}
+    def handle_tell(_prompt, _opts, _token, state), do: {:ok, [], state}
+    def handle_ask(_prompt, _opts, _token, state), do: {:ok, [], state}
+    def handle_response(_agent, _response, state), do: {:ok, [], state}
+  end
+
   defp safe_stop(name) do
     GenAgentEnsemble.stop(name)
   catch
@@ -58,5 +75,20 @@ defmodule GenAgentEnsemble.ServerTest do
       assert await_response(a, ta).text == "from A"
       assert await_response(b, tb).text == "from B"
     end
+  end
+
+  test "init error tuple stops server initialization with its reason" do
+    name = "init-error-#{System.unique_integer([:positive])}"
+
+    assert {:error, :bad_configuration} =
+             GenAgentEnsemble.start_link(name: name, strategy: InitErrorStrategy)
+  end
+
+  test "strategy status fields can replace base status fields" do
+    name = "status-override-#{System.unique_integer([:positive])}"
+    on_exit(fn -> safe_stop(name) end)
+    {:ok, _} = GenAgentEnsemble.start_link(name: name, strategy: StatusOverrideStrategy)
+
+    assert {:ok, %{session: :overridden}} = GenAgentEnsemble.status(name)
   end
 end
