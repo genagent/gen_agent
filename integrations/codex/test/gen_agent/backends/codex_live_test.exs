@@ -1,11 +1,11 @@
 defmodule GenAgent.Backends.CodexLiveTest do
   @moduledoc """
-  Integration tests that invoke the real `codex` CLI. Tagged
-  `:integration` so they do not run in the default `mix test` suite.
+  Live tests that invoke the real `codex` CLI. Tagged
+  `:live` so they do not run in the default `mix test` suite.
 
   Run with:
 
-      mix test --only integration
+      mix test --only live
 
   These tests burn real tokens. Keep them cheap (short prompts, no
   tool calls beyond what Codex auto-does on startup).
@@ -13,7 +13,7 @@ defmodule GenAgent.Backends.CodexLiveTest do
 
   use ExUnit.Case, async: false
 
-  @moduletag :integration
+  @moduletag :live
   @moduletag timeout: 240_000
 
   defmodule LiveCodexAgent do

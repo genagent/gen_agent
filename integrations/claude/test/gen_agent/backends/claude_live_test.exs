@@ -1,11 +1,11 @@
 defmodule GenAgent.Backends.ClaudeLiveTest do
   @moduledoc """
-  Integration tests that invoke the real `claude` CLI. Tagged
-  `:integration` so they do not run in the default `mix test` suite.
+  Live tests that invoke the real `claude` CLI. Tagged
+  `:live` so they do not run in the default `mix test` suite.
 
   Run with:
 
-      mix test --only integration
+      mix test --only live
 
   These tests burn real tokens. Keep them cheap (short prompts, no
   tools, no file operations).
@@ -13,7 +13,7 @@ defmodule GenAgent.Backends.ClaudeLiveTest do
 
   use ExUnit.Case, async: false
 
-  @moduletag :integration
+  @moduletag :live
   @moduletag timeout: 120_000
 
   alias ClaudeWrapper.StreamEvent

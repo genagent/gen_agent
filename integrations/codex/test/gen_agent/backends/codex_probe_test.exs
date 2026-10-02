@@ -4,12 +4,12 @@ defmodule GenAgent.Backends.CodexProbeTest do
   by the real `codex` CLI for a trivial prompt. Used to design the
   event translator from observed data rather than guessed docs.
 
-  Tagged `:integration`; does not run in the default suite.
+  Tagged `:live`; does not run in the default suite.
   """
 
   use ExUnit.Case, async: false
 
-  @moduletag :integration
+  @moduletag :live
   @moduletag timeout: 180_000
 
   alias CodexWrapper.JsonLineEvent
