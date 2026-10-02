@@ -61,7 +61,7 @@ defmodule GenAgent.Backends.OpenAI do
 
     * `:api_key` -- OpenAI API key. Defaults to `System.get_env("OPENAI_API_KEY")`.
       `start_session/1` returns `{:error, :missing_api_key}` when neither
-      provides a non-empty key, unless `:http_fn` is given.
+      provides a non-empty key, unless a one-arity `:http_fn` is supplied.
     * `:model` -- model name. Defaults to `"gpt-5"`.
     * `:instructions` -- system prompt (string). Resent every turn; see note above.
     * `:reasoning_effort` -- an atom or string passed through as
@@ -120,7 +120,7 @@ defmodule GenAgent.Backends.OpenAI do
 
     # A caller-supplied :http_fn replaces the HTTP call (a stub or a proxy that
     # adds credentials), so only the default transport requires a key.
-    if is_nil(api_key) and not Keyword.has_key?(opts, :http_fn) do
+    if is_nil(api_key) and not is_function(Keyword.get(opts, :http_fn), 1) do
       {:error, :missing_api_key}
     else
       build_session(api_key, opts)

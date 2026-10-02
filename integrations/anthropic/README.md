@@ -102,8 +102,8 @@ of each turn (user message on dispatch, assistant message on terminal
 - `:api_key` -- Anthropic API key. Defaults to
   `System.get_env("ANTHROPIC_API_KEY")`. Starting without a non-empty key
   returns `{:error, :missing_api_key}` (through `GenAgent.start_agent/2`,
-  `{:error, {:backend_start_failed, :missing_api_key}}`), unless `:http_fn`
-  is given.
+  `{:error, {:backend_start_failed, :missing_api_key}}`), unless a one-arity
+  `:http_fn` is supplied.
 - `:model` -- model name. Defaults to `"claude-sonnet-4-5"`.
 - `:max_tokens` -- max tokens per turn. Defaults to `1024`.
 - `:system` -- system prompt (string).

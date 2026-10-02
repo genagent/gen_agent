@@ -36,7 +36,7 @@ defmodule GenAgent.Backends.Anthropic do
 
     * `:api_key` -- Anthropic API key. Defaults to `System.get_env("ANTHROPIC_API_KEY")`.
       `start_session/1` returns `{:error, :missing_api_key}` when neither
-      provides a non-empty key, unless `:http_fn` is given.
+      provides a non-empty key, unless a one-arity `:http_fn` is supplied.
     * `:model` -- model name. Defaults to `"claude-sonnet-4-5"`.
     * `:max_tokens` -- max tokens per turn. Defaults to `1024`.
     * `:system` -- system prompt (string).
@@ -93,7 +93,7 @@ defmodule GenAgent.Backends.Anthropic do
 
     # A caller-supplied :http_fn replaces the HTTP call (a stub or a proxy that
     # adds credentials), so only the default transport requires a key.
-    if is_nil(api_key) and not Keyword.has_key?(opts, :http_fn) do
+    if is_nil(api_key) and not is_function(Keyword.get(opts, :http_fn), 1) do
       {:error, :missing_api_key}
     else
       build_session(api_key, opts)

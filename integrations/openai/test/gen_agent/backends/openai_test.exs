@@ -104,6 +104,8 @@ defmodule GenAgent.Backends.OpenAITest do
         assert {:error, :missing_api_key} = OpenAI.start_session([])
         assert {:error, :missing_api_key} = OpenAI.start_session(api_key: "")
         assert {:error, :missing_api_key} = OpenAI.start_session(api_key: "   ")
+        assert {:error, :missing_api_key} = OpenAI.start_session(http_fn: nil)
+        assert {:error, :missing_api_key} = OpenAI.start_session(http_fn: :invalid)
 
         System.put_env("OPENAI_API_KEY", "")
         assert {:error, :missing_api_key} = OpenAI.start_session([])

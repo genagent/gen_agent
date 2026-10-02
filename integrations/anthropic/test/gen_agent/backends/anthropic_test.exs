@@ -78,6 +78,8 @@ defmodule GenAgent.Backends.AnthropicTest do
         assert {:error, :missing_api_key} = Anthropic.start_session([])
         assert {:error, :missing_api_key} = Anthropic.start_session(api_key: "")
         assert {:error, :missing_api_key} = Anthropic.start_session(api_key: "   ")
+        assert {:error, :missing_api_key} = Anthropic.start_session(http_fn: nil)
+        assert {:error, :missing_api_key} = Anthropic.start_session(http_fn: :invalid)
 
         System.put_env("ANTHROPIC_API_KEY", "")
         assert {:error, :missing_api_key} = Anthropic.start_session([])
