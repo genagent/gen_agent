@@ -50,7 +50,7 @@ defmodule MyApp.Coder do
     backend_opts = [
       cwd: path,
       system_prompt: "You are a coding assistant.",
-      permission_mode: :accept_edits
+      permission_mode: :plan
     ]
 
     {:ok, backend_opts, %State{path: path}}
@@ -121,6 +121,52 @@ supplied for the first turn, the backend omits it once `--resume` is used.
 - `:stream_fn` -- a 2-arity function `(prompt, opts) -> Enumerable.t()`
   that replaces the default `&ClaudeWrapper.stream/2`. Intended for tests
   that want to stub out the subprocess.
+
+### Permissions
+
+The backend adds no permission flag unless you set one. With no
+`:permission_mode` and no `:dangerously_skip_permissions`, the `claude` CLI
+applies its own configuration: the host's Claude settings files and its
+default permission mode. The backend does not choose a posture for you, so
+what the agent can do depends on that host configuration.
+
+- `permission_mode: :plan` -- the agent plans instead of editing project
+  files. The quick start uses it because it only asks a question. Plan mode
+  is a CLI permission mode, not a filesystem sandbox: in non-interactive use
+  the CLI can still run shell commands (for example a test runner that writes
+  build output), and it writes its plan file under `~/.claude/plans`. The
+  CLI also ignores `:model` in plan mode and uses its configured model.
+- `permission_mode: :accept_edits` -- file edits are approved automatically.
+  Use it only for agents that are meant to change files.
+- `permission_mode: :bypass_permissions` and
+  `dangerously_skip_permissions: true` -- skip permission checks. Use them
+  only in an environment you already trust the agent with.
+- `:default`, `:dont_ask`, and `:auto` are also accepted and are passed to
+  the CLI as given.
+
+### Environment and working directory
+
+The subprocess inherits the BEAM's full environment and current directory.
+`:env` overrides individual variables on top of the inherited environment;
+it does not replace or sanitize the rest. Set `:cwd` (or `:working_dir`) to
+run the CLI in a specific directory instead of the BEAM's.
+
+### Cancellation
+
+On interrupt, watchdog, and stop, GenAgent cancels its prompt task. With
+the default Port runner this closes the pipes but does not guarantee that
+the CLI and the MCP servers it spawned have exited. To terminate the whole
+process group, add `forcola` and select its runner:
+
+```elixir
+# mix.exs
+{:forcola, "~> 0.4.0"}
+
+# config/config.exs
+config :claude_wrapper, runner: ClaudeWrapper.Runner.Forcola
+```
+
+See `ClaudeWrapper.Runner` for details.
 
 See `GenAgent.Backends.Claude` for the full module docs.
 
