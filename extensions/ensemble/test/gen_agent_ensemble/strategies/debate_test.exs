@@ -269,8 +269,7 @@ defmodule GenAgentEnsemble.Strategies.DebateTest do
         ]
       )
 
-    assert {:error, {%ArgumentError{message: "Debate requires exactly 2 agents" <> _}, _}} =
-             result
+    assert {:error, {:init_failed, :error, ArgumentError}} = result
   end
 
   test "exactly 2 agents required -- 3 agents raises", %{name: name} do
@@ -289,8 +288,7 @@ defmodule GenAgentEnsemble.Strategies.DebateTest do
         ]
       )
 
-    assert {:error, {%ArgumentError{message: "Debate requires exactly 2 agents" <> _}, _}} =
-             result
+    assert {:error, {:init_failed, :error, ArgumentError}} = result
   end
 
   test "distinct names required", %{name: name} do
@@ -308,8 +306,7 @@ defmodule GenAgentEnsemble.Strategies.DebateTest do
         ]
       )
 
-    assert {:error, {%ArgumentError{message: "Debate agent names must be distinct" <> _}, _}} =
-             result
+    assert {:error, {:init_failed, :error, ArgumentError}} = result
   end
 
   test ":first must be one of the agents", %{name: name} do
@@ -328,6 +325,6 @@ defmodule GenAgentEnsemble.Strategies.DebateTest do
         ]
       )
 
-    assert {:error, {%ArgumentError{message: "Debate :first must be one of" <> _}, _}} = result
+    assert {:error, {:init_failed, :error, ArgumentError}} = result
   end
 end

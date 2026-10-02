@@ -106,6 +106,16 @@ defmodule GenAgent.Server do
 
   @impl :gen_statem
   def init(opts) do
+    init_impl(opts)
+  catch
+    kind, reason ->
+      reason_kind = callback_failure_kind(reason)
+      require Logger
+      Logger.error("GenAgent initialization failed (#{kind}: #{inspect(reason_kind)})")
+      {:stop, {:init_failed, kind, reason_kind}}
+  end
+
+  defp init_impl(opts) do
     # Trap exits so that supervisor-initiated shutdowns via
     # `exit(pid, :shutdown)` arrive as {:EXIT, parent, :shutdown}
     # messages and trigger terminate/3 instead of killing the process
@@ -246,7 +256,23 @@ defmodule GenAgent.Server do
   # ---------------------------------------------------------------------------
 
   @impl :gen_statem
-  def handle_event(:enter, old_state, :idle, %Data{} = data) do
+  def handle_event(type, event, state, data) do
+    dispatch_event(type, event, state, data)
+  catch
+    kind, reason ->
+      # A function-clause or callback exception can render all four callback
+      # arguments in the OTP crash report, outside format_status/1's reach.
+      # Stop with a content-free reason instead of exposing the live state.
+      reason_kind = callback_failure_kind(reason)
+      require Logger
+      Logger.error("GenAgent state callback failed (#{kind}: #{inspect(reason_kind)})")
+      {:stop, {:callback_failed, kind, reason_kind}, data}
+  end
+
+  defp callback_failure_kind(%{__struct__: module}) when is_atom(module), do: module
+  defp callback_failure_kind(_), do: :other
+
+  defp dispatch_event(:enter, old_state, :idle, %Data{} = data) do
     if old_state != :idle do
       emit_state_change(data.name, old_state, :idle)
     end
@@ -254,7 +280,7 @@ defmodule GenAgent.Server do
     :keep_state_and_data
   end
 
-  def handle_event(:enter, old_state, :processing, %Data{} = data) do
+  defp dispatch_event(:enter, old_state, :processing, %Data{} = data) do
     emit_state_change(data.name, old_state, :processing)
     {:keep_state_and_data, [{:state_timeout, data.watchdog_ms, :watchdog}]}
   end
@@ -264,11 +290,11 @@ defmodule GenAgent.Server do
   # any user-visible turn. See `c:GenAgent.pre_run/1`.
   # ---------------------------------------------------------------------------
 
-  def handle_event(:internal, :pre_run, :idle, %Data{pre_run_done: true}) do
+  defp dispatch_event(:internal, :pre_run, :idle, %Data{pre_run_done: true}) do
     :keep_state_and_data
   end
 
-  def handle_event(:internal, :pre_run, :idle, %Data{} = data) do
+  defp dispatch_event(:internal, :pre_run, :idle, %Data{} = data) do
     case safely_pre_run(data.agent_module, data.agent_state) do
       {:ok, new_agent_state} ->
         {:keep_state, %{data | agent_state: new_agent_state, pre_run_done: true}}
@@ -285,18 +311,18 @@ defmodule GenAgent.Server do
   # Internal: :process_next -- decide what to do on entry to :idle
   # ---------------------------------------------------------------------------
 
-  def handle_event(:internal, :process_next, :idle, %Data{halted: true}) do
+  defp dispatch_event(:internal, :process_next, :idle, %Data{halted: true}) do
     :keep_state_and_data
   end
 
-  def handle_event(:internal, :process_next, :idle, %Data{self_chain: prompt} = data)
-      when is_binary(prompt) do
+  defp dispatch_event(:internal, :process_next, :idle, %Data{self_chain: prompt} = data)
+       when is_binary(prompt) do
     data = %{data | self_chain: nil}
     request_ref = make_ref()
     try_dispatch(data, request_ref, :self_chain, prompt)
   end
 
-  def handle_event(:internal, :process_next, :idle, %Data{} = data) do
+  defp dispatch_event(:internal, :process_next, :idle, %Data{} = data) do
     case :queue.out(data.mailbox) do
       {:empty, _} ->
         :keep_state_and_data
@@ -317,16 +343,16 @@ defmodule GenAgent.Server do
   # ask -- synchronous prompt
   # ---------------------------------------------------------------------------
 
-  def handle_event({:call, from}, {:ask, prompt}, :idle, %Data{halted: false} = data) do
+  defp dispatch_event({:call, from}, {:ask, prompt}, :idle, %Data{halted: false} = data) do
     request_ref = make_ref()
     try_dispatch(data, request_ref, {:ask, from}, prompt)
   end
 
-  def handle_event({:call, from}, {:ask, prompt}, :idle, %Data{halted: true} = data) do
+  defp dispatch_event({:call, from}, {:ask, prompt}, :idle, %Data{halted: true} = data) do
     queue_ask(data, from, prompt)
   end
 
-  def handle_event({:call, from}, {:ask, prompt}, :processing, %Data{} = data) do
+  defp dispatch_event({:call, from}, {:ask, prompt}, :processing, %Data{} = data) do
     queue_ask(data, from, prompt)
   end
 
@@ -334,7 +360,7 @@ defmodule GenAgent.Server do
   # tell -- async prompt, reply with ref immediately
   # ---------------------------------------------------------------------------
 
-  def handle_event({:call, from}, {:tell, prompt}, :idle, %Data{halted: false} = data) do
+  defp dispatch_event({:call, from}, {:tell, prompt}, :idle, %Data{halted: false} = data) do
     request_ref = make_ref()
 
     case try_dispatch(data, request_ref, :tell, prompt) do
@@ -349,20 +375,20 @@ defmodule GenAgent.Server do
     end
   end
 
-  def handle_event({:call, from}, {:tell, prompt}, :idle, %Data{halted: true} = data) do
+  defp dispatch_event({:call, from}, {:tell, prompt}, :idle, %Data{halted: true} = data) do
     queue_tell(data, from, prompt)
   end
 
-  def handle_event({:call, from}, {:tell, prompt}, :processing, %Data{} = data) do
+  defp dispatch_event({:call, from}, {:tell, prompt}, :processing, %Data{} = data) do
     queue_tell(data, from, prompt)
   end
 
-  def handle_event(
-        {:call, from},
-        {:tell_with_completion, prompt, recipient},
-        :idle,
-        %Data{halted: false} = data
-      ) do
+  defp dispatch_event(
+         {:call, from},
+         {:tell_with_completion, prompt, recipient},
+         :idle,
+         %Data{halted: false} = data
+       ) do
     request_ref = make_ref()
 
     case try_dispatch(data, request_ref, {:tell, recipient}, prompt) do
@@ -374,20 +400,20 @@ defmodule GenAgent.Server do
     end
   end
 
-  def handle_event(
-        {:call, from},
-        {:tell_with_completion, prompt, recipient},
-        state,
-        %Data{} = data
-      )
-      when state in [:idle, :processing] do
+  defp dispatch_event(
+         {:call, from},
+         {:tell_with_completion, prompt, recipient},
+         state,
+         %Data{} = data
+       )
+       when state in [:idle, :processing] do
     queue_tell(data, from, prompt, recipient)
   end
 
   # poll -- check status of a previously-tell'd request
   # ---------------------------------------------------------------------------
 
-  def handle_event({:call, from}, {:poll, ref}, _state, %Data{} = data) do
+  defp dispatch_event({:call, from}, {:poll, ref}, _state, %Data{} = data) do
     reply =
       cond do
         Map.has_key?(data.tell_results, ref) ->
@@ -413,11 +439,11 @@ defmodule GenAgent.Server do
   # status -- read agent status
   # ---------------------------------------------------------------------------
 
-  def handle_event({:call, from}, :get_backend_session, _state, %Data{} = data) do
+  defp dispatch_event({:call, from}, :get_backend_session, _state, %Data{} = data) do
     {:keep_state_and_data, [{:reply, from, data.backend_session}]}
   end
 
-  def handle_event({:call, from}, :status, state, %Data{} = data) do
+  defp dispatch_event({:call, from}, :status, state, %Data{} = data) do
     status = %{
       state: state,
       name: data.name,
@@ -434,7 +460,7 @@ defmodule GenAgent.Server do
     {:keep_state_and_data, [{:reply, from, status}]}
   end
 
-  def handle_event({:call, from}, :runtime_snapshot, state, %Data{} = data) do
+  defp dispatch_event({:call, from}, :runtime_snapshot, state, %Data{} = data) do
     current_request =
       case data.current_request do
         nil ->
@@ -472,46 +498,46 @@ defmodule GenAgent.Server do
   # the in-flight task's handle_response result.
   # ---------------------------------------------------------------------------
 
-  def handle_event(:cast, {:notify, event}, :processing, %Data{} = data),
+  defp dispatch_event(:cast, {:notify, event}, :processing, %Data{} = data),
     do: notify_processing(data, event, nil)
 
-  def handle_event({:call, from}, {:notify_ack, event}, :processing, %Data{} = data),
+  defp dispatch_event({:call, from}, {:notify_ack, event}, :processing, %Data{} = data),
     do: notify_processing(data, event, from)
 
-  def handle_event(:cast, {:notify, event}, :idle, %Data{} = data),
+  defp dispatch_event(:cast, {:notify, event}, :idle, %Data{} = data),
     do: notify_idle(data, event, nil)
 
-  def handle_event({:call, from}, {:notify_ack, event}, :idle, %Data{} = data),
+  defp dispatch_event({:call, from}, {:notify_ack, event}, :idle, %Data{} = data),
     do: notify_idle(data, event, from)
 
   # interrupt -- kill current task, deliver :interrupted
   # ---------------------------------------------------------------------------
 
-  def handle_event(:cast, :interrupt, :processing, %Data{current_request: current} = data)
-      when not is_nil(current) do
+  defp dispatch_event(:cast, :interrupt, :processing, %Data{current_request: current} = data)
+       when not is_nil(current) do
     cleanup_task(current)
     finish_error(data, current, :interrupted)
   end
 
-  def handle_event(:cast, :interrupt, _state, _data), do: :keep_state_and_data
+  defp dispatch_event(:cast, :interrupt, _state, _data), do: :keep_state_and_data
 
-  def handle_event(
-        {:call, from},
-        {:interrupt_request, expected_ref},
-        :processing,
-        %Data{current_request: %{request_ref: current_ref} = current} = data
-      )
-      when expected_ref == current_ref do
+  defp dispatch_event(
+         {:call, from},
+         {:interrupt_request, expected_ref},
+         :processing,
+         %Data{current_request: %{request_ref: current_ref} = current} = data
+       )
+       when expected_ref == current_ref do
     cleanup_task(current)
     {:next_state, state, data, actions} = finish_error(data, current, :interrupted)
     {:next_state, state, data, [{:reply, from, {:ok, :accepted}} | actions]}
   end
 
-  def handle_event({:call, from}, {:interrupt_request, _ref}, :processing, %Data{} = data) do
+  defp dispatch_event({:call, from}, {:interrupt_request, _ref}, :processing, %Data{} = data) do
     {:keep_state, data, [{:reply, from, {:error, :not_current}}]}
   end
 
-  def handle_event({:call, from}, {:interrupt_request, _ref}, _state, %Data{} = data) do
+  defp dispatch_event({:call, from}, {:interrupt_request, _ref}, _state, %Data{} = data) do
     {:keep_state, data, [{:reply, from, {:error, :idle}}]}
   end
 
@@ -519,7 +545,7 @@ defmodule GenAgent.Server do
   # cancel_request -- remove only a queued tell with the exact ref
   # ---------------------------------------------------------------------------
 
-  def handle_event({:call, from}, {:cancel_request, ref}, _state, %Data{} = data) do
+  defp dispatch_event({:call, from}, {:cancel_request, ref}, _state, %Data{} = data) do
     cond do
       current_tell_ref?(data.current_request, ref) ->
         {:keep_state_and_data, [{:reply, from, {:error, :current}}]}
@@ -539,18 +565,23 @@ defmodule GenAgent.Server do
   # resume -- unhalt and re-trigger drain
   # ---------------------------------------------------------------------------
 
-  def handle_event(:cast, :resume, :idle, %Data{halted: true} = data) do
+  defp dispatch_event(:cast, :resume, :idle, %Data{halted: true} = data) do
     data = %{data | halted: false}
     {:keep_state, data, [{:next_event, :internal, :process_next}]}
   end
 
-  def handle_event(:cast, :resume, _state, _data), do: :keep_state_and_data
+  defp dispatch_event(:cast, :resume, _state, _data), do: :keep_state_and_data
 
   # ---------------------------------------------------------------------------
   # Watchdog timeout
   # ---------------------------------------------------------------------------
 
-  def handle_event(:state_timeout, :watchdog, :processing, %Data{current_request: current} = data) do
+  defp dispatch_event(
+         :state_timeout,
+         :watchdog,
+         :processing,
+         %Data{current_request: current} = data
+       ) do
     cleanup_task(current)
     finish_error(data, current, :timeout)
   end
@@ -559,8 +590,13 @@ defmodule GenAgent.Server do
   # Task completion messages
   # ---------------------------------------------------------------------------
 
-  def handle_event(:info, {ref, task_result}, :processing, %Data{current_request: current} = data)
-      when is_reference(ref) and is_map(current) do
+  defp dispatch_event(
+         :info,
+         {ref, task_result},
+         :processing,
+         %Data{current_request: current} = data
+       )
+       when is_reference(ref) and is_map(current) do
     case current do
       %{task_ref: ^ref} ->
         Process.demonitor(ref, [:flush])
@@ -571,8 +607,8 @@ defmodule GenAgent.Server do
     end
   end
 
-  def handle_event(:info, {:DOWN, mon, :process, _pid, _reason}, _state, %Data{} = data)
-      when is_map_key(data.ask_monitors, mon) do
+  defp dispatch_event(:info, {:DOWN, mon, :process, _pid, _reason}, _state, %Data{} = data)
+       when is_map_key(data.ask_monitors, mon) do
     {request_ref, ask_monitors} = Map.pop(data.ask_monitors, mon)
     data = %{data | ask_monitors: ask_monitors}
 
@@ -587,13 +623,13 @@ defmodule GenAgent.Server do
     end
   end
 
-  def handle_event(
-        :info,
-        {:DOWN, ref, :process, _pid, reason},
-        :processing,
-        %Data{current_request: current} = data
-      )
-      when is_reference(ref) and is_map(current) do
+  defp dispatch_event(
+         :info,
+         {:DOWN, ref, :process, _pid, reason},
+         :processing,
+         %Data{current_request: current} = data
+       )
+       when is_reference(ref) and is_map(current) do
     case current do
       %{task_ref: ^ref} ->
         finish_error(data, current, {:task_crashed, reason})
@@ -603,7 +639,7 @@ defmodule GenAgent.Server do
     end
   end
 
-  def handle_event(:info, _msg, _state, _data), do: :keep_state_and_data
+  defp dispatch_event(:info, _msg, _state, _data), do: :keep_state_and_data
 
   defp request_origin({:ask, _from}), do: :ask
   defp request_origin({:tell, _recipient}), do: :tell

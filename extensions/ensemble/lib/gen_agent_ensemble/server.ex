@@ -108,6 +108,15 @@ defmodule GenAgentEnsemble.Server do
 
   @impl true
   def init(opts) do
+    init_impl(opts)
+  catch
+    kind, reason ->
+      reason_kind = callback_failure_kind(reason)
+      Logger.error("[gen_agent_ensemble] initialization failed (#{kind}: #{inspect(reason_kind)})")
+      {:stop, {:init_failed, kind, reason_kind}}
+  end
+
+  defp init_impl(opts) do
     strategy_mod = Keyword.fetch!(opts, :strategy)
     strategy_opts = Keyword.get(opts, :opts, [])
     session_name = Keyword.fetch!(opts, :name)
@@ -164,7 +173,35 @@ defmodule GenAgentEnsemble.Server do
   end
 
   @impl true
-  def handle_call({:tell, prompt, opts}, _from, state) do
+  def handle_call(request, from, state) do
+    safely_callback(fn -> handle_call_impl(request, from, state) end, state)
+  end
+
+  @impl true
+  def handle_cast(message, state) do
+    safely_callback(fn -> handle_cast_impl(message, state) end, state)
+  end
+
+  @impl true
+  def handle_info(message, state) do
+    safely_callback(fn -> handle_info_impl(message, state) end, state)
+  end
+
+  defp safely_callback(fun, state) do
+    fun.()
+  catch
+    kind, reason ->
+      # GenServer exception stacktraces can render callback arguments before
+      # format_status/1 gets to redact the state and message.
+      reason_kind = callback_failure_kind(reason)
+      Logger.error("[gen_agent_ensemble] callback failed (#{kind}: #{inspect(reason_kind)})")
+      {:stop, {:callback_failed, kind, reason_kind}, state}
+  end
+
+  defp callback_failure_kind(%{__struct__: module}) when is_atom(module), do: module
+  defp callback_failure_kind(_), do: :other
+
+  defp handle_call_impl({:tell, prompt, opts}, _from, state) do
     token = mint_token()
     state = start_token(state, token, :tell, {:tell, nil})
 
@@ -175,7 +212,7 @@ defmodule GenAgentEnsemble.Server do
     {:reply, {:ok, token}, state}
   end
 
-  def handle_call({:ask, prompt, opts}, from, state) do
+  defp handle_call_impl({:ask, prompt, opts}, from, state) do
     token = mint_token()
     state = start_token(state, token, :ask, {:ask, from})
 
@@ -186,7 +223,7 @@ defmodule GenAgentEnsemble.Server do
     {:noreply, state}
   end
 
-  def handle_call({:poll, token}, _from, state) do
+  defp handle_call_impl({:poll, token}, _from, state) do
     cond do
       Map.has_key?(state.completed, token) ->
         {result, state} = pop_completed(state, token)
@@ -207,14 +244,14 @@ defmodule GenAgentEnsemble.Server do
     end
   end
 
-  def handle_call(:inbox, _from, state) do
+  defp handle_call_impl(:inbox, _from, state) do
     entries =
       Enum.map(state.completed, fn {token, result} -> {token, result} end)
 
     {:reply, {:ok, entries}, %{state | completed: %{}}}
   end
 
-  def handle_call(:status, _from, state) do
+  defp handle_call_impl(:status, _from, state) do
     base = %{
       session: state.session_name,
       strategy: state.strategy_mod,
@@ -233,8 +270,7 @@ defmodule GenAgentEnsemble.Server do
     {:reply, {:ok, Map.merge(base, extra)}, state}
   end
 
-  @impl true
-  def handle_cast({:notify, event}, state) do
+  defp handle_cast_impl({:notify, event}, state) do
     state =
       if function_exported?(state.strategy_mod, :handle_notify, 2) do
         {ops, strategy_state} =
@@ -248,8 +284,7 @@ defmodule GenAgentEnsemble.Server do
     {:noreply, state}
   end
 
-  @impl true
-  def handle_info({:gen_agent, :completion, _ns_agent, ref, {:ok, response}}, state) do
+  defp handle_info_impl({:gen_agent, :completion, _ns_agent, ref, {:ok, response}}, state) do
     case Map.pop(state.in_flight, ref) do
       {nil, _} ->
         {:noreply, state}
@@ -262,7 +297,7 @@ defmodule GenAgentEnsemble.Server do
     end
   end
 
-  def handle_info({:gen_agent, :completion, _ns_agent, ref, {:error, reason}}, state) do
+  defp handle_info_impl({:gen_agent, :completion, _ns_agent, ref, {:error, reason}}, state) do
     case Map.pop(state.in_flight, ref) do
       {nil, _} ->
         {:noreply, state}
@@ -279,7 +314,7 @@ defmodule GenAgentEnsemble.Server do
     end
   end
 
-  def handle_info({:DOWN, mref, :process, _pid, reason}, state) do
+  defp handle_info_impl({:DOWN, mref, :process, _pid, reason}, state) do
     case Map.pop(state.monitors, mref) do
       {nil, _} ->
         {:noreply, state}
@@ -313,7 +348,7 @@ defmodule GenAgentEnsemble.Server do
     end
   end
 
-  def handle_info({:halt_session, reason}, state) do
+  defp handle_info_impl({:halt_session, reason}, state) do
     state = %{state | halted: true}
 
     emit(
@@ -339,7 +374,7 @@ defmodule GenAgentEnsemble.Server do
     {:stop, :normal, state}
   end
 
-  def handle_info(_msg, state), do: {:noreply, state}
+  defp handle_info_impl(_msg, state), do: {:noreply, state}
 
   defp handle_prompt_response(state, bare_agent, token, response) do
     if active_dispatch?(state, token) do

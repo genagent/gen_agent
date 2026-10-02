@@ -61,7 +61,11 @@ defmodule GenAgent.FormatStatusTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(pid), do: :gen_statem.stop(pid)
+      try do
+        if Process.alive?(pid), do: :gen_statem.stop(pid)
+      catch
+        :exit, _ -> :ok
+      end
     end)
 
     %{pid: pid, name: name, task_sup: task_sup}
@@ -145,6 +149,40 @@ defmodule GenAgent.FormatStatusTest do
       end)
 
     assert log =~ "GenAgent.Server"
+    refute log =~ @secret
+    refute log =~ @prompt
+  end
+
+  test "runtime callback crash does not render callback arguments", %{pid: pid} do
+    Process.unlink(pid)
+    monitor = Process.monitor(pid)
+    assert {:ok, _} = :gen_statem.call(pid, {:tell, @prompt})
+    assert_receive {:backend_prompt, _worker, @prompt}
+    assert {:ok, _} = :gen_statem.call(pid, {:tell, "PROMPT-QUEUED"})
+
+    log =
+      capture_log(fn ->
+        catch_exit(:gen_statem.call(pid, {:unexpected, @prompt}))
+        assert_receive {:DOWN, ^monitor, :process, ^pid, _reason}
+        Logger.flush()
+      end)
+
+    assert log =~ "state callback failed"
+    refute log =~ @secret
+    refute log =~ @prompt
+    refute log =~ "PROMPT-QUEUED"
+  end
+
+  test "initialization failure does not render start arguments" do
+    log =
+      capture_log(fn ->
+        assert {:error, {:init_failed, :error, KeyError}} =
+                 :gen_statem.start(Server, [name: @prompt, api_key: @secret], [])
+
+        Logger.flush()
+      end)
+
+    assert log =~ "initialization failed"
     refute log =~ @secret
     refute log =~ @prompt
   end

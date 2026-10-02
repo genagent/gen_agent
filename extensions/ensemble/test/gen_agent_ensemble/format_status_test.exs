@@ -96,6 +96,37 @@ defmodule GenAgentEnsemble.FormatStatusTest do
     send(worker, {:result, "done"})
   end
 
+  test "runtime callback crash does not render request or strategy state", %{name: name} do
+    {:ok, pid} = start_session(name)
+    Process.unlink(pid)
+    monitor = Process.monitor(pid)
+
+    log =
+      capture_log(fn ->
+        catch_exit(GenServer.call(pid, {:unexpected, @prompt, [api_key: @secret]}))
+        assert_receive {:DOWN, ^monitor, :process, ^pid, _reason}
+        Logger.flush()
+      end)
+
+    assert log =~ "callback failed"
+    refute log =~ @secret
+    refute log =~ @prompt
+  end
+
+  test "initialization failure does not render start arguments" do
+    log =
+      capture_log(fn ->
+        assert {:error, {:init_failed, :error, KeyError}} =
+                 GenServer.start(Server, [name: @prompt, api_key: @secret])
+
+        Logger.flush()
+      end)
+
+    assert log =~ "initialization failed"
+    refute log =~ @secret
+    refute log =~ @prompt
+  end
+
   test "failed dispatch log includes agent and token without prompt or start opts", %{name: name} do
     {:ok, _} = start_session(name)
     assert {:ok, _} = Ensemble.tell(name, "first")

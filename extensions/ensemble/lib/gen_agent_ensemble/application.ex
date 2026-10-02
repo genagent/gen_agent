@@ -41,8 +41,13 @@ defmodule GenAgentEnsemble.Application do
 
       {:error, reason} ->
         Logger.warning(
-          "[gen_agent_ensemble] failed to start #{inspect(name)}: #{inspect(reason)}"
+          "[gen_agent_ensemble] failed to start #{inspect(name)} (#{inspect(failure_kind(reason))})"
         )
     end
   end
+
+  defp failure_kind(reason) when is_atom(reason), do: reason
+  defp failure_kind({kind, _}) when is_atom(kind), do: kind
+  defp failure_kind({kind, _, _}) when is_atom(kind), do: kind
+  defp failure_kind(_), do: :other
 end

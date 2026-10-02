@@ -141,7 +141,7 @@ defmodule GenAgentEnsemble.Strategies.SwitchboardTest do
         ]
       )
 
-    assert {:error, {%ArgumentError{message: "Switchboard duplicate agents: " <> _}, _}} = result
+    assert {:error, {:init_failed, :error, ArgumentError}} = result
   end
 
   test "last-agent-dies halts the session", %{name: name} do
