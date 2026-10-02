@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.2.4...gen_agent_anthropic-v0.2.5) (2026-10-02)
+
+
+### Bug Fixes
+
+* redact sensitive agent state from diagnostics ([#280](https://github.com/genagent/gen_agent/issues/280)) ([3038766](https://github.com/genagent/gen_agent/commit/3038766b00c1854a2db31ca74bba5a48da13c9ad))
+
 ## [0.2.4](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.2.3...gen_agent_anthropic-v0.2.4) (2026-10-01)
 
 
