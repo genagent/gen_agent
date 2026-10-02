@@ -131,6 +131,32 @@ for `gen_agent_claude`. If you want a thin HTTP client for
 single-turn or multi-turn text exchanges, this is the right
 backend.
 
+## Testing your agent
+
+Return `:http_fn` in the backend options from your agent's `init_agent/1`
+(for example, `{:ok, Keyword.take(opts, [:http_fn]), initial_state}`).
+Then application tests can use a canned response with no API key or HTTP calls:
+
+```elixir
+body = %{
+  "id" => "msg_test", "model" => "test-model", "stop_reason" => "end_turn",
+  "content" => [%{"type" => "text", "text" => "hi"}],
+  "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+}
+
+{:ok, _pid} = GenAgent.start_agent(MyApp.Assistant,
+  name: "test-assistant",
+  backend: GenAgent.Backends.Anthropic,
+  http_fn: fn %{body: _request_body} -> {:ok, body} end
+)
+
+{:ok, %GenAgent.Response{text: "hi"}} = GenAgent.ask("test-assistant", "hello")
+:ok = GenAgent.stop("test-assistant")
+```
+
+The stub receives a request map and returns the decoded response body.
+See the [keyless primitive examples](https://github.com/genagent/gen_agent/tree/main/examples/primitives) for callback assertions.
+
 ## Testing
 
 ```bash

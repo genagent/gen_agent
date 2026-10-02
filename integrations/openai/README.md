@@ -163,6 +163,32 @@ means a richer event surface and roundtripping tool results --
 better served by a future version or by using `gen_agent_claude`
 if you want tool-using agents today.
 
+## Testing your agent
+
+Return `:http_fn` in the backend options from your agent's `init_agent/1`
+(for example, `{:ok, Keyword.take(opts, [:http_fn]), initial_state}`).
+Then application tests can use a canned response with no API key or HTTP calls:
+
+```elixir
+body = %{
+  "id" => "resp_test", "model" => "test-model", "status" => "completed",
+  "output" => [%{"type" => "message", "content" => [%{"type" => "output_text", "text" => "hi"}]}],
+  "usage" => %{"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}
+}
+
+{:ok, _pid} = GenAgent.start_agent(MyApp.Assistant,
+  name: "test-assistant",
+  backend: GenAgent.Backends.OpenAI,
+  http_fn: fn %{body: _request_body} -> {:ok, body} end
+)
+
+{:ok, %GenAgent.Response{text: "hi"}} = GenAgent.ask("test-assistant", "hello")
+:ok = GenAgent.stop("test-assistant")
+```
+
+The stub receives a request map and returns the decoded response body.
+See the [keyless primitive examples](https://github.com/genagent/gen_agent/tree/main/examples/primitives) for callback assertions.
+
 ## Testing
 
 ```bash
