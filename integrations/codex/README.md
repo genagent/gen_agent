@@ -100,18 +100,20 @@ turn's `exec resume` command.
 ## Backend options
 
 **Config:**
-- `:binary`, `:working_dir` (aliased as `:cwd`), `:env`, `:timeout`,
-  `:verbose`
+- `:binary`, `:working_dir` (aliased as `:cwd`), `:env`, `:timeout`
 
 **Exec:**
 - `:model`, `:sandbox`, `:approval_policy`, `:full_auto`,
   `:dangerously_bypass_approvals_and_sandbox`, `:skip_git_repo_check`,
-  `:ephemeral`, `:ignore_user_config`, `:profile`,
+  `:ignore_user_config`, `:profile`,
   `:config_overrides`, `:enabled_features`, `:disabled_features`,
   `:images`, `:output_schema`
 
 These settings are forwarded where the CLI supports them. Sandbox and
 approval policy become supported `-c` overrides on resume.
+The backend rejects `ephemeral: true` because its sessions must be resumable,
+and rejects `verbose: true` because the CLI has no such global flag. Explicit
+`false` values remain accepted as no-ops.
 
 | Configuration option | Fresh turn | Resumed turn |
 | --- | --- | --- |

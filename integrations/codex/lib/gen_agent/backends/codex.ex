@@ -27,21 +27,22 @@ defmodule GenAgent.Backends.Codex do
 
   Config-level (forwarded to `CodexWrapper.Config.new/1`):
 
-    * `:binary`, `:working_dir` (aliased as `:cwd`), `:env`, `:timeout`,
-      `:verbose`
+    * `:binary`, `:working_dir` (aliased as `:cwd`), `:env`, `:timeout`
 
   Exec-level (forwarded to `CodexWrapper.Exec`):
 
     * `:model`, `:sandbox`, `:approval_policy`, `:full_auto`,
       `:dangerously_bypass_approvals_and_sandbox`, `:skip_git_repo_check`,
-      `:ephemeral`, `:ignore_user_config`, `:profile`,
+      `:ignore_user_config`, `:profile`,
       `:config_overrides`, `:enabled_features`, `:disabled_features`,
       `:images`, `:output_schema`
 
   Options that cannot be preserved on `exec resume` (`:cd`,
-  `:add_dirs`, `:search`) are rejected by
-  `start_session/1`. Use `:working_dir` / `:cwd` for a directory that
-  persists across turns. Session options are translated into supported
+  `:add_dirs`, `:search`, `:ephemeral`) are rejected by
+  `start_session/1` when enabled. Use `:working_dir` / `:cwd` for a directory that
+  persists across turns. The CLI has no global `--verbose` flag, so
+  `verbose: true` is also rejected. Explicit `false` values remain accepted as
+  no-ops. Session options are translated into supported
   resume arguments; `:sandbox` and `:approval_policy` use config
   overrides because resume does not accept their exec flags.
   `:ignore_user_config` applies to both fresh and resumed turns. The CLI
@@ -64,8 +65,8 @@ defmodule GenAgent.Backends.Codex do
   alias CodexWrapper.{Config, Exec, ExecResume}
   alias GenAgent.Backends.Codex.EventTranslator
 
-  @config_keys [:binary, :working_dir, :env, :timeout, :verbose]
-  @unsupported_resume_keys [:cd, :add_dirs, :search]
+  @config_keys [:binary, :working_dir, :env, :timeout]
+  @unsupported_resume_keys [:cd, :add_dirs, :search, :ephemeral]
   @exec_keys [
     :model,
     :sandbox,
@@ -73,7 +74,6 @@ defmodule GenAgent.Backends.Codex do
     :full_auto,
     :dangerously_bypass_approvals_and_sandbox,
     :skip_git_repo_check,
-    :ephemeral,
     :ignore_user_config,
     :profile,
     :config_overrides,
@@ -100,7 +100,7 @@ defmodule GenAgent.Backends.Codex do
   @impl GenAgent.Backend
   def start_session(opts) do
     {exec_fn, opts} = Keyword.pop(opts, :exec_fn, &default_exec/2)
-    opts = normalize_cwd(opts)
+    opts = opts |> normalize_cwd() |> drop_disabled_options()
     {config_opts, exec_opts} = Keyword.split(opts, @config_keys)
 
     with :ok <- validate_exec_opts(exec_opts) do
@@ -222,9 +222,6 @@ defmodule GenAgent.Backends.Codex do
       {:skip_git_repo_check, true}, e ->
         Exec.skip_git_repo_check(e)
 
-      {:ephemeral, true}, e ->
-        Exec.ephemeral(e)
-
       {:ignore_user_config, true}, e ->
         Exec.ignore_user_config(e)
 
@@ -274,9 +271,6 @@ defmodule GenAgent.Backends.Codex do
         {:skip_git_repo_check, true}, r ->
           ExecResume.skip_git_repo_check(r)
 
-        {:ephemeral, true}, r ->
-          ExecResume.ephemeral(r)
-
         {:ignore_user_config, true}, r ->
           ExecResume.ignore_user_config(r)
 
@@ -313,6 +307,12 @@ defmodule GenAgent.Backends.Codex do
       {nil, rest} -> rest
       {cwd, rest} -> Keyword.put_new(rest, :working_dir, cwd)
     end
+  end
+
+  defp drop_disabled_options(opts) do
+    Enum.reject(opts, fn {key, value} ->
+      key in [:ephemeral, :verbose] and value in [false, nil]
+    end)
   end
 
   defp validate_exec_opts(opts) do
