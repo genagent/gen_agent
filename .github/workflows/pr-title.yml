@@ -1,0 +1,26 @@
+name: PR title
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-title:
+    name: Conventional Commit title
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Test title validator
+        run: python3 scripts/test_pr_title.py
+
+      # Release Please titles follow the same syntax; no bot exemption is needed.
+      # RELEASE_PLEASE_TOKEN enables their PR events (see RELEASING.md).
+      - name: Validate PR title
+        run: python3 scripts/check-pr-title.py "$GITHUB_EVENT_PATH"
