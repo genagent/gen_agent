@@ -199,3 +199,21 @@ jobs:
 
       - name: Resolve and compile published packages together
         run: scripts/consumer-check.sh
+
+  minimum-core:
+    name: ${{ matrix.package }} / minimum Hex core
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [claude, codex]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20"
+          otp-version: "29"
+
+      - name: Test against declared minimum core version
+        run: bash scripts/minimum-core-check.sh ${{ matrix.package }}
