@@ -17,6 +17,21 @@ defmodule GenAgent.Backends.Codex do
   successful result on the session struct, and the
   next turn is dispatched via `ExecResume` with that id.
 
+  ## Usage
+
+  Codex reports `turn.completed.usage` as the thread's running total,
+  including on resumed turns. The session keeps the previous completed
+  total, and `:usage` events carry the increase since then for the five
+  counters Codex reports (`input_tokens`, `output_tokens`,
+  `cached_input_tokens`, `cache_write_input_tokens`,
+  `reasoning_output_tokens`). Sessions from `start_session/1` start from
+  zero. Sessions from `resume_session/2` have no known total, so the
+  first completed turn reports no usage and only records the total.
+  A counter that is missing or decreased (thread reset) produces no delta
+  for that turn, and the new total becomes the baseline. A failed or
+  interrupted turn does not update the baseline, so its consumption is
+  included in the next successful delta.
+
   `terminate_session/1` has no native process to close. GenAgent cancels
   its prompt task on interrupt, watchdog, stop, or agent death, but the
   default Port runner closes pipes without guaranteeing that the CLI and
@@ -87,14 +102,16 @@ defmodule GenAgent.Backends.Codex do
     :config,
     :exec_opts,
     :exec_fn,
-    thread_id: nil
+    thread_id: nil,
+    usage_total: %{}
   ]
 
   @type t :: %__MODULE__{
           config: Config.t(),
           exec_opts: keyword(),
           exec_fn: (String.t(), t() -> {:ok, Enumerable.t()} | {:error, term()}),
-          thread_id: String.t() | nil
+          thread_id: String.t() | nil,
+          usage_total: EventTranslator.usage_total()
         }
 
   @impl GenAgent.Backend
@@ -110,7 +127,8 @@ defmodule GenAgent.Backends.Codex do
        %__MODULE__{
          config: config,
          exec_opts: exec_opts,
-         exec_fn: exec_fn
+         exec_fn: exec_fn,
+         usage_total: EventTranslator.zero_usage_total()
        }}
     end
   end
@@ -134,7 +152,7 @@ defmodule GenAgent.Backends.Codex do
         stream =
           json_events
           |> Stream.each(&checkpoint_raw(&1, checkpoint))
-          |> EventTranslator.translate_stream()
+          |> EventTranslator.translate_stream(usage_baseline: session.usage_total)
 
         {:ok, stream, session}
 
@@ -146,8 +164,17 @@ defmodule GenAgent.Backends.Codex do
   end
 
   @impl GenAgent.Backend
-  def update_session(%__MODULE__{} = session, %{session_id: sid}) when is_binary(sid) do
-    %{session | thread_id: sid}
+  def update_session(%__MODULE__{} = session, data) when is_map(data) do
+    session =
+      case data do
+        %{session_id: sid} when is_binary(sid) -> %{session | thread_id: sid}
+        _ -> session
+      end
+
+    case data do
+      %{usage_total: %{} = total} -> %{session | usage_total: total}
+      _ -> session
+    end
   end
 
   def update_session(%__MODULE__{} = session, _data), do: session
@@ -160,7 +187,7 @@ defmodule GenAgent.Backends.Codex do
   @impl GenAgent.Backend
   def resume_session(session_id, opts) when is_binary(session_id) do
     case start_session(opts) do
-      {:ok, session} -> {:ok, %{session | thread_id: session_id}}
+      {:ok, session} -> {:ok, %{session | thread_id: session_id, usage_total: %{}}}
       {:error, _} = error -> error
     end
   end

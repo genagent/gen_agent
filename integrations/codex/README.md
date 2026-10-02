@@ -221,7 +221,7 @@ Codex CLI's NDJSON output is translated into `GenAgent.Event` values by
 | `item.completed` (`tool_call`) | `:tool_use` |
 | `item.completed` (`tool_result`) | `:tool_result` |
 | `item.completed` (`mcp_tool_call`, `command_execution`, `file_change`) | `:tool_use` + `:tool_result`, carrying the complete item including ID, status and output |
-| `turn.completed` | `:usage` + terminal `:result` (with captured `thread_id` as `session_id`) |
+| `turn.completed` | `:usage` (increase since the previous completed turn) + terminal `:result` (with captured `thread_id` as `session_id`) |
 | `turn.failed` | terminal `:error`; the reason falls back to the most recent `error` event when the failure carries none |
 | `error` | retained, not emitted; becomes a terminal `:error` only if the stream ends without `turn.completed` or `turn.failed` |
 | anything else | filtered |
@@ -235,6 +235,26 @@ can resume the same thread. `item.started` and
 item categories are filtered. A stream that ends with no turn outcome
 and no retained `error` event returns `:no_terminal_event`; the wrapper
 stream API does not report the subprocess exit code.
+
+## Usage
+
+Codex reports `turn.completed.usage` as the thread's running total, so a
+resumed turn reports the whole thread so far. The backend stores the previous
+completed total on the session and `response.usage` holds the increase since
+then. All five counters Codex emits are kept: `input_tokens`, `output_tokens`,
+`cached_input_tokens`, `cache_write_input_tokens`, `reasoning_output_tokens`.
+
+  * A session from `start_session/1` starts from zero, so the first turn
+    reports its full usage.
+  * A session from `resume_session/2` has no known earlier total. The first
+    completed turn reports no usage and records the total; later turns report
+    deltas.
+  * A counter that is missing from either completed total, or that decreased
+    (a thread reset), has no delta for that turn. The new total becomes the
+    baseline. Negative values are never emitted.
+  * A failed or interrupted turn does not update the baseline. Tokens it used
+    are included in the next successful turn's delta, because completion
+    totals cannot separate them.
 
 ## Testing
 

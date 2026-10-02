@@ -136,6 +136,56 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
     assert followup.session_id == id
     assert initial.text == "ok"
     assert followup.text == "42"
+
+    # Recorded totals are 14956 then 29938; the follow-up reports the difference.
+    assert initial.usage.input_tokens == 14_956
+    assert followup.usage.input_tokens == 14_982
+    assert followup.usage.cached_input_tokens == 12_160
+    assert followup.usage.output_tokens == 5
+    assert followup.usage.cache_write_input_tokens == 0
+    assert followup.usage.reasoning_output_tokens == 0
+  end
+
+  test "host-recorded live totals report a per-turn delta of 16294" do
+    first = [
+      event("thread.started", %{"thread_id" => "thread-live"}),
+      event("turn.completed", %{
+        "usage" => %{
+          "input_tokens" => 14_985,
+          "cached_input_tokens" => 11_008,
+          "cache_write_input_tokens" => 0,
+          "output_tokens" => 5,
+          "reasoning_output_tokens" => 0
+        }
+      })
+    ]
+
+    second = [
+      event("thread.started", %{"thread_id" => "thread-live"}),
+      event("turn.completed", %{
+        "usage" => %{
+          "input_tokens" => 31_279,
+          "cached_input_tokens" => 25_088,
+          "cache_write_input_tokens" => 0,
+          "output_tokens" => 11,
+          "reasoning_output_tokens" => 0
+        }
+      })
+    ]
+
+    {:ok, agent} = Agent.start_link(fn -> [first, second] end)
+
+    name =
+      start_codex_agent(fn _, _ ->
+        {:ok, Agent.get_and_update(agent, fn [h | t] -> {h, t} end)}
+      end)
+
+    assert {:ok, one} = GenAgent.ask(name, "one")
+    assert {:ok, two} = GenAgent.ask(name, "two")
+    assert one.usage.input_tokens == 14_985
+    assert two.usage.input_tokens == 16_294
+    assert two.usage.cached_input_tokens == 14_080
+    assert two.usage.output_tokens == 6
   end
 
   describe "round trip through GenAgent.ask/2" do
