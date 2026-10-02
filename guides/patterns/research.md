@@ -126,8 +126,17 @@ defmodule Research.Agent do
      }}
   end
 
-  # Any error at any phase halts with the reason visible on state.
+  # A resumed terminal agent preserves its report and halts again.
+  def handle_response(_ref, _response, %State{phase: phase} = state)
+      when phase in [:done, :failed], do: {:halt, state}
+
+  # Errors after resume preserve the terminal phase too.
   @impl true
+  def handle_error(_ref, reason, %State{phase: phase} = state)
+      when phase in [:done, :failed] do
+    {:halt, %{state | last_error: reason}}
+  end
+
   def handle_error(_ref, reason, %State{} = state) do
     {:halt, %{state | last_error: reason, phase: :failed}}
   end
@@ -178,6 +187,9 @@ defmodule Research.Agent do
   end
 end
 ```
+
+Resuming a terminal agent and sending another ask/tell preserves its report
+and terminal phase, then halts again.
 
 ## Using it
 
