@@ -11,8 +11,10 @@ defmodule GenAgent.Backends.Codex do
   Codex reports its persistent thread identifier as `thread_id` in the
   first `thread.started` event of a turn, not in the terminal
   `turn.completed` event. The `EventTranslator` captures it and
-  injects it into the `:result` event as `session_id`. This backend's
-  `update_session/2` then records it on the session struct, and the
+  injects it into the `:result` event as `session_id`. Under GenAgent,
+  `prompt/3` checkpoints the raw ID at `thread.started`, before a terminal
+  event or interruption. This backend's `update_session/2` records a
+  successful result on the session struct, and the
   next turn is dispatched via `ExecResume` with that id.
 
   `terminate_session/1` has no native process to close. GenAgent cancels
@@ -115,9 +117,26 @@ defmodule GenAgent.Backends.Codex do
 
   @impl GenAgent.Backend
   def prompt(%__MODULE__{} = session, prompt) when is_binary(prompt) do
+    do_prompt(session, prompt, nil)
+  end
+
+  # Older supported core versions do not declare these optional callbacks.
+  if {:prompt, 3} in GenAgent.Backend.behaviour_info(:callbacks), do: @impl(GenAgent.Backend)
+
+  def prompt(%__MODULE__{} = session, prompt, %{checkpoint: checkpoint})
+      when is_binary(prompt) and is_function(checkpoint, 1) do
+    do_prompt(session, prompt, checkpoint)
+  end
+
+  defp do_prompt(session, prompt, checkpoint) do
     case session.exec_fn.(prompt, session) do
       {:ok, json_events} ->
-        {:ok, EventTranslator.translate_stream(json_events), session}
+        stream =
+          json_events
+          |> Stream.each(&checkpoint_raw(&1, checkpoint))
+          |> EventTranslator.translate_stream()
+
+        {:ok, stream, session}
 
       {:error, reason} ->
         {:error, reason}
@@ -133,6 +152,11 @@ defmodule GenAgent.Backends.Codex do
 
   def update_session(%__MODULE__{} = session, _data), do: session
 
+  if {:checkpoint_session, 2} in GenAgent.Backend.behaviour_info(:callbacks),
+    do: @impl(GenAgent.Backend)
+
+  def checkpoint_session(%__MODULE__{} = session, sid), do: %{session | thread_id: sid}
+
   @impl GenAgent.Backend
   def resume_session(session_id, opts) when is_binary(session_id) do
     case start_session(opts) do
@@ -143,6 +167,26 @@ defmodule GenAgent.Backends.Codex do
 
   @impl GenAgent.Backend
   def terminate_session(%__MODULE__{}), do: :ok
+
+  defp checkpoint_raw(_event, nil), do: :ok
+
+  defp checkpoint_raw(%{event_type: "thread.started", data: %{"thread_id" => id}}, checkpoint),
+    do: checkpoint_present_id(id, checkpoint)
+
+  defp checkpoint_raw(%{event_type: type, data: %{"thread_id" => id}}, checkpoint)
+       when type in ["turn.completed", "turn.failed", "error"],
+       do: checkpoint_present_id(id, checkpoint)
+
+  defp checkpoint_raw(_event, _checkpoint), do: :ok
+
+  defp checkpoint_present_id(nil, _checkpoint), do: :ok
+
+  defp checkpoint_present_id(id, checkpoint) do
+    case checkpoint.(id) do
+      :ok -> :ok
+      {:error, reason} -> raise ArgumentError, "Codex session checkpoint rejected: #{reason}"
+    end
+  end
 
   # ---------------------------------------------------------------------------
   # Default exec_fn -- routes between Exec and ExecResume based on thread_id

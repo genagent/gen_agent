@@ -150,6 +150,75 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
       assert_receive {:exec_call, "turn 3", "thread-persist"}
     end
 
+    test "resumes after turn.failed using the earlier thread.started ID" do
+      observer = self()
+
+      exec_fn = fn prompt, session ->
+        send(observer, {:exec_call, prompt, session.thread_id})
+
+        if prompt == "fail" do
+          {:ok,
+           [
+             event("thread.started", %{"thread_id" => "failed-thread"}),
+             event("turn.failed", %{"error" => "provider failed"})
+           ]}
+        else
+          {:ok,
+           [
+             event("thread.started", %{"thread_id" => "failed-thread"}),
+             event("turn.completed", %{})
+           ]}
+        end
+      end
+
+      name = start_codex_agent(exec_fn)
+      assert {:error, "provider failed"} = GenAgent.ask(name, "fail")
+      assert_receive {:exec_call, "fail", nil}
+      assert {:ok, _} = GenAgent.ask(name, "next")
+      assert_receive {:exec_call, "next", "failed-thread"}
+    end
+
+    test "thread.started checkpoint survives an interrupted Codex stream" do
+      observer = self()
+
+      exec_fn = fn prompt, session ->
+        send(observer, {:exec_call, prompt, session.thread_id})
+
+        if prompt == "hold" do
+          {:ok,
+           Stream.concat(
+             [event("thread.started", %{"thread_id" => "interrupted-thread"})],
+             Stream.map([:wait], fn _ ->
+               send(observer, :codex_waiting)
+               Process.sleep(30_000)
+               event("turn.completed", %{})
+             end)
+           )}
+        else
+          {:ok, [event("turn.completed", %{})]}
+        end
+      end
+
+      name = start_codex_agent(exec_fn)
+      assert {:ok, ref} = GenAgent.tell(name, "hold")
+      assert_receive :codex_waiting
+      assert {:ok, :accepted} = GenAgent.interrupt_request(name, ref)
+      assert {:error, :interrupted} = GenAgent.poll(name, ref)
+      assert {:ok, _} = GenAgent.ask(name, "next")
+      assert_receive {:exec_call, "next", "interrupted-thread"}
+    end
+
+    test "a malformed raw Codex thread ID fails the turn" do
+      exec_fn = fn _prompt, _session ->
+        {:ok, [event("thread.started", %{"thread_id" => "bad\nthread"})]}
+      end
+
+      name = start_codex_agent(exec_fn)
+      assert {:error, :invalid_session_id} = GenAgent.ask(name, "go")
+      session = :gen_statem.call(GenAgent.whereis(name), :get_backend_session)
+      assert session.thread_id == nil
+    end
+
     test "delivers :no_terminal_event when turn.completed is missing" do
       exec_fn = fn _prompt, _session ->
         {:ok,
