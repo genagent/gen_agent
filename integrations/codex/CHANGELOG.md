@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.2.5...gen_agent_codex-v0.3.0) (2026-10-02)
+
+
+### Features
+
+* **codex:** forward config isolation and profile options ([#277](https://github.com/genagent/gen_agent/issues/277)) ([bd75f86](https://github.com/genagent/gen_agent/commit/bd75f86d6c17a5233e75597fb0f212a01bedcf59))
+
 ## [0.2.5](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.2.4...gen_agent_codex-v0.2.5) (2026-10-01)
 
 
