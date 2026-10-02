@@ -543,9 +543,25 @@ defmodule GenAgent do
   reserved slot outside the prompt count limit, but its payload must fit
   `:max_pending_prompt_bytes`.
 
-  Any other option is forwarded to `c:init_agent/1`. GenAgent-level
-  knobs (like `:watchdog_ms`) are recognized and stripped before
-  forwarding.
+  `:watchdog_ms` is the per-turn deadline in milliseconds (default
+  `600_000`). It must be a positive integer or `:infinity`, which disables
+  the watchdog. `:max_tell_results` is the number of completed `tell/2`
+  results kept for `poll/2` (default `100`). It must be a non-negative
+  integer; the oldest results are evicted first and zero retains none.
+
+  Invalid values for these options and the capture and pending limits make
+  `start_agent/2` return `{:error, {:init_failed, :error, ArgumentError}}`.
+  A missing `:name` or `:backend` raises `KeyError` in the caller.
+  An explicit `nil` for a limit is treated as unset and uses the default.
+
+  The reserved keys `:name`, `:backend`, `:watchdog_ms`,
+  `:max_tell_results`, `:max_events_per_turn`,
+  `:max_event_bytes_per_turn`, `:event_retention`, `:max_pending_prompts`,
+  `:max_pending_prompt_bytes`, `:max_pending_notifications`, and
+  `:max_pending_notification_bytes` are consumed and not forwarded. Any
+  other option, including `:task_supervisor`, is forwarded to
+  `c:init_agent/1`. `start_agent/2` always uses `GenAgent.TaskSupervisor`;
+  use `child_spec/2` to select a different task supervisor.
 
   The child uses `restart: :temporary`. If it exits, call `start_agent/2`
   explicitly to create another agent; its previous state is not restored.

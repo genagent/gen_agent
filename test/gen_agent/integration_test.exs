@@ -131,6 +131,110 @@ defmodule GenAgent.IntegrationTest do
         GenAgent.start_agent(SimpleAgent, name: "no-backend")
       end
     end
+
+    test "rejects invalid :watchdog_ms at start" do
+      for value <- [-5, 0, "600000", :never, 1.5] do
+        assert {:error, {:init_failed, :error, ArgumentError}} =
+                 GenAgent.start_agent(SimpleAgent,
+                   name: unique_name("bad-watchdog"),
+                   backend: GenAgent.Backends.Mock,
+                   watchdog_ms: value
+                 )
+      end
+    end
+
+    test "rejects invalid :max_tell_results at start" do
+      for value <- [-1, "100", :infinity, :unlimited, 1.5] do
+        assert {:error, {:init_failed, :error, ArgumentError}} =
+                 GenAgent.start_agent(SimpleAgent,
+                   name: unique_name("bad-tell-results"),
+                   backend: GenAgent.Backends.Mock,
+                   max_tell_results: value
+                 )
+      end
+    end
+
+    test "accepts boundary :watchdog_ms values" do
+      for value <- [1, :infinity] do
+        name = unique_name("ok-watchdog")
+
+        assert {:ok, _pid} =
+                 GenAgent.start_agent(SimpleAgent,
+                   name: name,
+                   backend: GenAgent.Backends.Mock,
+                   watchdog_ms: value,
+                   scripts: [[Event.new(:result, %{text: "ok"})]]
+                 )
+
+        on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+      end
+    end
+
+    test "max_tell_results 0 retains nothing and 1 keeps only the newest" do
+      for {limit, expected} <- [{0, :evicted}, {1, :kept}] do
+        name = unique_name("tell-results")
+
+        {:ok, _pid} =
+          GenAgent.start_agent(SimpleAgent,
+            name: name,
+            backend: GenAgent.Backends.Mock,
+            max_tell_results: limit,
+            scripts: [
+              [Event.new(:result, %{text: "a"})],
+              [Event.new(:result, %{text: "b"})]
+            ]
+          )
+
+        on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+        {:ok, first} = GenAgent.tell_with_completion(name, "one")
+        {:ok, second} = GenAgent.tell_with_completion(name, "two")
+        assert_receive {:gen_agent, :completion, ^name, ^first, {:ok, _}}, 1_000
+        assert_receive {:gen_agent, :completion, ^name, ^second, {:ok, _}}, 1_000
+
+        assert {:error, :not_found} = GenAgent.poll(name, first)
+
+        case expected do
+          :evicted -> assert {:error, :not_found} = GenAgent.poll(name, second)
+          :kept -> assert {:ok, :completed, _} = GenAgent.poll(name, second)
+        end
+      end
+    end
+
+    test "start_agent/2 forwards :task_supervisor to init_agent/1 but strips reserved keys" do
+      test_pid = self()
+
+      defmodule EchoOpts do
+        use GenAgent
+
+        @impl true
+        def init_agent(opts) do
+          send(opts[:test_pid], {:init_opts, Keyword.delete(opts, :test_pid)})
+          {:ok, [scripts: []], []}
+        end
+
+        @impl true
+        def handle_response(_ref, _response, state), do: {:noreply, state}
+      end
+
+      name = unique_name("echo")
+
+      {:ok, _pid} =
+        GenAgent.start_agent(EchoOpts,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          task_supervisor: :some_supervisor,
+          watchdog_ms: 1_000,
+          max_tell_results: 5,
+          foo: :bar,
+          test_pid: test_pid
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+      assert_receive {:init_opts, opts}, 1_000
+      assert Enum.sort(opts) == [foo: :bar, task_supervisor: :some_supervisor]
+    end
   end
 
   describe "stop/1" do
