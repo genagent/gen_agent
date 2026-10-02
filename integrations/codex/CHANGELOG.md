@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.4](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.3...gen_agent_codex-v0.4.4) (2026-10-02)
+
+
+### Bug Fixes
+
+* **codex:** reject ephemeral and verbose session options ([#368](https://github.com/genagent/gen_agent/issues/368)) ([4935fc3](https://github.com/genagent/gen_agent/commit/4935fc3e3c0fb72f9025398d8748250c658e572a))
+
 ## [0.4.3](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.2...gen_agent_codex-v0.4.3) (2026-10-02)
 
 
