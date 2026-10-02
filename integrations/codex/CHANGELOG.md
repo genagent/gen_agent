@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.3.0...gen_agent_codex-v0.4.0) (2026-10-02)
+
+
+### Features
+
+* **core:** checkpoint CLI sessions during active turns ([52f2919](https://github.com/genagent/gen_agent/commit/52f2919f2e677a14b428b05f1ad6dd1628741cd0))
+
 ## [0.3.0](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.2.5...gen_agent_codex-v0.3.0) (2026-10-02)
 
 
