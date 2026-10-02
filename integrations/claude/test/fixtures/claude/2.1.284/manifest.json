@@ -1,0 +1,141 @@
+{
+  "cli": "claude",
+  "cli_version": "2.1.284",
+  "recorded": "2026-10-01",
+  "platform": "darwin",
+  "workspace": "empty directory, project settings only, no MCP servers",
+  "sanitization": "Absolute paths replaced: the workspace with /workspace, the home directory with /home/user, temporary directories with /tmp/claude, and derived project-directory slugs with -workspace. Session ids and UUIDs are the CLI's own random values. No other edits.",
+  "scenarios": {
+    "text": {
+      "argv": [
+        "claude",
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "project",
+        "--model",
+        "haiku",
+        "Reply exactly pong."
+      ],
+      "exit_status": 0,
+      "lines": 6,
+      "models": [
+        "claude-haiku-4-5-20251001"
+      ]
+    },
+    "tool-partial": {
+      "argv": [
+        "claude",
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "project",
+        "--allowedTools",
+        "Bash(printf:*)",
+        "--include-partial-messages",
+        "--model",
+        "haiku",
+        "Run the shell command: printf claude-fixture . Then report its output in one line."
+      ],
+      "exit_status": 0,
+      "lines": 50,
+      "models": [
+        "claude-haiku-4-5-20251001"
+      ]
+    },
+    "subagent": {
+      "argv": [
+        "claude",
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "project",
+        "--allowedTools",
+        "Task",
+        "--model",
+        "haiku",
+        "Use the Task tool to launch a general-purpose subagent whose only job is to reply with the word nested. Then report what it said in one line."
+      ],
+      "exit_status": 0,
+      "lines": 20,
+      "models": [
+        "claude-haiku-4-5-20251001"
+      ]
+    },
+    "plan": {
+      "argv": [
+        "claude",
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "project",
+        "--permission-mode",
+        "plan",
+        "Plan, in two short steps, how you would add a line to a README file. Do not edit anything."
+      ],
+      "exit_status": 0,
+      "lines": 12,
+      "models": [
+        "claude-opus-5-5"
+      ]
+    },
+    "error-max-turns": {
+      "argv": [
+        "claude",
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "project",
+        "--allowedTools",
+        "Bash(printf:*)",
+        "--max-turns",
+        "1",
+        "--model",
+        "haiku",
+        "You must use the Bash tool for this. Do not answer from memory. First run exactly: printf one"
+      ],
+      "exit_status": 1,
+      "lines": 8,
+      "models": [
+        "claude-haiku-4-5-20251001"
+      ]
+    },
+    "json-schema": {
+      "argv": [
+        "claude",
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "project",
+        "--model",
+        "haiku",
+        "--json-schema",
+        "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}},\"required\":[\"answer\"]}",
+        "What is 2+2? Put the answer in the answer field."
+      ],
+      "exit_status": 0,
+      "lines": 8,
+      "models": [
+        "claude-haiku-4-5-20251001"
+      ]
+    }
+  }
+}

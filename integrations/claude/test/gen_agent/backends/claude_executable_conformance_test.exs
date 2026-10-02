@@ -234,6 +234,118 @@ defmodule GenAgent.Backends.ClaudeExecutableConformanceTest do
     end
   end
 
+  test "named recordings preserve bytes and recorded exit status", context do
+    directory = Path.expand("../../fixtures/claude/2.1.284", __DIR__)
+    manifest = directory |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
+
+    for {scenario, metadata} <- manifest["scenarios"] do
+      assert {output, status} =
+               System.cmd(context.binary, metadata["argv"],
+                 env: [
+                   {"GEN_AGENT_RECORDING_DIR", directory},
+                   {"GEN_AGENT_RECORDING", scenario},
+                   {"GEN_AGENT_RECORDING_EXIT_STATUS", to_string(metadata["exit_status"])}
+                 ]
+               )
+
+      assert output == File.read!(Path.join(directory, scenario <> ".jsonl"))
+      assert status == metadata["exit_status"]
+
+      name =
+        start_agent(context,
+          env: [
+            {"GEN_AGENT_RECORDING_DIR", directory},
+            {"GEN_AGENT_RECORDING", scenario},
+            {"GEN_AGENT_RECORDING_EXIT_STATUS", to_string(metadata["exit_status"])}
+          ]
+        )
+
+      recorded_result =
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["type"] == "result"))
+
+      if metadata["exit_status"] == 0 do
+        assert {:ok, response} = GenAgent.ask(name, "replay")
+        assert response.session_id == recorded_result["session_id"]
+        assert response.text == recorded_result["result"]
+      else
+        # Issue #118: the recorded errors array currently yields message :unknown.
+        assert {:error, %{message: :unknown, subtype: "error_max_turns", session_id: session_id}} =
+                 GenAgent.ask(name, "replay")
+
+        assert session_id == recorded_result["session_id"]
+      end
+    end
+  end
+
+  for action <- [:interrupt, :watchdog, :stop] do
+    @tag action: action
+    test "#{action} exits the fixture and child with the Forcola runner", context do
+      Application.put_env(:claude_wrapper, :runner, ClaudeWrapper.Runner.Forcola)
+      assert ClaudeWrapper.Runner.impl() == ClaudeWrapper.Runner.Forcola
+      pid_file = Path.join(context.directory, "process.pids")
+
+      on_exit(fn ->
+        if File.exists?(pid_file) do
+          for pid <- read_pids(pid_file), os_alive?(pid) do
+            System.cmd("kill", ["-KILL", pid], stderr_to_stdout: true)
+          end
+        end
+      end)
+
+      watchdog_ms = if context.action == :watchdog, do: 2_000, else: 10_000
+      name = start_agent(context, watchdog_ms: watchdog_ms)
+      assert {:ok, ref} = GenAgent.tell(name, "process-tree")
+      assert_receive {:stream_event, :text, task_pid}, 1_000
+      task_monitor = Process.monitor(task_pid)
+      pids = read_pids(pid_file)
+      assert length(pids) == 2
+      assert Enum.all?(pids, &os_alive?/1)
+
+      case context.action do
+        :interrupt ->
+          assert :ok = GenAgent.interrupt(name)
+          assert_receive {:failed, ^ref, :interrupted}, 1_000
+          assert {:error, :interrupted} = GenAgent.poll(name, ref)
+
+        :watchdog ->
+          assert_receive {:failed, ^ref, :timeout}, 3_000
+          assert {:error, :timeout} = GenAgent.poll(name, ref)
+
+        :stop ->
+          assert :ok = GenAgent.stop(name)
+      end
+
+      assert_killed_or_gone(task_monitor, task_pid, 1_000)
+      assert_os_exited(pids, System.monotonic_time(:millisecond) + 5_000)
+    end
+  end
+
+  defp read_pids(path), do: path |> File.read!() |> String.split("\n", trim: true)
+
+  defp os_alive?(pid) do
+    {_output, status} = System.cmd("kill", ["-0", pid], stderr_to_stdout: true)
+    status == 0
+  end
+
+  defp assert_os_exited(pids, deadline) do
+    alive = Enum.filter(pids, &os_alive?/1)
+
+    cond do
+      alive == [] ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("OS processes still alive: #{inspect(alive)}")
+
+      true ->
+        Process.sleep(20)
+        assert_os_exited(alive, deadline)
+    end
+  end
+
   defp args(directory, mode) do
     directory
     |> Path.join("#{mode}.args")
