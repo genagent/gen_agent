@@ -185,3 +185,17 @@ jobs:
 
       - name: Build all packages with Hex dependencies
         run: scripts/package-check.sh
+
+  published-consumer:
+    name: Published package consumer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20"
+          otp-version: "29"
+
+      - name: Resolve and compile published packages together
+        run: scripts/consumer-check.sh
