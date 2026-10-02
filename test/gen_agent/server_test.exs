@@ -408,6 +408,61 @@ defmodule GenAgent.ServerTest do
     end
   end
 
+  describe "unavailable task supervisor" do
+    test "fails an ask without stopping the agent and recovers when the supervisor returns" do
+      sup_name = :"task_sup_recovery_#{System.unique_integer([:positive])}"
+      {:ok, task_sup} = Task.Supervisor.start_link(name: sup_name)
+      retry = fn _ref, _reason, state -> {:prompt, "retry", state} end
+
+      pid =
+        start_server(sup_name, [result_events("recovered")],
+          error_handler: retry,
+          notify_pid: self()
+        )
+
+      Supervisor.stop(task_sup)
+      assert Process.whereis(sup_name) == nil
+
+      assert {:error, :task_supervisor_unavailable} = ask(pid, "first")
+      assert_receive {:test_agent, :handle_error, {_ref, :task_supervisor_unavailable}}
+      assert Process.alive?(pid)
+      assert status(pid).state == :idle
+      assert status(pid).current_request == nil
+      assert length(status(pid).agent_state.errors) == 1
+
+      {:ok, replacement} = Task.Supervisor.start_link(name: sup_name)
+      on_exit(fn -> if Process.alive?(replacement), do: Supervisor.stop(replacement) end)
+
+      assert {:ok, %{text: "recovered"}} = ask(pid, "again")
+    end
+
+    test "fails a queued completion request after resume and retains its result" do
+      responder = fn _ref, _response, state -> {:halt, state} end
+
+      {:ok, task_sup} = Task.Supervisor.start_link()
+
+      pid =
+        start_server(task_sup, [result_events("halt")], responder: responder, notify_pid: self())
+
+      assert {:ok, _} = ask(pid, "first")
+      assert status(pid).halted
+      {:ok, ref} = :gen_statem.call(pid, {:tell_with_completion, "queued", self()})
+      assert {:ok, :pending} = poll(pid, ref)
+
+      Supervisor.stop(task_sup)
+      refute Process.alive?(task_sup)
+      resume(pid)
+
+      assert_receive {:gen_agent, :completion, "test", ^ref,
+                      {:error, :task_supervisor_unavailable}}
+
+      assert_receive {:test_agent, :handle_error, {^ref, :task_supervisor_unavailable}}
+      assert {:error, :task_supervisor_unavailable} = poll(pid, ref)
+      assert status(pid).state == :idle
+      refute status(pid).halted
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Backend session update from :result event data
   # ---------------------------------------------------------------------------

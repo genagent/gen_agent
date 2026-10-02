@@ -258,6 +258,9 @@ defmodule GenAgent do
     * The event stream ended without a terminal `:result` or `:error` event.
     * The backend's event stream emitted a terminal `:error` event.
     * The prompt task crashed (delivered as `{:task_crashed, reason}`).
+    * The configured task supervisor was unavailable before the turn started
+      (`:task_supervisor_unavailable`). An immediate retry returned here is
+      discarded to avoid a loop; a later request may retry after recovery.
     * The watchdog fired (`:timeout`).
     * The in-flight request was interrupted by `interrupt/1` (`:interrupted`).
 
