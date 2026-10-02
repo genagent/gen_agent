@@ -162,8 +162,8 @@ defmodule GenAgent.Server do
     validate_pending_limit!(max_pending_notifications, :max_pending_notifications)
     validate_pending_limit!(max_pending_notification_bytes, :max_pending_notification_bytes)
 
-    with {:ok, backend_opts, agent_state} <- module.init_agent(init_opts),
-         {:ok, backend_session} <- backend.start_session(backend_opts) do
+    with {:ok, backend_opts, agent_state} <- initialize_agent(module, init_opts),
+         {:ok, backend_session} <- initialize_backend(backend, backend_opts) do
       data = %Data{
         name: name,
         backend: backend,
@@ -185,8 +185,23 @@ defmodule GenAgent.Server do
       emit_state_change(name, nil, :idle)
       {:ok, :idle, data, [{:next_event, :internal, :pre_run}]}
     else
-      {:error, reason} -> {:stop, {:backend_start_failed, reason}}
-      other -> {:stop, {:init_agent_failed, other}}
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp initialize_agent(module, opts) do
+    case module.init_agent(opts) do
+      {:ok, backend_opts, agent_state} -> {:ok, backend_opts, agent_state}
+      {:error, reason} -> {:error, {:init_agent_failed, reason}}
+      other -> {:error, {:init_agent_failed, other}}
+    end
+  end
+
+  defp initialize_backend(backend, opts) do
+    case backend.start_session(opts) do
+      {:ok, session} -> {:ok, session}
+      {:error, reason} -> {:error, {:backend_start_failed, reason}}
+      other -> {:error, {:backend_start_failed, other}}
     end
   end
 

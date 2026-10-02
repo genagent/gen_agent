@@ -310,8 +310,8 @@ defmodule GenAgent.WorkspaceGuideTest do
     refute File.exists?(cwd)
   end
 
-  test "invalid ID startup reports the current runtime error label", ctx do
-    assert {:error, {:backend_start_failed, {:invalid_session_id, "../escape"}}} =
+  test "invalid ID startup reports an agent initialization failure", ctx do
+    assert {:error, {:init_agent_failed, {:invalid_session_id, "../escape"}}} =
              GenAgent.start_agent(Agent,
                name: "workspace-invalid-id",
                backend: Backend,

@@ -8,6 +8,29 @@ defmodule GenAgent.ServerTest do
   alias GenAgent.Server
   alias GenAgent.Support.TestAgent
 
+  defmodule StartupAgent do
+    use GenAgent
+
+    @impl true
+    def init_agent(opts), do: Keyword.fetch!(opts, :return)
+
+    @impl true
+    def handle_response(_ref, _response, state), do: {:noreply, state}
+  end
+
+  defmodule StartupBackend do
+    @behaviour GenAgent.Backend
+
+    @impl true
+    def start_session(return), do: return
+
+    @impl true
+    def prompt(_session, _prompt), do: {:error, :unused}
+
+    @impl true
+    def terminate_session(_session), do: :ok
+  end
+
   setup do
     sup_name = :"task_sup_#{System.unique_integer([:positive])}"
     task_sup = start_supervised!({Task.Supervisor, name: sup_name})
@@ -64,6 +87,34 @@ defmodule GenAgent.ServerTest do
   # ---------------------------------------------------------------------------
 
   describe "startup" do
+    test "attributes init_agent errors and malformed returns to the agent module" do
+      for {return, expected} <- [
+            {{:error, :refused}, :refused},
+            {:garbage, :garbage}
+          ] do
+        assert {:error, {:init_agent_failed, ^expected}} =
+                 GenAgent.start_agent(StartupAgent,
+                   name: make_ref(),
+                   backend: StartupBackend,
+                   return: return
+                 )
+      end
+    end
+
+    test "attributes backend errors and malformed returns to the backend" do
+      for {return, expected} <- [
+            {{:error, :unavailable}, :unavailable},
+            {:garbage, :garbage}
+          ] do
+        assert {:error, {:backend_start_failed, ^expected}} =
+                 GenAgent.start_agent(StartupAgent,
+                   name: make_ref(),
+                   backend: StartupBackend,
+                   return: {:ok, return, %{}}
+                 )
+      end
+    end
+
     test "starts in :idle with no current request", %{task_sup: task_sup} do
       pid = start_server(task_sup, [])
       s = status(pid)
