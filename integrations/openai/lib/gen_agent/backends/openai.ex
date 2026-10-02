@@ -60,6 +60,8 @@ defmodule GenAgent.Backends.OpenAI do
   ## Options
 
     * `:api_key` -- OpenAI API key. Defaults to `System.get_env("OPENAI_API_KEY")`.
+      `start_session/1` returns `{:error, :missing_api_key}` when neither
+      provides a non-empty key, unless `:http_fn` is given.
     * `:model` -- model name. Defaults to `"gpt-5"`.
     * `:instructions` -- system prompt (string). Resent every turn; see note above.
     * `:reasoning_effort` -- an atom or string passed through as
@@ -114,7 +116,18 @@ defmodule GenAgent.Backends.OpenAI do
 
   @impl GenAgent.Backend
   def start_session(opts) do
-    api_key = Keyword.get(opts, :api_key) || System.get_env("OPENAI_API_KEY")
+    api_key = present(Keyword.get(opts, :api_key)) || present(System.get_env("OPENAI_API_KEY"))
+
+    # A caller-supplied :http_fn replaces the HTTP call (a stub or a proxy that
+    # adds credentials), so only the default transport requires a key.
+    if is_nil(api_key) and not Keyword.has_key?(opts, :http_fn) do
+      {:error, :missing_api_key}
+    else
+      build_session(api_key, opts)
+    end
+  end
+
+  defp build_session(api_key, opts) do
     http_fn = Keyword.get(opts, :http_fn, &default_http/1)
 
     session = %__MODULE__{
@@ -132,6 +145,12 @@ defmodule GenAgent.Backends.OpenAI do
 
     {:ok, session}
   end
+
+  defp present(value) when is_binary(value) do
+    if String.trim(value) == "", do: nil, else: value
+  end
+
+  defp present(_value), do: nil
 
   @impl GenAgent.Backend
   def prompt(%__MODULE__{} = session, prompt) when is_binary(prompt) do
