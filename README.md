@@ -332,9 +332,10 @@ the rejection telemetry event to observe cast overloads.
 
 Deferred event callbacks may generate prompts when a turn finishes.
 Those prompts use the bounded pending-prompt queue; on overload,
-`handle_error/3` receives the reason. Self-chain prompts from
-`handle_response/3` or `handle_error/3` use one reserved slot outside
-the prompt count cap, but must fit the prompt byte cap. A halted agent
+`handle_error/3` receives the reason. Response follow-ups and error retries
+use one reserved slot outside the prompt count cap, but must fit the prompt
+byte cap. Error retries of ask and tell turns retain their original caller
+and ref; response follow-ups are independent turns. A halted agent
 retains admitted work until `resume/1`; interruption or completion
 releases queue capacity as work is drained. These limits bound accepted
 internal storage, not arbitrary messages already waiting in the BEAM
@@ -423,7 +424,8 @@ If the selected task supervisor is unavailable before a task can start,
 the request fails with `:task_supervisor_unavailable`, reaches
 `handle_error/3`, and leaves the agent idle. A callback's immediate retry
 is discarded in this case; a later request can run after the supervisor
-returns.
+returns. When this happens during a caller-owned retry, the original ask or
+poll receives the final `:task_supervisor_unavailable` error.
 
 The prompt task belongs to its agent: it is stopped when the agent exits,
 including abrupt exits that bypass termination callbacks. Interruption and
@@ -448,7 +450,7 @@ copy, and adapt -- they are **not** installed as public API modules:
 - **[Watcher][wc]** -- reactive event-driven agent, idle until triggered
 - **[Heartbeat][hb]** -- periodic agent driven by timer events
 - **[Checkpointer][cp]** -- human-in-the-loop review workflow
-- **[Retry][rt]** -- handle_error self-chain for transient failures
+- **[Retry][rt]** -- caller-owned handle_error retries for transient failures
 - **[Workspace][ws]** -- all four lifecycle hooks around a git workspace
 
 Start with the [patterns overview][overview] for a "choose your

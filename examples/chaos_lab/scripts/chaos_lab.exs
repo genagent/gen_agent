@@ -71,13 +71,18 @@ defmodule ChaosLab.Run do
   end
 
   defp a do
-    IO.puts("A: killed prompt task, completion and self-chained retry")
+    IO.puts("A: killed prompt task, caller-owned retry and final completion")
     pid = start(:chaos_a)
     {ref, task} = hold(:chaos_a)
     Process.exit(task, :kill)
     observe({:handle_error, ^pid, ^ref, {:task_crashed, :killed}})
-    observe({:gen_agent, :completion, :chaos_a, ^ref, {:error, {:task_crashed, :killed}}})
-    observe({:response, ^pid, _, "retry after crash"})
+    observe({:response, ^pid, ^ref, "retry after crash"})
+
+    observe(
+      {:gen_agent, :completion, :chaos_a, ^ref,
+       {:ok, %GenAgent.Response{text: "retry after crash"}}}
+    )
+
     %{agent_state: %{retried: true, responses: ["retry after crash"]}} = GenAgent.status(:chaos_a)
     check!(GenAgent.whereis(:chaos_a) == pid, "A: agent pid changed")
     :ok = GenAgent.stop(:chaos_a)
@@ -281,19 +286,10 @@ defmodule ChaosLab.Run do
       :ok = Supervisor.terminate_child(owner, :tasks)
       :ok = :sys.resume(pid)
       observe({:handle_error, ^pid, ^ref, {:task_crashed, :shutdown}})
-      observe({:gen_agent, :completion, :chaos_gap, ^ref, {:error, {:task_crashed, :shutdown}}})
-      # Accept either outcome so the probe keeps passing once core is fixed;
-      # anything else fails the script.
-      receive do
-        {:DOWN, ^monitor, :process, ^pid, {:callback_failed, :exit, _}} ->
-          IO.puts("  gap present (genagent/gen_agent#305): the retry dispatch stopped the agent")
-          eventually(fn -> GenAgent.whereis(:chaos_gap) == nil end)
-
-        {:handle_error, ^pid, _retry_ref, reason} ->
-          IO.puts("  gap fixed: the retry failed with #{inspect(reason)} and the agent stayed up")
-      after
-        5_000 -> raise "gap probe: neither the known failure nor a typed retry error arrived"
-      end
+      observe({:handle_error, ^pid, ^ref, :task_supervisor_unavailable})
+      observe({:gen_agent, :completion, :chaos_gap, ^ref, {:error, :task_supervisor_unavailable}})
+      check!(GenAgent.whereis(:chaos_gap) == pid, "gap probe: agent stopped")
+      Process.demonitor(monitor, [:flush])
     after
       Supervisor.stop(owner)
     end

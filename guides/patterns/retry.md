@@ -1,7 +1,7 @@
 # Retry
 
 Failure-and-retry agent. `handle_error/3` returns
-`{:prompt, retry_text, state}` to self-chain a new attempt. The
+`{:prompt, retry_text, state}` to retry the caller's request. The
 retry decision lives on agent state: attempt count, accumulated
 errors, and a configurable cap.
 
@@ -14,9 +14,11 @@ from being stateful -- you want to count attempts, track the
 sequence of errors, apply backoff, and give up after a cap.
 
 The pattern hinges on one gen_agent primitive: `handle_error/3`
-has the same return shape as `handle_response/3`, so returning
-`{:prompt, text, state}` from `handle_error` self-chains a retry
-turn just as cleanly as self-chaining after a success.
+has the same return shape as `handle_response/3`, but its retry of an
+ask or tell remains owned by that caller. The original request ref is
+reused across attempts; `ask/3` waits for the final outcome, while
+`poll/3` stays pending until the retry succeeds or the agent gives up.
+Response follow-ups remain independent self-chain turns.
 
 ## What it exercises in gen_agent
 
@@ -31,8 +33,8 @@ turn just as cleanly as self-chaining after a success.
 
 ## The pattern
 
-One callback module. No facade needed -- the manager just starts
-the agent and polls status.
+One callback module. No facade needed -- the manager starts the agent
+and receives the final result of its request.
 
 ```elixir
 defmodule Retry.Agent do
@@ -110,11 +112,11 @@ end
   max_attempts: 5
 )
 
-# Kick off the first attempt.
-{:ok, _ref} = GenAgent.tell("retry-haiku",
-  "write a haiku about persistence")
+# Ask waits across retries and returns only the final outcome.
+result = GenAgent.ask("retry-haiku", "write a haiku about persistence")
+IO.inspect(result)
 
-# Wait for phase in [:succeeded, :failed] and read the result.
+# Agent state can still expose the attempt history.
 %{agent_state: state} = GenAgent.status("retry-haiku")
 IO.inspect(%{
   phase: state.phase,
