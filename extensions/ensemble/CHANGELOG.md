@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.4.0...gen_agent_ensemble-v0.5.0) (2026-10-02)
+
+
+### Features
+
+* **ensemble:** include subtasks in Supervisor synthesis ([#323](https://github.com/genagent/gen_agent/issues/323)) ([47864f4](https://github.com/genagent/gen_agent/commit/47864f4bd3e6a9cea058f5ad89597673b5a2e061))
+
+
+### Bug Fixes
+
+* **deps:** allow core 0.7 in CLI adapters and Ensemble ([#327](https://github.com/genagent/gen_agent/issues/327)) ([f9d3a21](https://github.com/genagent/gen_agent/commit/f9d3a218b5e7beb82217f829c4b267c2f7504829))
+
 ## [0.4.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.3.0...gen_agent_ensemble-v0.4.0) (2026-10-02)
 
 
