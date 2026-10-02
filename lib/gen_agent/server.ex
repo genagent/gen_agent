@@ -416,6 +416,42 @@ defmodule GenAgent.Server do
     queue_tell(data, from, prompt, recipient)
   end
 
+  defp dispatch_event(
+         {:call, from},
+         {:tell_with_completion, _prompt, _recipient, :fail},
+         :idle,
+         %Data{halted: true}
+       ) do
+    {:keep_state_and_data, [{:reply, from, {:error, :halted}}]}
+  end
+
+  defp dispatch_event(
+         {:call, from},
+         {:tell_with_completion, prompt, recipient, on_halt},
+         :idle,
+         %Data{halted: false} = data
+       ) do
+    request_ref = make_ref()
+
+    case try_dispatch(data, request_ref, {:tell, recipient, on_halt}, prompt) do
+      {:next_state, :processing, data} ->
+        {:next_state, :processing, data, [{:reply, from, {:ok, request_ref}}]}
+
+      {:keep_state, data, actions} ->
+        {:keep_state, data, [{:reply, from, {:ok, request_ref}} | actions]}
+    end
+  end
+
+  defp dispatch_event(
+         {:call, from},
+         {:tell_with_completion, prompt, recipient, on_halt},
+         state,
+         %Data{} = data
+       )
+       when state in [:idle, :processing] do
+    queue_tell(data, from, prompt, recipient, on_halt)
+  end
+
   # poll -- check status of a previously-tell'd request
   # ---------------------------------------------------------------------------
 
@@ -649,6 +685,7 @@ defmodule GenAgent.Server do
 
   defp request_origin({:ask, _from}), do: :ask
   defp request_origin({:tell, _recipient}), do: :tell
+  defp request_origin({:tell, _recipient, _on_halt}), do: :tell
   defp request_origin(kind) when kind in [:tell, :event, :self_chain], do: kind
 
   defp handle_task_result({:ok, response, new_session, new_agent_state}, current, data) do
@@ -686,6 +723,9 @@ defmodule GenAgent.Server do
       {^ref, {:tell, _recipient} = kind, prompt} ->
         finish_queued_tell_cancel(data, from, ref, kind, prompt)
 
+      {^ref, {:tell, _recipient, _on_halt} = kind, prompt} ->
+        finish_queued_tell_cancel(data, from, ref, kind, prompt)
+
       _ ->
         {:keep_state_and_data, [{:reply, from, {:error, :not_found}}]}
     end
@@ -693,14 +733,14 @@ defmodule GenAgent.Server do
 
   defp current_tell_ref?(%{request_ref: ref, kind: :tell}, ref), do: true
   defp current_tell_ref?(%{request_ref: ref, kind: {:tell, _recipient}}, ref), do: true
+  defp current_tell_ref?(%{request_ref: ref, kind: {:tell, _recipient, _on_halt}}, ref), do: true
   defp current_tell_ref?(_current, _ref), do: false
 
   defp finish_queued_tell_cancel(data, from, ref, kind, prompt) do
     data = remove_queued_entry(data, ref, prompt)
     data = store_tell_result(data, ref, {:error, :cancelled})
 
-    if match?({:tell, _}, kind) do
-      {:tell, recipient} = kind
+    if recipient = completion_recipient(kind) do
       send(recipient, {:gen_agent, :completion, data.name, ref, {:error, :cancelled}})
     end
 
@@ -734,9 +774,19 @@ defmodule GenAgent.Server do
     end
   end
 
-  defp queue_tell(data, from, prompt, recipient \\ nil) do
+  defp completion_recipient({:tell, recipient}), do: recipient
+  defp completion_recipient({:tell, recipient, _on_halt}), do: recipient
+  defp completion_recipient(_kind), do: nil
+
+  defp queue_tell(data, from, prompt, recipient \\ nil, on_halt \\ :queue) do
     request_ref = make_ref()
-    kind = if is_nil(recipient), do: :tell, else: {:tell, recipient}
+
+    kind =
+      cond do
+        is_nil(recipient) -> :tell
+        on_halt == :queue -> {:tell, recipient}
+        true -> {:tell, recipient, on_halt}
+      end
 
     case enqueue_prompt(data, request_ref, kind, prompt) do
       {:ok, queued} ->
@@ -1411,8 +1461,30 @@ defmodule GenAgent.Server do
 
   defp transition_to_halted(%Data{} = data) do
     :ok = safely_post_run(data.agent_module, data.agent_state)
+    data = fail_halt_aware_queued(data)
     emit_halted(data.name, data.agent_state)
     %{data | halted: true}
+  end
+
+  defp fail_halt_aware_queued(%Data{} = data) do
+    {remaining, data} =
+      Enum.reduce(:queue.to_list(data.mailbox), {[], data}, fn
+        {ref, {:tell, recipient, :fail} = kind, prompt}, {remaining, data} ->
+          emit_turn_rejected(data.name, ref, kind, :halted)
+          send(recipient, {:gen_agent, :completion, data.name, ref, {:error, :halted}})
+
+          data =
+            data
+            |> store_tell_result(ref, {:error, :halted})
+            |> Map.update!(:pending_prompt_bytes, &(&1 - :erlang.external_size(prompt)))
+
+          {remaining, data}
+
+        entry, {remaining, data} ->
+          {[entry | remaining], data}
+      end)
+
+    %{data | mailbox: remaining |> Enum.reverse() |> :queue.from_list()}
   end
 
   # Drain pending_events synchronously (called from finish_turn /
@@ -1609,6 +1681,16 @@ defmodule GenAgent.Server do
     {store_tell_result(data, ref, outcome), []}
   end
 
+  defp record_success(
+         %Data{} = data,
+         %{kind: {:tell, recipient, _on_halt}, request_ref: ref},
+         response
+       ) do
+    outcome = {:ok, response}
+    send(recipient, {:gen_agent, :completion, data.name, ref, outcome})
+    {store_tell_result(data, ref, outcome), []}
+  end
+
   defp record_success(%Data{} = data, %{kind: kind}, _response)
        when kind in [:self_chain, :event] do
     {data, []}
@@ -1623,6 +1705,16 @@ defmodule GenAgent.Server do
   end
 
   defp record_error(%Data{} = data, %{kind: {:tell, recipient}, request_ref: ref}, reason) do
+    outcome = {:error, reason}
+    send(recipient, {:gen_agent, :completion, data.name, ref, outcome})
+    {store_tell_result(data, ref, outcome), []}
+  end
+
+  defp record_error(
+         %Data{} = data,
+         %{kind: {:tell, recipient, _on_halt}, request_ref: ref},
+         reason
+       ) do
     outcome = {:error, reason}
     send(recipient, {:gen_agent, :completion, data.name, ref, outcome})
     {store_tell_result(data, ref, outcome), []}

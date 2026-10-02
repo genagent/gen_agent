@@ -602,7 +602,9 @@ defmodule GenAgentEnsemble.Server do
   defp dispatch(state, name, prompt, token) do
     result =
       try do
-        GenAgent.tell_with_completion(namespaced(state, name), prompt, self())
+        GenAgent.tell_with_completion(namespaced(state, name), prompt, self(), :infinity,
+          on_halt: :fail
+        )
       catch
         :exit, {:noproc, _} -> {:error, {:agent_not_running, name}}
         :exit, reason -> {:error, {:dispatch_exit, reason}}
@@ -782,6 +784,7 @@ defmodule GenAgentEnsemble.Server do
   defp reason_kind(:normal), do: :normal
   defp reason_kind(:timeout), do: :timeout
   defp reason_kind(:interrupted), do: :interrupted
+  defp reason_kind(:halted), do: :halted
   defp reason_kind({:overloaded, _}), do: :overloaded
   defp reason_kind({:halted, _}), do: :halted
   defp reason_kind({:dispatch_rejected, _, _}), do: :dispatch_rejected

@@ -128,6 +128,73 @@ defmodule GenAgent.RequestCompletionTest do
     assert_receive {:gen_agent, :completion, ^name, ^second, {:ok, %{text: "queued"}}}, 1_000
   end
 
+  test "halt-aware admission rejects atomically while halted without affecting ordinary queued work" do
+    {name, pid} = start_agent()
+    assert {:ok, halt_ref} = GenAgent.tell_with_completion(name, "halt")
+    assert_receive {:gen_agent, :completion, ^name, ^halt_ref, {:error, :pre_turn_halted}}
+
+    assert {:error, :halted} =
+             GenAgent.tell_with_completion(name, "rejected", self(), :infinity, on_halt: :fail)
+
+    refute_receive {:started, "rejected", _}, 0
+    assert {:ok, queued_ref} = GenAgent.tell_with_completion(name, "ordinary")
+    assert {:ok, :pending} = GenAgent.poll(name, queued_ref)
+    assert Process.alive?(pid)
+
+    :ok = GenAgent.resume(name)
+    assert_receive {:gen_agent, :completion, ^name, ^queued_ref, {:ok, %{text: "ordinary"}}}
+  end
+
+  test "halting fails only opted-in queued completions, once, while preserving FIFO survivors" do
+    {name, _pid} = start_agent()
+    assert {:ok, active_ref} = GenAgent.tell_with_completion(name, "held")
+    assert_receive {:started, "held", task}, 1_000
+
+    assert {:ok, halt_ref} = GenAgent.tell_with_completion(name, "halt")
+
+    assert {:ok, failed_a} =
+             GenAgent.tell_with_completion(name, "failed-a", self(), :infinity, on_halt: :fail)
+
+    assert {:ok, surviving} = GenAgent.tell_with_completion(name, "surviving")
+
+    assert {:ok, failed_b} =
+             GenAgent.tell_with_completion(name, "failed-b", self(), :infinity, on_halt: :fail)
+
+    send(task, :release)
+    assert_receive {:gen_agent, :completion, ^name, ^active_ref, {:ok, _}}
+    assert_receive {:gen_agent, :completion, ^name, ^halt_ref, {:error, :pre_turn_halted}}
+    assert_receive {:gen_agent, :completion, ^name, ^failed_a, {:error, :halted}}
+    assert_receive {:gen_agent, :completion, ^name, ^failed_b, {:error, :halted}}
+    assert {:error, :halted} = GenAgent.poll(name, failed_a)
+    assert {:error, :halted} = GenAgent.poll(name, failed_b)
+    assert {:ok, :pending} = GenAgent.poll(name, surviving)
+    assert GenAgent.runtime_snapshot(name).pending_prompts == 1
+    refute_receive {:started, "failed-a", _}, 0
+    refute_receive {:started, "failed-b", _}, 0
+
+    :ok = GenAgent.resume(name)
+    assert_receive {:gen_agent, :completion, ^name, ^surviving, {:ok, %{text: "surviving"}}}
+    refute_receive {:gen_agent, :completion, ^name, ^failed_a, _}, 0
+    refute_receive {:gen_agent, :completion, ^name, ^failed_b, _}, 0
+  end
+
+  test "halt-aware queued completion can still be cancelled by exact ref" do
+    {name, _pid} = start_agent()
+    assert {:ok, active_ref} = GenAgent.tell_with_completion(name, "held")
+    assert_receive {:started, "held", task}, 1_000
+
+    assert {:ok, queued_ref} =
+             GenAgent.tell_with_completion(name, "queued", self(), :infinity, on_halt: :fail)
+
+    assert {:ok, :cancelled} = GenAgent.cancel_request(name, queued_ref)
+    assert_receive {:gen_agent, :completion, ^name, ^queued_ref, {:error, :cancelled}}
+    assert {:error, :cancelled} = GenAgent.poll(name, queued_ref)
+
+    send(task, :release)
+    assert_receive {:gen_agent, :completion, ^name, ^active_ref, {:ok, _}}
+    refute_receive {:gen_agent, :completion, ^name, ^queued_ref, _}, 0
+  end
+
   test "backend error, interrupt, and watchdog each deliver one error outcome" do
     {name, _pid} = start_agent()
     assert {:ok, error_ref} = GenAgent.tell_with_completion(name, "error")
