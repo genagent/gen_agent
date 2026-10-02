@@ -21,6 +21,7 @@ defmodule GenAgent.Server do
   @default_max_tell_results 100
   @default_max_events_per_turn 1_000
   @default_max_event_bytes_per_turn 1_048_576
+  @default_event_retention :compact
   @default_max_pending_prompts 1_000
   @default_max_pending_prompt_bytes 1_048_576
   @default_max_pending_notifications 1_000
@@ -41,6 +42,7 @@ defmodule GenAgent.Server do
       :max_tell_results,
       :max_events_per_turn,
       :max_event_bytes_per_turn,
+      :event_retention,
       :max_pending_prompts,
       :max_pending_prompt_bytes,
       :max_pending_notifications,
@@ -136,6 +138,8 @@ defmodule GenAgent.Server do
     max_event_bytes_per_turn =
       Keyword.get(opts, :max_event_bytes_per_turn, @default_max_event_bytes_per_turn)
 
+    event_retention = Keyword.get(opts, :event_retention, @default_event_retention)
+
     max_pending_prompts = Keyword.get(opts, :max_pending_prompts, @default_max_pending_prompts)
 
     max_pending_prompt_bytes =
@@ -149,6 +153,7 @@ defmodule GenAgent.Server do
 
     validate_capture_limit!(max_events_per_turn, :max_events_per_turn)
     validate_capture_limit!(max_event_bytes_per_turn, :max_event_bytes_per_turn)
+    validate_event_retention!(event_retention)
     validate_pending_limit!(max_pending_prompts, :max_pending_prompts)
     validate_pending_limit!(max_pending_prompt_bytes, :max_pending_prompt_bytes)
     validate_pending_limit!(max_pending_notifications, :max_pending_notifications)
@@ -167,6 +172,7 @@ defmodule GenAgent.Server do
         max_tell_results: max_tell_results,
         max_events_per_turn: max_events_per_turn,
         max_event_bytes_per_turn: max_event_bytes_per_turn,
+        event_retention: event_retention,
         max_pending_prompts: max_pending_prompts,
         max_pending_prompt_bytes: max_pending_prompt_bytes,
         max_pending_notifications: max_pending_notifications,
@@ -966,6 +972,7 @@ defmodule GenAgent.Server do
     task_supervisor = data.task_supervisor
     max_events_per_turn = data.max_events_per_turn
     max_event_bytes_per_turn = data.max_event_bytes_per_turn
+    event_retention = data.event_retention
 
     # Link the task to its owning agent as well as the shared supervisor.
     # Even an untrappable agent exit must take its in-flight turn down.
@@ -980,7 +987,8 @@ defmodule GenAgent.Server do
           agent_state,
           prompt,
           max_events_per_turn,
-          max_event_bytes_per_turn
+          max_event_bytes_per_turn,
+          event_retention
         )
       end)
 
@@ -1007,7 +1015,8 @@ defmodule GenAgent.Server do
          agent_state,
          prompt,
          max_events_per_turn,
-         max_event_bytes_per_turn
+         max_event_bytes_per_turn,
+         event_retention
        ) do
     started = System.monotonic_time(:millisecond)
 
@@ -1020,8 +1029,8 @@ defmodule GenAgent.Server do
           module,
           agent_state,
           started,
-          max_events_per_turn,
-          max_event_bytes_per_turn
+          {max_events_per_turn, max_event_bytes_per_turn},
+          event_retention
         )
 
       {:error, reason} ->
@@ -1036,8 +1045,8 @@ defmodule GenAgent.Server do
          module,
          agent_state,
          started,
-         max_events,
-         max_bytes
+         {max_events, max_bytes},
+         :lossless
        ) do
     initial = {:ok, [], agent_state, 0, 0, nil}
 
@@ -1065,6 +1074,112 @@ defmodule GenAgent.Server do
       {:ok, reversed_events, state, _count, _bytes, terminal} ->
         finish_stream(reversed_events, terminal, backend, backend_session, state, started)
     end
+  end
+
+  defp consume_stream(
+         stream,
+         backend,
+         backend_session,
+         module,
+         agent_state,
+         started,
+         {max_events, max_bytes},
+         :compact
+       ) do
+    initial = %{
+      events: [],
+      state: agent_state,
+      retained_events: 0,
+      retained_bytes: 0,
+      observed_events: 0,
+      omitted_events: 0,
+      first_omission: nil,
+      text_acc: {[], false},
+      usage: nil,
+      terminal: nil
+    }
+
+    capture =
+      Enum.reduce_while(stream, initial, fn event, capture ->
+        capture = capture_compact_event(event, capture, module, max_events, max_bytes)
+        if capture.terminal, do: {:halt, capture}, else: {:cont, capture}
+      end)
+
+    case capture.terminal do
+      nil ->
+        {:error, :no_terminal_event, backend_session, capture.state}
+
+      %Event{kind: :error, data: data} ->
+        {:error, Map.get(data, :reason, :unknown), backend_session, capture.state}
+
+      %Event{kind: :result, data: data} = terminal ->
+        backend_session = maybe_update_session(backend, backend_session, data)
+
+        coverage = %{
+          mode: if(capture.omitted_events == 0, do: :exact, else: :compact),
+          observed_events: capture.observed_events,
+          retained_events: capture.retained_events,
+          omitted_events: capture.omitted_events,
+          retained_bytes: capture.retained_bytes,
+          first_omission: capture.first_omission
+        }
+
+        response =
+          Response.from_capture(
+            Enum.reverse(capture.events),
+            terminal,
+            capture.usage,
+            capture.text_acc,
+            duration_ms: System.monotonic_time(:millisecond) - started,
+            session_id: Map.get(data, :session_id),
+            event_coverage: coverage
+          )
+
+        {:ok, response, backend_session, capture.state}
+    end
+  end
+
+  defp capture_compact_event(%Event{} = event, capture, module, max_events, max_bytes) do
+    state = maybe_handle_stream_event(module, event, capture.state)
+
+    capture = %{
+      capture
+      | state: state,
+        observed_events: capture.observed_events + 1,
+        text_acc: Response.append_text(event, capture.text_acc),
+        usage: if(event.kind == :usage, do: event.data, else: capture.usage),
+        terminal: if(Event.terminal?(event), do: event, else: nil)
+    }
+
+    if capture.first_omission do
+      %{capture | omitted_events: capture.omitted_events + 1}
+    else
+      event_bytes = :erlang.external_size(event)
+
+      cond do
+        capture.retained_events >= max_events ->
+          omit_compact_event(capture, :events, event.kind)
+
+        event_bytes > max_bytes - capture.retained_bytes ->
+          omit_compact_event(capture, :bytes, event.kind)
+
+        true ->
+          %{
+            capture
+            | events: [event | capture.events],
+              retained_events: capture.retained_events + 1,
+              retained_bytes: capture.retained_bytes + event_bytes
+          }
+      end
+    end
+  end
+
+  defp omit_compact_event(capture, limit, kind) do
+    %{
+      capture
+      | omitted_events: capture.omitted_events + 1,
+        first_omission: %{limit: limit, event_kind: kind}
+    }
   end
 
   defp capture_event(
@@ -1116,6 +1231,12 @@ defmodule GenAgent.Server do
 
   defp validate_capture_limit!(value, name) do
     raise ArgumentError, "#{name} must be a positive integer, got: #{inspect(value)}"
+  end
+
+  defp validate_event_retention!(mode) when mode in [:compact, :lossless], do: :ok
+
+  defp validate_event_retention!(_mode) do
+    raise ArgumentError, "event_retention must be :compact or :lossless"
   end
 
   defp validate_pending_limit!(value, _name) when is_integer(value) and value >= 0, do: :ok

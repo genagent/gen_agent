@@ -126,6 +126,45 @@ defmodule GenAgent.Backends.ClaudeIntegrationTest do
       assert_receive {:claude_call, "turn 3", "sess-persist"}
     end
 
+    test "resumes after compacting more than 1,000 Claude text deltas" do
+      test_pid = self()
+
+      delta =
+        stream_event("stream_event", %{
+          "event" => %{
+            "type" => "content_block_delta",
+            "index" => 0,
+            "delta" => %{"type" => "text_delta", "text" => "x"}
+          }
+        })
+
+      stream_fn = fn prompt, opts ->
+        send(test_pid, {:claude_call, prompt, Keyword.get(opts, :resume)})
+
+        if prompt == "long" do
+          List.duplicate(delta, 1_001) ++
+            [stream_event("result", %{"result" => "complete", "session_id" => "sess-long"})]
+        else
+          [stream_event("result", %{"result" => "continued", "session_id" => "sess-long"})]
+        end
+      end
+
+      name = start_claude_agent(stream_fn)
+
+      assert {:ok, response} = GenAgent.ask(name, "long")
+      assert_receive {:claude_call, "long", nil}
+      assert response.text == "complete"
+      assert response.session_id == "sess-long"
+      assert response.event_coverage.mode == :compact
+      assert response.event_coverage.observed_events == 1_002
+      assert response.event_coverage.retained_events == 1_000
+      assert response.terminal.kind == :result
+
+      assert {:ok, next_response} = GenAgent.ask(name, "next")
+      assert_receive {:claude_call, "next", "sess-long"}
+      assert next_response.text == "continued"
+    end
+
     test "forwards init_agent opts (model, system_prompt) to the stream_fn" do
       test_pid = self()
 

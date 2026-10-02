@@ -79,6 +79,16 @@ backend captures it from the terminal `:result` event and threads it
 through `--resume` on subsequent turns -- transparently, no caller code
 required.
 
+Claude emits text deltas and tool results as normalized events. A long or
+tool-heavy turn can exceed GenAgent's default retained-log budget of 1,000
+events and 1,048,576 bytes. With the default `event_retention: :compact`,
+the turn continues and the backend receives the terminal session ID;
+`response.event_coverage` tells you if `response.events` is incomplete.
+Use `event_retention: :lossless` when your application requires every event
+in `response.events`; that mode fails the turn on overflow. The limits and
+retention mode are GenAgent `start_agent/2` options, not Claude backend
+options. See the root README's event capture section for the contract.
+
 ```elixir
 # Turn 1: fresh conversation
 {:ok, r1} = GenAgent.ask("my-coder", "Remember the number 42")

@@ -479,12 +479,15 @@ defmodule GenAgent do
 
   Event evidence is bounded by `:max_events_per_turn` (default `1_000`)
   and `:max_event_bytes_per_turn` (default `1_048_576`), measured as the
-  sum of `:erlang.external_size/1` for each retained `GenAgent.Event`.
-  Both limits must be positive integers. Reaching either limit before a
-  terminal event fits fails the turn with
-  `{:event_capture_overflow, diagnostics}`. No incomplete success response
-  is returned. Accepted stream callbacks keep their state; the rejected
-  event is not delivered to `c:handle_stream_event/2`.
+  sum of `:erlang.external_size/1` for retained `GenAgent.Event` values.
+  Both limits must be positive integers. With the default
+  `event_retention: :compact`, an oversized turn succeeds with a bounded
+  prefix in `Response.events` and `Response.event_coverage` reports omissions.
+  All normalized events still reach `c:handle_stream_event/2`, and the
+  terminal result, full response text, and usage remain available separately.
+  Use `event_retention: :lossless` to require a complete event list; an event
+  that exceeds either limit then fails the turn with
+  `{:event_capture_overflow, diagnostics}` before entering the callback.
 
   Pending prompt and deferred notification queues have independent count
   and payload-byte limits: `:max_pending_prompts` and
@@ -549,6 +552,7 @@ defmodule GenAgent do
         :max_tell_results,
         :max_events_per_turn,
         :max_event_bytes_per_turn,
+        :event_retention,
         :max_pending_prompts,
         :max_pending_prompt_bytes,
         :max_pending_notifications,
@@ -568,6 +572,7 @@ defmodule GenAgent do
       |> maybe_put(:max_tell_results, Keyword.get(server_opts, :max_tell_results))
       |> maybe_put(:max_events_per_turn, Keyword.get(server_opts, :max_events_per_turn))
       |> maybe_put(:max_event_bytes_per_turn, Keyword.get(server_opts, :max_event_bytes_per_turn))
+      |> maybe_put(:event_retention, Keyword.get(server_opts, :event_retention))
       |> maybe_put(:max_pending_prompts, Keyword.get(server_opts, :max_pending_prompts))
       |> maybe_put(:max_pending_prompt_bytes, Keyword.get(server_opts, :max_pending_prompt_bytes))
       |> maybe_put(

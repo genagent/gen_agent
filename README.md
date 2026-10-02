@@ -340,25 +340,28 @@ and external provider cancellation have their own contracts.
 
 ## Event capture bounds
 
-Successful responses contain a complete normalized event list. To keep
-that list and cached `tell/3` results bounded, each turn retains at most
-1,000 events and 1,048,576 bytes of event terms by default. Override
-these positive-integer limits with `:max_events_per_turn` and
-`:max_event_bytes_per_turn` in `start_agent/2` or `child_spec/2`. Byte
-usage is the sum of `:erlang.external_size/1` for accepted events, so a
-single oversized terminal event is rejected too.
+Each turn retains at most 1,000 normalized events and 1,048,576 bytes of
+event terms by default. Override these positive-integer limits with
+`:max_events_per_turn` and `:max_event_bytes_per_turn` in `start_agent/2`
+or `child_spec/2`. Byte usage is the sum of `:erlang.external_size/1`
+for retained events, not total process memory.
 
-An event that exceeds either limit ends the turn with
-`{:error, {:event_capture_overflow, diagnostics}}`. The diagnostics
-contain the limit type, configured limits, retained counts/bytes, and
-the rejected event's kind and size, but no event payload. There is no
-truncated success response. Stream callbacks run for accepted events;
-the rejected event is not passed to `handle_stream_event/2`. A terminal
-`:error` reason is preserved when that event fits; if its event exceeds
-the limit, the overflow diagnostic records its kind without retaining
-its potentially oversized reason. The stream enumerable is halted, but
-settlement of provider subprocesses or remote work remains the backend's
-responsibility.
+The default `event_retention: :compact` delivers every normalized event to
+`handle_stream_event/2` and continues to the terminal event. If the log
+limit is reached, `Response.events` holds the unchanged prefix and
+`Response.event_coverage` reports the observed, retained, and omitted
+counts plus the first omission reason. `Response.terminal` keeps the full
+terminal event separately; `Response.text`, usage, and session ID are built
+from the full stream. Check coverage before using `Response.events` as a
+complete record. Full response text, terminal payloads, callback state, and
+provider decoder buffers can still grow beyond the event-log budget.
+
+Set `event_retention: :lossless` to require the previous complete-log
+contract. An event that exceeds either limit then ends the turn with
+`{:error, {:event_capture_overflow, diagnostics}}`; the rejected event is
+not delivered to `handle_stream_event/2`. The stream enumerable is halted,
+but settlement of provider subprocesses or remote work remains the
+backend's responsibility.
 
 ## Supervision
 

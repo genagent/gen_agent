@@ -55,11 +55,89 @@ defmodule GenAgent.EventCaptureTest do
     {ref, outcome, seen_count}
   end
 
-  test "the default event-count limit rejects a terminal result after many small events" do
+  test "compact retention delivers a long turn and updates the backend session" do
+    deltas = for _ <- 1..1_500, do: Event.new(:text, %{text: "x"})
+    usage = Event.new(:usage, %{input_tokens: 12, output_tokens: 34})
+    terminal = Event.new(:result, %{text: "complete", session_id: "session-1"})
+    name = start_agent([deltas ++ [usage, terminal], [Event.new(:result, %{text: "next"})]])
+
+    {ref, :ok, 1_502} = tell_and_wait(name, "long turn")
+    assert {:ok, :completed, response} = GenAgent.poll(name, ref)
+    assert response.text == "complete"
+    assert response.usage == %{input_tokens: 12, output_tokens: 34}
+    assert response.session_id == "session-1"
+    assert response.terminal == terminal
+    assert length(response.events) == 1_000
+
+    assert response.event_coverage == %{
+             mode: :compact,
+             observed_events: 1_502,
+             retained_events: 1_000,
+             omitted_events: 502,
+             retained_bytes: response.event_coverage.retained_bytes,
+             first_omission: %{limit: :events, event_kind: :text}
+           }
+
+    session = :gen_statem.call(GenAgent.whereis(name), :get_backend_session)
+    assert session.session_id == "session-1"
+    {next_ref, :ok, 1_503} = tell_and_wait(name, "after compact turn")
+    assert {:ok, :completed, next_response} = GenAgent.poll(name, next_ref)
+    assert next_response.event_coverage.mode == :exact
+  end
+
+  test "compact retention handles oversized tool results without losing callbacks" do
+    results =
+      for _ <- 1..17,
+          do: Event.new(:tool_result, %{content: String.duplicate("r", 64 * 1_024)})
+
+    terminal = Event.new(:result, %{text: "finished"})
+    name = start_agent([results ++ [terminal]])
+
+    {ref, :ok, 18} = tell_and_wait(name, "read files")
+    assert {:ok, :completed, response} = GenAgent.poll(name, ref)
+    assert response.text == "finished"
+    assert response.terminal == terminal
+    assert response.event_coverage.mode == :compact
+
+    assert response.event_coverage.first_omission ==
+             %{limit: :bytes, event_kind: :tool_result}
+
+    assert response.event_coverage.observed_events == 18
+    assert response.event_coverage.retained_bytes <= 1_048_576
+    assert length(response.events) == response.event_coverage.retained_events
+  end
+
+  test "compact text fallback uses omitted deltas and respects terminal empty text" do
+    first = Event.new(:text, %{text: "first"})
+    second = Event.new(:text, %{text: "second", message_boundary: true})
+    usage = Event.new(:usage, %{output_tokens: 2})
+
+    name =
+      start_agent(
+        [
+          [first, second, usage, Event.new(:result, %{})],
+          [first, second, Event.new(:result, %{text: ""})]
+        ],
+        max_events_per_turn: 1
+      )
+
+    {ref, :ok, 4} = tell_and_wait(name, "fallback")
+    assert {:ok, :completed, response} = GenAgent.poll(name, ref)
+    assert response.text == "first\n\nsecond"
+    assert response.usage == %{output_tokens: 2}
+    assert response.events == [first]
+    assert response.event_coverage.omitted_events == 3
+
+    {next_ref, :ok, 7} = tell_and_wait(name, "empty terminal")
+    assert {:ok, :completed, next_response} = GenAgent.poll(name, next_ref)
+    assert next_response.text == ""
+  end
+
+  test "lossless retention rejects a terminal result after many small events" do
     text_events = for _ <- 1..1_000, do: Event.new(:text, %{text: "x"})
     first_script = text_events ++ [Event.new(:result, %{text: "complete"})]
     second_script = [Event.new(:result, %{text: "next turn"})]
-    name = start_agent([first_script, second_script])
+    name = start_agent([first_script, second_script], event_retention: :lossless)
 
     {ref, outcome, seen_count} = tell_and_wait(name, "long turn")
     assert seen_count == 1_000
@@ -84,7 +162,12 @@ defmodule GenAgent.EventCaptureTest do
   test "a single oversized event fails without entering callback state or cached success" do
     oversized = Event.new(:text, %{text: String.duplicate("x", 1_000)})
     normal = Event.new(:result, %{text: "small"})
-    name = start_agent([[oversized, normal], [normal]], max_event_bytes_per_turn: 256)
+
+    name =
+      start_agent([[oversized, normal], [normal]],
+        max_event_bytes_per_turn: 256,
+        event_retention: :lossless
+      )
 
     {ref, outcome, 0} = tell_and_wait(name, "oversized")
     assert {:error, {:event_capture_overflow, diagnostics}} = outcome
@@ -104,7 +187,12 @@ defmodule GenAgent.EventCaptureTest do
     text = Event.new(:text, %{text: "small"})
     error = Event.new(:error, %{reason: String.duplicate("private", 200)})
     text_bytes = :erlang.external_size(text)
-    name = start_agent([[text, error]], max_event_bytes_per_turn: text_bytes + 1)
+
+    name =
+      start_agent([[text, error]],
+        max_event_bytes_per_turn: text_bytes + 1,
+        event_retention: :lossless
+      )
 
     {ref, outcome, 1} = tell_and_wait(name, "error too large")
     assert {:error, {:event_capture_overflow, diagnostics}} = outcome
@@ -137,7 +225,11 @@ defmodule GenAgent.EventCaptureTest do
       )
     end
 
-    name = start_agent([script, [Event.new(:result, %{text: "after"})]], max_events_per_turn: 3)
+    name =
+      start_agent([script, [Event.new(:result, %{text: "after"})]],
+        max_events_per_turn: 3,
+        event_retention: :lossless
+      )
 
     {ref, {:error, {:event_capture_overflow, diagnostics}}, 3} =
       tell_and_wait(name, "overflow")
@@ -174,7 +266,12 @@ defmodule GenAgent.EventCaptureTest do
       )
     end
 
-    name = start_agent([script, [Event.new(:result, %{text: "next"})]], max_events_per_turn: 1)
+    name =
+      start_agent([script, [Event.new(:result, %{text: "next"})]],
+        max_events_per_turn: 1,
+        event_retention: :lossless
+      )
+
     assert {:ok, ref} = GenAgent.tell(name, "interrupt")
     assert_receive {:waiting_to_overflow, task_pid}
     task_monitor = Process.monitor(task_pid)
