@@ -19,7 +19,7 @@ defmodule GenAgentConsumerCheck.MixProject do
         {:gen_agent_codex, "~> 0.4.0"},
         {:gen_agent_anthropic, "~> 0.3.0"},
         {:gen_agent_openai, "~> 0.3.0"},
-        {:gen_agent_ensemble, "~> 0.3.0"}
+        {:gen_agent_ensemble, "~> 0.4.0"}
       ]
     ]
   end
@@ -36,7 +36,7 @@ EOF
       gen_agent_codex: "~> 0.4.0",
       gen_agent_anthropic: "~> 0.3.0",
       gen_agent_openai: "~> 0.3.0",
-      gen_agent_ensemble: "~> 0.3.0"
+      gen_agent_ensemble: "~> 0.4.0"
     ]
 
     lock = Mix.Dep.Lock.read()
