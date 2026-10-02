@@ -23,6 +23,8 @@ defmodule GenAgentEnsemble.Server do
     :pending,
     # %{token => %{started_at: integer, kind: :ask | :tell, dispatches: integer}}
     :token_contexts,
+    # %{token => pid}, only for opted-in completion requests
+    :stream_recipients,
     # completed tell results, %{token => {:ok, response} | {:error, reason}}
     :completed,
     # %{token => %{monitor_ref => {from, timer_ref | nil}}}
@@ -52,8 +54,15 @@ defmodule GenAgentEnsemble.Server do
 
   def tell(name, prompt, opts \\ []), do: GenServer.call(via(name), {:tell, prompt, opts})
 
-  def tell_with_completion(name, prompt, recipient, opts \\ []) when is_pid(recipient),
-    do: GenServer.call(via(name), {:tell, prompt, opts, recipient})
+  def tell_with_completion(name, prompt, recipient, opts \\ []) when is_pid(recipient) do
+    {stream_to, opts} = Keyword.pop(opts, :stream_to)
+
+    unless is_nil(stream_to) or is_pid(stream_to) do
+      raise ArgumentError, "expected :stream_to to be nil or a pid"
+    end
+
+    GenServer.call(via(name), {:tell, prompt, opts, recipient, stream_to})
+  end
 
   def await(name, token, timeout \\ 30_000)
       when timeout == :infinity or (is_integer(timeout) and timeout >= 0) do
@@ -102,6 +111,7 @@ defmodule GenAgentEnsemble.Server do
         dispatch_contexts: :redacted,
         pending: :redacted,
         monitors: :redacted,
+        stream_recipients: :redacted,
         token_contexts: :redacted
     }
   end
@@ -165,6 +175,7 @@ defmodule GenAgentEnsemble.Server do
         monitors: %{},
         pending: %{},
         token_contexts: %{},
+        stream_recipients: %{},
         completed: %{},
         waiters: %{},
         waiter_monitors: %{},
@@ -228,9 +239,17 @@ defmodule GenAgentEnsemble.Server do
   defp handle_call_impl({:tell, prompt, opts}, from, state),
     do: handle_call_impl({:tell, prompt, opts, nil}, from, state)
 
-  defp handle_call_impl({:tell, prompt, opts, recipient}, _from, state) do
+  defp handle_call_impl({:tell, prompt, opts, recipient}, from, state),
+    do: handle_call_impl({:tell, prompt, opts, recipient, nil}, from, state)
+
+  defp handle_call_impl({:tell, prompt, opts, recipient, stream_to}, _from, state) do
     token = mint_token()
     state = start_token(state, token, :tell, {:tell, recipient})
+
+    state =
+      if stream_to,
+        do: %{state | stream_recipients: Map.put(state.stream_recipients, token, stream_to)},
+        else: state
 
     {ops, strategy_state} =
       call_strategy(state.strategy_mod, :handle_tell, [prompt, opts, token, state.strategy_state])
@@ -291,7 +310,7 @@ defmodule GenAgentEnsemble.Server do
         {:reply, {:error, :unsupported}, state}
 
       true ->
-        {result, state} = cancel_token(drain_completions(state), token, false, true)
+        {result, state} = cancel_token(drain_child_messages(state), token, false, true)
         {:reply, result, state}
     end
   end
@@ -454,6 +473,21 @@ defmodule GenAgentEnsemble.Server do
       end)
 
     {:stop, :normal, state}
+  end
+
+  defp handle_info_impl({:gen_agent, :event, _ns_agent, ref, event}, state) do
+    with {:ok, {agent, token}} <- Map.fetch(state.in_flight, ref),
+         {:ok, recipient} <- Map.fetch(state.stream_recipients, token) do
+      {_started_at, ordinal} = Map.fetch!(state.dispatch_contexts, ref)
+
+      send(
+        recipient,
+        {:gen_agent_ensemble, :event, state.session_name, token,
+         %{agent: agent, dispatch: ordinal, event: event}}
+      )
+    end
+
+    {:noreply, state}
   end
 
   defp handle_info_impl(_msg, state), do: {:noreply, state}
@@ -679,11 +713,14 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp dispatch(state, name, prompt, token) do
+    opts =
+      if Map.has_key?(state.stream_recipients, token),
+        do: [on_halt: :fail, stream_to: self()],
+        else: [on_halt: :fail]
+
     result =
       try do
-        GenAgent.tell_with_completion(namespaced(state, name), prompt, self(), :infinity,
-          on_halt: :fail
-        )
+        GenAgent.tell_with_completion(namespaced(state, name), prompt, self(), :infinity, opts)
       catch
         :exit, {:noproc, _} -> {:error, {:agent_not_running, name}}
         :exit, reason -> {:error, {:dispatch_exit, reason}}
@@ -691,6 +728,8 @@ defmodule GenAgentEnsemble.Server do
 
     case result do
       {:ok, ref} ->
+        # Child events may already be queued, but this callback registers the
+        # ref before the GenServer can process those mailbox messages.
         {ordinal, state} = next_dispatch(state, token)
         started_at = System.monotonic_time()
         emit_dispatch(state, :start, name, token, ref, started_at, ordinal)
@@ -716,14 +755,14 @@ defmodule GenAgentEnsemble.Server do
     end
   end
 
-  # Before the first cancellation, preserve completion order across ALL refs:
+  # Drain events and completions in arrival order across ALL refs:
   # Solo/Switchboard correlate responses with their per-agent FIFO. Selecting
   # just this token's completion could pop an unrelated predecessor instead.
-  defp drain_completions(state) do
+  defp drain_child_messages(state) do
     receive do
-      {:gen_agent, :completion, _, _, _} = message ->
+      {:gen_agent, kind, _, _, _} = message when kind in [:event, :completion] ->
         {:noreply, state} = handle_info_impl(message, state)
-        drain_completions(state)
+        drain_child_messages(state)
     after
       0 -> state
     end
@@ -763,7 +802,7 @@ defmodule GenAgentEnsemble.Server do
     # A negative acknowledgement can race an already-sent completion.
     # Once cancellation has begun, never feed partial run results into
     # strategy state; cancellation owns the terminal result from here.
-    next = if not fenced? and not acknowledged?, do: drain_completions(state), else: state
+    next = if not fenced? and not acknowledged?, do: drain_child_messages(state), else: state
 
     if next.in_flight != state.in_flight or next.pending != state.pending do
       cancel_token(next, token, fenced?, confirmed?)
@@ -919,7 +958,12 @@ defmodule GenAgentEnsemble.Server do
       end
 
     emit(:token, event, %{duration_ms: elapsed_ms(context.started_at)}, metadata)
-    %{state | token_contexts: Map.delete(state.token_contexts, token)}
+
+    %{
+      state
+      | token_contexts: Map.delete(state.token_contexts, token),
+        stream_recipients: Map.delete(state.stream_recipients, token)
+    }
   end
 
   defp next_dispatch(state, nil), do: {nil, state}
