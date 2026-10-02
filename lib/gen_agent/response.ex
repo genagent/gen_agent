@@ -9,7 +9,7 @@ defmodule GenAgent.Response do
     * `:final_message` -- the terminal text when provided, otherwise the
       last boundary-marked assistant message (or all text if no boundary
       was marked). This remains available when compact retention omits
-      the text events.
+      the text events. Manually constructed responses leave it `nil`.
     * `:events` -- retained normalized events in arrival order. Check
       `:event_coverage` before treating this as a complete log.
     * `:terminal` -- the original terminal result event, even if compact
@@ -25,7 +25,7 @@ defmodule GenAgent.Response do
 
   @type t :: %__MODULE__{
           text: String.t(),
-          final_message: String.t(),
+          final_message: String.t() | nil,
           events: [Event.t()],
           terminal: Event.t() | nil,
           event_coverage: map(),
@@ -35,7 +35,7 @@ defmodule GenAgent.Response do
         }
 
   defstruct text: "",
-            final_message: "",
+            final_message: nil,
             events: [],
             terminal: nil,
             event_coverage: %{},
@@ -80,9 +80,11 @@ defmodule GenAgent.Response do
 
   @doc false
   def from_capture(events, terminal, usage, text_acc, opts) when is_list(events) do
+    text = text_from_capture(terminal, text_acc)
+
     %__MODULE__{
-      text: text_from_capture(terminal, text_acc),
-      final_message: final_message_from_capture(terminal, text_acc),
+      text: text,
+      final_message: final_message_from_capture(terminal, text_acc, text),
       events: events,
       terminal: terminal,
       event_coverage: Keyword.fetch!(opts, :event_coverage),
@@ -101,14 +103,13 @@ defmodule GenAgent.Response do
     do: chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
   @doc false
-  def final_message_from_capture(%Event{kind: :result, data: %{text: text}}, _acc)
+  def final_message_from_capture(%Event{kind: :result, data: %{text: text}}, _acc, _assembled)
       when is_binary(text),
       do: text
 
-  def final_message_from_capture(terminal, %{saw_boundary?: false} = acc),
-    do: text_from_capture(terminal, acc)
+  def final_message_from_capture(_terminal, %{saw_boundary?: false}, assembled), do: assembled
 
-  def final_message_from_capture(_terminal, %{final_chunks: chunks}),
+  def final_message_from_capture(_terminal, %{final_chunks: chunks}, _assembled),
     do: chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
   @doc false
