@@ -155,6 +155,7 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
 
   defp start_or_queue(prompt, token, %{phase: :idle} = state) do
     ops = for agent <- state.agents, do: {:dispatch, agent, prompt, token}
+
     {:ok, ops,
      %{state | usage: Usage.new(), errors: [], phase: {:running, token, prompt, 1, %{}}}}
   end
@@ -431,7 +432,9 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
 
     case state.phase do
       {:running, ^token, _, _, _} ->
-        {ops, state} = maybe_start_next(%{state | phase: :idle, errors: [], usage: Usage.new()}, [])
+        {ops, state} =
+          maybe_start_next(%{state | phase: :idle, errors: [], usage: Usage.new()}, [])
+
         {:ok, ops, state}
 
       _ ->
