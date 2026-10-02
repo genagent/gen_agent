@@ -50,6 +50,33 @@ defmodule GenAgentEnsemble.Strategies.PipelineTest do
     assert resp.text == "inner(mid(outer(seed)))"
   end
 
+  test "backend usage events aggregate across stages and reset on the next ask", %{name: name} do
+    script = fn usage ->
+      [Event.new(:usage, usage), Event.new(:result, %{text: "done"})]
+    end
+
+    {:ok, _} =
+      start_pipeline(name, [
+        [script.(%{input_tokens: 10, output_tokens: 2}), transform("a")],
+        [transform("b"), script.(%{input_tokens: 1})],
+        [script.(%{input_tokens: 20, output_tokens: 3}), transform("c")]
+      ])
+
+    assert {:ok, first} = GenAgentEnsemble.ask(name, "first", timeout: 5_000)
+
+    assert first.usage == %{
+             input_tokens: 30,
+             output_tokens: 5,
+             by_agent: %{
+               "#{name}-s1" => %{input_tokens: 10, output_tokens: 2},
+               "#{name}-s3" => %{input_tokens: 20, output_tokens: 3}
+             }
+           }
+
+    assert {:ok, second} = GenAgentEnsemble.ask(name, "second", timeout: 5_000)
+    assert second.usage == %{input_tokens: 1, by_agent: %{"#{name}-s2" => %{input_tokens: 1}}}
+  end
+
   test "queues a second tell behind the first", %{name: name} do
     {:ok, _} =
       start_pipeline(name, [

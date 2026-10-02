@@ -193,3 +193,15 @@ iex> E.start_link(
   each is 6K tokens in the final response. Use `:last` or
   `{:synthesize, ...}` if the full transcript isn't useful
   downstream.
+
+## Usage accounting
+
+Every completed turn counts, including repeated turns by the same agent.
+Early convergence counts only the turns that ran. All reply modes carry usage.
+
+`Response.usage` contains summed numeric provider fields and a reserved
+`:by_agent` map of agent names to their summed numeric fields. It stays `nil`
+when no turn reports usage. Nonnumeric fields are dropped, and each invocation
+starts fresh. Failed turns cannot be counted; session-cumulative backend usage
+would overcount. See [usage accounting](overview.md#usage-accounting) for the
+complete shape and per-turn reporting assumption.

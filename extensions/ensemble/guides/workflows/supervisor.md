@@ -165,3 +165,15 @@ iex> E.await("research", tok) |> E.puts()
 - **Decomposition determines synthesizer order.** The synthesizer
   receives `[{worker_name, output_text}]` in the original sub-prompt
   order, regardless of worker completion order.
+
+## Usage accounting
+
+The coordinator and every completed worker count. An empty decomposition
+returns the coordinator response with its usage counted once.
+
+`Response.usage` contains summed numeric provider fields and a reserved
+`:by_agent` map of agent names to their summed numeric fields. It stays `nil`
+when no turn reports usage. Nonnumeric fields are dropped, and each invocation
+starts fresh. Failed turns cannot be counted; session-cumulative backend usage
+would overcount. See [usage accounting](overview.md#usage-accounting) for the
+complete shape and per-turn reporting assumption.
