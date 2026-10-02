@@ -10,7 +10,19 @@ printf '%s\n' "$@" > "$fixture_dir/$mode.args"
 pwd > "$fixture_dir/$mode.cwd"
 printf '%s\n' "${GEN_AGENT_FIXTURE-unset}" > "$fixture_dir/$mode.env"
 
+if [ -n "${GEN_AGENT_RECORDING-}" ]; then
+  cat "$GEN_AGENT_RECORDING_DIR/$GEN_AGENT_RECORDING.jsonl"
+  exit "$GEN_AGENT_RECORDING_EXIT_STATUS"
+fi
+
 case "$*" in
+  *process-tree*)
+    sleep 60 &
+    child_pid=$!
+    printf '%s\n' "$$" "$child_pid" > "$fixture_dir/process.pids"
+    printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"waiting"}}}'
+    wait "$child_pid"
+    ;;
   *fail*)
     printf '%s\n' '{"type":"result","subtype":"error_max_turns","is_error":true,"result":"fixture failure","session_id":"fixture-session","usage":{"input_tokens":2,"output_tokens":1}}'
     ;;
