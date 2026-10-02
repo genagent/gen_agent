@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.1...gen_agent_codex-v0.4.2) (2026-10-02)
+
+
+### Bug Fixes
+
+* **deps:** allow core 0.7 in CLI adapters and Ensemble ([#327](https://github.com/genagent/gen_agent/issues/327)) ([f9d3a21](https://github.com/genagent/gen_agent/commit/f9d3a218b5e7beb82217f829c4b267c2f7504829))
+
 ## [0.4.1](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.0...gen_agent_codex-v0.4.1) (2026-10-02)
 
 
