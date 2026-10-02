@@ -182,8 +182,64 @@ defmodule GenAgent.Server do
     :ok
   end
 
-  @impl :gen_statem
   def terminate(_reason, _state, _data), do: :ok
+
+  @impl :gen_statem
+  def format_status(status) when is_map(status) do
+    Map.new(status, fn
+      {:data, %Data{} = data} -> {:data, redact_data(data)}
+      {:data, _} -> {:data, :redacted}
+      {key, events} when key in [:queue, :postponed] -> {key, redact_events(events)}
+      {:log, log} -> {:log, redact_log(log)}
+      {:reason, reason} -> {:reason, redact_status_reason(reason)}
+      entry -> entry
+    end)
+  end
+
+  def format_status(_), do: %{}
+
+  defp redact_data(%Data{} = data) do
+    %Data{
+      data
+      | backend_session: :redacted,
+        agent_state: :redacted,
+        current_request: :redacted,
+        mailbox: :redacted,
+        pending_events: :redacted,
+        tell_results: :redacted,
+        tell_result_order: :redacted,
+        ask_monitors: :redacted,
+        self_chain: :redacted
+    }
+  end
+
+  defp redact_events(events) when is_list(events) do
+    Enum.map(events, fn
+      {event_type, _content} -> {redact_log_entry(event_type), :redacted}
+      _ -> :redacted
+    end)
+  end
+
+  defp redact_events(_), do: :redacted
+
+  defp redact_log(log) when is_list(log), do: Enum.map(log, &redact_log_entry/1)
+  defp redact_log(_), do: :redacted
+
+  defp redact_log_entry(value) when is_atom(value), do: value
+
+  defp redact_log_entry(value) when is_tuple(value) do
+    value |> Tuple.to_list() |> Enum.map(&redact_log_entry/1) |> List.to_tuple()
+  end
+
+  defp redact_log_entry(value) when is_list(value), do: Enum.map(value, &redact_log_entry/1)
+  defp redact_log_entry(_), do: :redacted
+
+  # Shutdown atoms identify routine exits. Other terms can contain a callback's
+  # state or prompt, so the status formatter does not render their details.
+  defp redact_status_reason(reason) when is_atom(reason), do: reason
+  defp redact_status_reason({:shutdown, reason}) when is_atom(reason), do: {:shutdown, reason}
+  defp redact_status_reason({:shutdown, _}), do: {:shutdown, :redacted}
+  defp redact_status_reason(_), do: :redacted
 
   # ---------------------------------------------------------------------------
   # State enter actions

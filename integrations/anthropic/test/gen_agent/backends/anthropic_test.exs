@@ -32,6 +32,37 @@ defmodule GenAgent.Backends.AnthropicTest do
   end
 
   describe "start_session/1" do
+    test "Inspect shows session metadata and a message count without content" do
+      {:ok, session} =
+        Anthropic.start_session(
+          api_key: "sk-test-SECRET-123",
+          system: "SYSTEM-SENTINEL",
+          model: "claude-test-model",
+          http_fn: ok_response("REPLY-SENTINEL")
+        )
+
+      {:ok, _events, session} = Anthropic.prompt(session, "PROMPT-SENTINEL")
+
+      for rendered <- [
+            inspect(session),
+            inspect(session, limit: :infinity),
+            inspect(session, pretty: true),
+            "#{inspect(session)}"
+          ] do
+        assert rendered =~ "#GenAgent.Backends.Anthropic<"
+        assert rendered =~ "model: \"claude-test-model\""
+        assert rendered =~ "messages: 1"
+        refute rendered =~ "sk-test-SECRET-123"
+        refute rendered =~ "SYSTEM-SENTINEL"
+        refute rendered =~ "PROMPT-SENTINEL"
+        refute rendered =~ "REPLY-SENTINEL"
+        refute rendered =~ "http_fn"
+        refute rendered =~ "api_key"
+      end
+
+      assert session.api_key == "sk-test-SECRET-123"
+    end
+
     test "reads api_key from opts" do
       {:ok, session} =
         Anthropic.start_session(api_key: "sk-test", http_fn: ok_response("hi"))

@@ -261,3 +261,25 @@ defmodule GenAgent.Backends.Anthropic do
     |> Map.new()
   end
 end
+
+defimpl Inspect, for: GenAgent.Backends.Anthropic do
+  import Inspect.Algebra
+
+  def inspect(session, opts) do
+    fields = [
+      model: session.model,
+      max_tokens: session.max_tokens,
+      receive_timeout: session.receive_timeout,
+      connect_timeout: session.connect_timeout,
+      client_session_id: session.client_session_id,
+      messages: if(is_list(session.messages), do: length(session.messages), else: :unknown)
+    ]
+
+    docs =
+      Enum.map(fields, fn {key, value} ->
+        concat([Atom.to_string(key), ": ", to_doc(value, opts)])
+      end)
+
+    concat(["#GenAgent.Backends.Anthropic<", concat(Enum.intersperse(docs, ", ")), ">"])
+  end
+end

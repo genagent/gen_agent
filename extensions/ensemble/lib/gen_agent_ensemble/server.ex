@@ -62,6 +62,51 @@ defmodule GenAgentEnsemble.Server do
   # --- GenServer callbacks ---
 
   @impl true
+  def format_status(status) when is_map(status) do
+    Map.new(status, fn
+      {:state, %__MODULE__{} = state} -> {:state, redact_state(state)}
+      {:state, _} -> {:state, :redacted}
+      {:message, message} -> {:message, redact_status_term(message)}
+      {:log, log} -> {:log, redact_status_log(log)}
+      {:reason, reason} -> {:reason, redact_status_reason(reason)}
+      entry -> entry
+    end)
+  end
+
+  def format_status(_), do: %{}
+
+  defp redact_state(%__MODULE__{} = state) do
+    %__MODULE__{
+      state
+      | strategy_state: :redacted,
+        completed: :redacted,
+        in_flight: :redacted,
+        dispatch_contexts: :redacted,
+        pending: :redacted,
+        monitors: :redacted,
+        token_contexts: :redacted
+    }
+  end
+
+  defp redact_status_log(log) when is_list(log), do: Enum.map(log, &redact_status_term/1)
+  defp redact_status_log(_), do: :redacted
+
+  defp redact_status_term(value) when is_atom(value), do: value
+
+  defp redact_status_term(value) when is_tuple(value) do
+    value |> Tuple.to_list() |> Enum.map(&redact_status_term/1) |> List.to_tuple()
+  end
+
+  defp redact_status_term(value) when is_list(value), do: Enum.map(value, &redact_status_term/1)
+  defp redact_status_term(_), do: :redacted
+
+  # Preserve routine shutdown atoms; other reasons can embed callback state.
+  defp redact_status_reason(reason) when is_atom(reason), do: reason
+  defp redact_status_reason({:shutdown, reason}) when is_atom(reason), do: {:shutdown, reason}
+  defp redact_status_reason({:shutdown, _}), do: {:shutdown, :redacted}
+  defp redact_status_reason(_), do: :redacted
+
+  @impl true
   def init(opts) do
     strategy_mod = Keyword.fetch!(opts, :strategy)
     strategy_opts = Keyword.get(opts, :opts, [])
@@ -328,7 +373,7 @@ defmodule GenAgentEnsemble.Server do
 
       true ->
         Logger.warning(
-          "[gen_agent_ensemble] agent #{bare_agent} turn errored (unhandled): #{inspect(reason)}"
+          "[gen_agent_ensemble] agent #{bare_agent} turn errored (unhandled): #{reason_kind(reason)}"
         )
 
         state
@@ -370,8 +415,25 @@ defmodule GenAgentEnsemble.Server do
         {:cont, state}
 
       {:error, reason} ->
-        Logger.warning("[gen_agent_ensemble] op #{inspect(op)} failed: #{inspect(reason)}")
+        Logger.warning(
+          "[gen_agent_ensemble] op #{inspect(op_summary(op))} failed: #{reason_kind(reason)}"
+        )
+
         handle_op_failure(op, reason, state)
+    end
+  end
+
+  # The operation tag, agent name, and token identify a failed action without
+  # rendering its prompt, start options, response, or backend error body.
+  defp op_summary(op) do
+    case op do
+      {:start, {name, _module, _opts}} -> {:start, name}
+      {:stop, name} -> {:stop, name}
+      {:dispatch, name, _prompt, token} -> {:dispatch, name, token}
+      {tag, name, _payload} when tag in [:dispatch, :forward] -> {tag, name}
+      {tag, token, _payload} when tag in [:reply, :reply_error] -> {tag, token}
+      {:halt, _reason} -> :halt
+      _ -> :unknown_op
     end
   end
 
