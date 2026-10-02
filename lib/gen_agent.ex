@@ -658,12 +658,32 @@ defmodule GenAgent do
   The request ref remains suitable for `interrupt_request/3` while active
   or `cancel_request/3` while queued. A new agent under the same name never
   reuses it.
+
+  The five-argument form accepts `on_halt: :fail`. It rejects a new request
+  with `{:error, :halted}` when the agent is already halted, and completes
+  an opted-in queued request with `{:error, :halted}` if the agent halts
+  before dispatch. The default preserves the ordinary queue-until-resume
+  behavior. This is useful for callers, such as ensembles, that cannot
+  resume a halted agent themselves.
   """
   @spec tell_with_completion(name(), String.t(), pid(), timeout()) ::
           {:ok, request_ref()} | {:error, term()}
   def tell_with_completion(name, prompt, recipient \\ self(), timeout \\ @default_call_timeout)
       when is_binary(prompt) and is_pid(recipient) do
     :gen_statem.call(via(name), {:tell_with_completion, prompt, recipient}, timeout)
+  end
+
+  @spec tell_with_completion(name(), String.t(), pid(), timeout(), keyword()) ::
+          {:ok, request_ref()} | {:error, term()}
+  def tell_with_completion(name, prompt, recipient, timeout, opts)
+      when is_binary(prompt) and is_pid(recipient) and is_list(opts) do
+    on_halt = Keyword.get(opts, :on_halt, :queue)
+
+    if on_halt not in [:queue, :fail] do
+      raise ArgumentError, "expected :on_halt to be :queue or :fail"
+    end
+
+    :gen_statem.call(via(name), {:tell_with_completion, prompt, recipient, on_halt}, timeout)
   end
 
   @doc """
