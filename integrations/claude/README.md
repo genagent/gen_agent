@@ -383,16 +383,26 @@ so one turn's events mix both key types.
   present only when the CLI includes it.
 - `:usage` -- `%{input_tokens: integer, output_tokens: integer}`. A count
   the CLI omits is omitted. Cache token counts are not included.
-- `:result` -- `%{text: String.t(), session_id: String.t(), cost_usd: number, duration_ms: integer, num_turns: integer, is_error: false}`.
-  Fields the CLI omits are omitted, except `:text` (defaults to `""`) and
-  `:is_error`.
+- `:result` -- `%{text: String.t(), session_id: String.t(), cost_usd: number, duration_ms: integer, num_turns: integer, is_error: false, raw: map}`.
+  Fields the CLI omits are omitted, except `:is_error`. `:raw` is the string-keyed result event, so
+  `structured_output` (with `:json_schema`), `stop_reason`,
+  `permission_denials`, `duration_api_ms` and extended usage are read from
+  `raw`. When the result text is empty or absent, `:text` is omitted, so
+  `Response.text` is assembled from the turn's `:text` events; a nonempty
+  result text is always used as given. The original empty or missing value
+  stays in `raw`. Tool inputs are never used as
+  text: a plan passed to `ExitPlanMode` is read from that `:tool_use` event's
+  `"input"`. The fallback is covered by synthetic stream tests; the CLI
+  output of a plan-mode turn that ends in `ExitPlanMode` with an empty result
+  has not been recorded.
 - `:error` from a failed `"result"` -- `%{reason: reason, data: raw}`,
   where `raw` is the string-keyed result event and `reason` is
-  `%{provider: :claude, subtype: String.t(), message: term, session_id: String.t(), cost_usd: number, usage: map}`
-  with absent fields omitted. `:message` is the result's `"result"` or
-  `"error"` field, or `:unknown` when neither is present. A max-turns
-  failure reports its text only in `raw["errors"]`, so its `:message` is
-  `:unknown`.
+  `%{provider: :claude, subtype: String.t(), message: term, errors: [term], num_turns: integer, session_id: String.t(), cost_usd: number, usage: map}`
+  with absent fields omitted. `:message` is the first of: a nonempty
+  `"result"` string, the nonempty `"errors"` list joined with `"; "`, a
+  nonempty `"error"` string, or `:unknown`. `:errors` keeps the list. The
+  recorded CLI 2.1.284 max-turns failure carries only `"errors"`, so its
+  `:message` is that text. Other failure subtypes have not been recorded.
 - `:error` from an `"error"` event -- `%{reason: reason, data: raw}`, where
   `reason` is the event's `"error"` or `"message"` field, or `:unknown`.
   When the CLI exits without a terminal result (idle deadline, non-zero
