@@ -35,6 +35,8 @@ defmodule GenAgent.Backends.Anthropic do
   ## Options
 
     * `:api_key` -- Anthropic API key. Defaults to `System.get_env("ANTHROPIC_API_KEY")`.
+      `start_session/1` returns `{:error, :missing_api_key}` when neither
+      provides a non-empty key, unless a one-arity `:http_fn` is supplied.
     * `:model` -- model name. Defaults to `"claude-sonnet-4-5"`.
     * `:max_tokens` -- max tokens per turn. Defaults to `1024`.
     * `:system` -- system prompt (string).
@@ -87,7 +89,18 @@ defmodule GenAgent.Backends.Anthropic do
 
   @impl GenAgent.Backend
   def start_session(opts) do
-    api_key = Keyword.get(opts, :api_key) || System.get_env("ANTHROPIC_API_KEY")
+    api_key = present(Keyword.get(opts, :api_key)) || present(System.get_env("ANTHROPIC_API_KEY"))
+
+    # A caller-supplied :http_fn replaces the HTTP call (a stub or a proxy that
+    # adds credentials), so only the default transport requires a key.
+    if is_nil(api_key) and not is_function(Keyword.get(opts, :http_fn), 1) do
+      {:error, :missing_api_key}
+    else
+      build_session(api_key, opts)
+    end
+  end
+
+  defp build_session(api_key, opts) do
     http_fn = Keyword.get(opts, :http_fn, &default_http/1)
 
     session = %__MODULE__{
@@ -103,6 +116,12 @@ defmodule GenAgent.Backends.Anthropic do
 
     {:ok, session}
   end
+
+  defp present(value) when is_binary(value) do
+    if String.trim(value) == "", do: nil, else: value
+  end
+
+  defp present(_value), do: nil
 
   @impl GenAgent.Backend
   def prompt(%__MODULE__{} = session, prompt) when is_binary(prompt) do
