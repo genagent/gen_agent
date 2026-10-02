@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0](https://github.com/genagent/gen_agent/compare/v0.5.0...v0.6.0) (2026-10-02)
+
+
+### Features
+
+* **core:** checkpoint CLI sessions during active turns ([52f2919](https://github.com/genagent/gen_agent/commit/52f2919f2e677a14b428b05f1ad6dd1628741cd0))
+
+
+### Bug Fixes
+
+* **core:** compact retained events without losing turns ([#282](https://github.com/genagent/gen_agent/issues/282)) ([f9c9375](https://github.com/genagent/gen_agent/commit/f9c9375adbc4ef446f2bc52e336ac0006da5399c))
+* **ensemble:** complete dispatches when members halt ([#284](https://github.com/genagent/gen_agent/issues/284)) ([a6bac3d](https://github.com/genagent/gen_agent/commit/a6bac3d855bf188081d6693f9180ecc682f27336))
+* ignore dead registered agents in whereis ([#274](https://github.com/genagent/gen_agent/issues/274)) ([f5127d9](https://github.com/genagent/gen_agent/commit/f5127d93432141dea46caf143f268c476de00c28))
+* redact sensitive agent state from diagnostics ([#280](https://github.com/genagent/gen_agent/issues/280)) ([3038766](https://github.com/genagent/gen_agent/commit/3038766b00c1854a2db31ca74bba5a48da13c9ad))
+
 ## [0.5.0](https://github.com/genagent/gen_agent/compare/v0.4.0...v0.5.0) (2026-10-01)
 
 

@@ -11,7 +11,7 @@ before changing an application's dependency requirements.
 | 0.2.2 | A turn that exceeds the retained-event count or byte limit fails with `{:error, {:event_capture_overflow, diagnostics}}`. |
 | 0.3.0 | Pending prompts and notifications have bounded queues. `ask/3` and `tell/3` can reject admission with `{:error, {:overloaded, info}}`; `tell_with_completion/4` adds request-scoped completion messages. |
 | 0.5.0 | Queued tells can be cancelled by ref with `cancel_request/3`. |
-| 0.6.0 target (on main as of 2026-10-02; release pending) | Compact event retention is the default: long turns can succeed while `Response.events` contains only a prefix. Check `Response.event_coverage`; choose `event_retention: :lossless` for the earlier overflow contract. |
+| 0.6.0 | Compact event retention is the default: long turns can succeed while `Response.events` contains only a prefix. Check `Response.event_coverage`; choose `event_retention: :lossless` for the earlier overflow contract. Claude and Codex checkpoint session IDs during a turn, so an interrupted or failed turn can retain its conversation ID. |
 
 ### Event evidence and long turns
 
@@ -30,7 +30,7 @@ GenAgent.start_agent(MyApp.Agent,
 )
 ```
 
-The compact-retention change targeted for 0.6.0 still calls
+In 0.6.0, compact retention still calls
 `handle_stream_event/2` for every normalized event, but retains only the
 prefix that fits. The terminal result, full response text, latest usage, and
 session ID remain separate from that prefix. A consumer that treats
@@ -110,12 +110,13 @@ for the accepted keys; Claude and Codex do not share one option schema.
 
 An application requirement such as `{:gen_agent, "~> 0.2.0"}` excludes
 0.3.0 and later; update it deliberately after adapting the return shapes.
-The four adapter Mix projects currently accept core 0.2, 0.3, 0.4, and 0.5
-through an explicit `or` requirement, rather than pinning only 0.2. Before
-using a core version beyond those ranges, wait for compatible adapter
-releases or use a tested source checkout. Ensemble currently accepts core
-0.3 through 0.5. Run `mix deps.get` and your application tests after
-updating both core and integration requirements.
+The four adapter Mix projects accept core 0.2 through 0.6 through an explicit
+`or` requirement, rather than pinning only 0.2. For core 0.6.0, use the
+compatible adapter release lines: Claude 0.2.0, Codex 0.4.0, Anthropic 0.3.0,
+or OpenAI 0.3.0. Ensemble 0.3.0 accepts core 0.3 through 0.6. Earlier
+published adapter and Ensemble releases may exclude 0.6. Run `mix deps.get`
+and your application tests after updating both core and integration
+requirements.
 
 ## Source repository migration
 
