@@ -7,6 +7,11 @@ defmodule GenAgent.ResponseTest do
     assert %Response{text: "synthetic"}.final_message == nil
   end
 
+  test "metadata defaults to an empty map for manual and backend responses" do
+    assert %Response{}.metadata == %{}
+    assert Response.from_events([Event.new(:result, %{text: "done"})]).metadata == %{}
+  end
+
   describe "from_events/2" do
     test "takes text from the :result event when present" do
       events = [
