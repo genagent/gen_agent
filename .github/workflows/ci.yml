@@ -147,6 +147,35 @@ jobs:
       - name: Run primitive examples
         run: bash scripts/run_all.sh
 
+  chaos_lab:
+    name: GenAgent chaos lab
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/chaos_lab
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20"
+          otp-version: "29"
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: Run chaos lab
+        run: |
+          set -euo pipefail
+          mix run scripts/chaos_lab.exs | tee chaos_lab.log
+          test "$(tail -n 1 chaos_lab.log)" = 'chaos_lab: ok'
+
   packages:
     name: ${{ matrix.package }}
     runs-on: ubuntu-latest
