@@ -18,6 +18,7 @@ defmodule GenAgent.Response do
       retained log. `mode: :exact` means no event was omitted.
     * `:usage` -- token usage if the backend reported any, otherwise `nil`.
     * `:duration_ms` -- wall-clock time from prompt dispatch to terminal event.
+    * `:metadata` -- additive application or orchestration results, defaulting to `%{}`.
     * `:session_id` -- the backend's session identifier, if any.
   """
 
@@ -31,6 +32,7 @@ defmodule GenAgent.Response do
           event_coverage: map(),
           usage: map() | nil,
           duration_ms: non_neg_integer(),
+          metadata: map(),
           session_id: String.t() | nil
         }
 
@@ -41,6 +43,7 @@ defmodule GenAgent.Response do
             event_coverage: %{},
             usage: nil,
             duration_ms: 0,
+            metadata: %{},
             session_id: nil
 
   @doc """
