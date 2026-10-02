@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.1](https://github.com/genagent/gen_agent/compare/v0.6.0...v0.6.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **core:** retain final assistant message for presentation ([7580728](https://github.com/genagent/gen_agent/commit/758072863902aa7101cc3d3fa429863c544c88bb))
+* **ensemble:** require core 0.6 for completion-aware dispatch ([d5d0d39](https://github.com/genagent/gen_agent/commit/d5d0d3926698858625b4127cc4bd7d94ecbec6bc))
+
 ## [0.6.0](https://github.com/genagent/gen_agent/compare/v0.5.0...v0.6.0) (2026-10-02)
 
 
