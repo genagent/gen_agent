@@ -69,7 +69,10 @@ defmodule GenAgent.Server do
       pending_events: :queue.new(),
       pending_notification_bytes: 0,
       tell_results: %{},
-      tell_result_order: :queue.new()
+      tell_result_order: :queue.new(),
+      # Opt-in stream recipients by request ref. An entry exists from
+      # admission until the request is dispatched, cancelled or failed.
+      stream_recipients: %{}
     ]
   end
 
@@ -224,6 +227,7 @@ defmodule GenAgent.Server do
         pending_events: :redacted,
         tell_results: :redacted,
         tell_result_order: :redacted,
+        stream_recipients: :redacted,
         ask_monitors: :redacted,
         self_chain: :redacted
     }
@@ -450,6 +454,44 @@ defmodule GenAgent.Server do
        )
        when state in [:idle, :processing] do
     queue_tell(data, from, prompt, recipient, on_halt)
+  end
+
+  defp dispatch_event(
+         {:call, from},
+         {:tell_with_completion, _prompt, _recipient, :fail, _stream_to},
+         :idle,
+         %Data{halted: true}
+       ) do
+    {:keep_state_and_data, [{:reply, from, {:error, :halted}}]}
+  end
+
+  defp dispatch_event(
+         {:call, from},
+         {:tell_with_completion, prompt, recipient, on_halt, stream_to},
+         :idle,
+         %Data{halted: false} = data
+       ) do
+    request_ref = make_ref()
+    data = put_stream_recipient(data, request_ref, stream_to)
+    kind = tell_kind(recipient, on_halt)
+
+    case try_dispatch(data, request_ref, kind, prompt) do
+      {:next_state, :processing, data} ->
+        {:next_state, :processing, data, [{:reply, from, {:ok, request_ref}}]}
+
+      {:keep_state, data, actions} ->
+        {:keep_state, data, [{:reply, from, {:ok, request_ref}} | actions]}
+    end
+  end
+
+  defp dispatch_event(
+         {:call, from},
+         {:tell_with_completion, prompt, recipient, on_halt, stream_to},
+         state,
+         %Data{} = data
+       )
+       when state in [:idle, :processing] do
+    queue_tell(data, from, prompt, recipient, on_halt, stream_to)
   end
 
   # poll -- check status of a previously-tell'd request
@@ -728,6 +770,19 @@ defmodule GenAgent.Server do
     end
   end
 
+  # Stream events relayed from the prompt task. Only the active request's
+  # events are forwarded; anything from a finished request is dropped.
+  defp dispatch_event(
+         :info,
+         {:gen_agent_stream, ref, tag, event},
+         :processing,
+         %Data{current_request: %{request_ref: ref, stream_to: stream_to, stream_tag: tag}} = data
+       )
+       when is_pid(stream_to) do
+    send(stream_to, {:gen_agent, :event, data.name, ref, event})
+    :keep_state_and_data
+  end
+
   defp dispatch_event(:info, _msg, _state, _data), do: :keep_state_and_data
 
   defp request_origin({:ask, _from}), do: :ask
@@ -791,6 +846,7 @@ defmodule GenAgent.Server do
 
   defp finish_queued_tell_cancel(data, from, ref, kind, prompt) do
     data = remove_queued_entry(data, ref, prompt)
+    data = %{data | stream_recipients: Map.delete(data.stream_recipients, ref)}
     data = store_tell_result(data, ref, {:error, :cancelled})
 
     if recipient = completion_recipient(kind) do
@@ -831,18 +887,22 @@ defmodule GenAgent.Server do
   defp completion_recipient({:tell, recipient, _on_halt}), do: recipient
   defp completion_recipient(_kind), do: nil
 
-  defp queue_tell(data, from, prompt, recipient \\ nil, on_halt \\ :queue) do
-    request_ref = make_ref()
+  defp tell_kind(nil, _on_halt), do: :tell
+  defp tell_kind(recipient, :queue), do: {:tell, recipient}
+  defp tell_kind(recipient, on_halt), do: {:tell, recipient, on_halt}
 
-    kind =
-      cond do
-        is_nil(recipient) -> :tell
-        on_halt == :queue -> {:tell, recipient}
-        true -> {:tell, recipient, on_halt}
-      end
+  defp put_stream_recipient(data, _ref, nil), do: data
+
+  defp put_stream_recipient(data, ref, pid),
+    do: %{data | stream_recipients: Map.put(data.stream_recipients, ref, pid)}
+
+  defp queue_tell(data, from, prompt, recipient \\ nil, on_halt \\ :queue, stream_to \\ nil) do
+    request_ref = make_ref()
+    kind = tell_kind(recipient, on_halt)
 
     case enqueue_prompt(data, request_ref, kind, prompt) do
       {:ok, queued} ->
+        queued = put_stream_recipient(queued, request_ref, stream_to)
         {:keep_state, queued, [{:reply, from, {:ok, request_ref}}]}
 
       {:error, reason} ->
@@ -1035,11 +1095,16 @@ defmodule GenAgent.Server do
   #
   # Returns a gen_statem handle_event result tuple.
   defp try_dispatch(%Data{} = data, request_ref, kind, prompt) do
+    # Take the stream recipient out of the map here so every outcome below
+    # (dispatch, skip, halt, rejection) leaves nothing behind.
+    {stream_to, recipients} = Map.pop(data.stream_recipients, request_ref)
+    data = %{data | stream_recipients: recipients}
+
     case safely_pre_turn(data.agent_module, prompt, data.agent_state) do
       {:ok, new_prompt, new_state} when is_binary(new_prompt) ->
         data = %{data | agent_state: new_state}
 
-        case dispatch(data, request_ref, kind, new_prompt, prompt) do
+        case dispatch(data, request_ref, kind, new_prompt, prompt, stream_to) do
           {:ok, data} ->
             {:next_state, :processing, data}
 
@@ -1073,7 +1138,7 @@ defmodule GenAgent.Server do
     end
   end
 
-  defp dispatch(%Data{} = data, request_ref, kind, prompt, original_prompt) do
+  defp dispatch(%Data{} = data, request_ref, kind, prompt, original_prompt, stream_to) do
     backend = data.backend
     backend_session = data.backend_session
     module = data.agent_module
@@ -1083,6 +1148,7 @@ defmodule GenAgent.Server do
     max_event_bytes_per_turn = data.max_event_bytes_per_turn
     event_retention = data.event_retention
     owner = self()
+    stream_tag = if stream_to, do: make_ref()
 
     # Link the task to its owning agent as well as the shared supervisor.
     # Even an untrappable agent exit must take its in-flight turn down.
@@ -1099,7 +1165,7 @@ defmodule GenAgent.Server do
              agent_state,
              prompt,
              {max_events_per_turn, max_event_bytes_per_turn, event_retention},
-             {owner, request_ref}
+             {owner, request_ref, stream_tag}
            )
          end)}
       catch
@@ -1118,6 +1184,8 @@ defmodule GenAgent.Server do
           task_ref: task.ref,
           task_pid: task.pid,
           kind: kind,
+          stream_to: stream_to,
+          stream_tag: stream_tag,
           prompt: prompt,
           started_at: started_at,
           checkpoint_id: nil,
@@ -1160,9 +1228,10 @@ defmodule GenAgent.Server do
          agent_state,
          prompt,
          {max_events_per_turn, max_event_bytes_per_turn, event_retention},
-         {owner, request_ref}
+         {owner, request_ref, stream_tag}
        ) do
     started = System.monotonic_time(:millisecond)
+    handler = {module, if(stream_tag, do: {owner, request_ref, stream_tag})}
 
     checkpoint = fn id ->
       :gen_statem.call(owner, {:checkpoint_session, request_ref, id})
@@ -1181,7 +1250,7 @@ defmodule GenAgent.Server do
           stream,
           backend,
           backend_session,
-          module,
+          handler,
           agent_state,
           started,
           {max_events_per_turn, max_event_bytes_per_turn},
@@ -1400,12 +1469,21 @@ defmodule GenAgent.Server do
     raise ArgumentError, "#{name} must be a non-negative integer, got: #{inspect(value)}"
   end
 
-  defp maybe_handle_stream_event(module, event, state) do
-    if function_exported?(module, :handle_stream_event, 2) do
-      module.handle_stream_event(event, state)
-    else
-      state
+  # Runs the callback, then relays the event to the owner for opted-in
+  # requests. The owner forwards it, so it precedes the completion message.
+  defp maybe_handle_stream_event({module, relay}, event, state) do
+    state =
+      if function_exported?(module, :handle_stream_event, 2) do
+        module.handle_stream_event(event, state)
+      else
+        state
+      end
+
+    with {owner, request_ref, tag} <- relay do
+      send(owner, {:gen_agent_stream, request_ref, tag, event})
     end
+
+    state
   end
 
   defp maybe_update_session(backend, session, data) do
@@ -1600,6 +1678,7 @@ defmodule GenAgent.Server do
           data =
             data
             |> store_tell_result(ref, {:error, :halted})
+            |> Map.update!(:stream_recipients, &Map.delete(&1, ref))
             |> Map.update!(:pending_prompt_bytes, &(&1 - :erlang.external_size(prompt)))
 
           {remaining, data}

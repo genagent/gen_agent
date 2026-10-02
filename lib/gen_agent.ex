@@ -157,7 +157,8 @@ defmodule GenAgent do
     * `child_spec/2` -- build a child spec for caller-owned supervision.
     * `ask/3` -- synchronous prompt, blocks until the turn finishes.
     * `tell/3` -- async prompt, returns a ref for `poll/3`.
-    * `tell_with_completion/4` -- async prompt with request-scoped completion delivery.
+    * `tell_with_completion/4` -- async prompt with request-scoped completion delivery;
+      `tell_with_completion/5` adds `stream_to:` for ref-tagged stream events.
     * `poll/3` -- check on a previously-issued `tell/3`.
     * `notify/2` -- push an external event into `c:handle_event/2`.
     * `notify_ack/3` -- acknowledge in-memory notification admission.
@@ -668,6 +669,24 @@ defmodule GenAgent do
   before dispatch. The default preserves the ordinary queue-until-resume
   behavior. This is useful for callers, such as ensembles, that cannot
   resume a halted agent themselves.
+
+  The five-argument form also accepts `stream_to: pid`. The process
+  receives `{:gen_agent, :event, name, ref, %GenAgent.Event{}}` for each
+  event the backend streams during that request's turn, in stream order.
+  Events are relayed through the agent after `c:handle_stream_event/2`
+  runs, so for one ref they arrive before the completion message when
+  `stream_to` and `recipient` are the same process. Separate processes
+  have no shared arrival order. Streaming is off by default and
+  independent of `event_retention`: compact mode relays events that the
+  retained history omits, and lossless mode does not relay the event it
+  rejects for exceeding the capture limits.
+
+  Delivery has no backpressure and is best effort. A dead `stream_to`
+  process is ignored. An interrupt or watchdog timeout can drop events
+  that were generated but not yet relayed; nothing is relayed for a ref
+  after its request has finished. A request that never starts a turn
+  (cancelled, rejected by `pre_turn/2`, halted or failed dispatch)
+  produces no events.
   """
   @spec tell_with_completion(name(), String.t(), pid(), timeout()) ::
           {:ok, request_ref()} | {:error, term()}
@@ -686,7 +705,20 @@ defmodule GenAgent do
       raise ArgumentError, "expected :on_halt to be :queue or :fail"
     end
 
-    :gen_statem.call(via(name), {:tell_with_completion, prompt, recipient, on_halt}, timeout)
+    stream_to = Keyword.get(opts, :stream_to)
+
+    unless is_nil(stream_to) or is_pid(stream_to) do
+      raise ArgumentError, "expected :stream_to to be nil or a pid"
+    end
+
+    message =
+      if stream_to do
+        {:tell_with_completion, prompt, recipient, on_halt, stream_to}
+      else
+        {:tell_with_completion, prompt, recipient, on_halt}
+      end
+
+    :gen_statem.call(via(name), message, timeout)
   end
 
   @doc """
