@@ -64,7 +64,8 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
     coord_script = [Event.new(:result, %{text: Enum.join(prompts, "\n")})]
     worker_script = fn prompt -> [Event.new(:result, %{text: "answer: #{prompt}"})] end
 
-    {:ok, _} = start_session(name, [coord_script], List.duplicate(worker_script, 12))
+    {:ok, _} =
+      start_session(name, [coord_script], List.duplicate(worker_script, 12), max_subtasks: 12)
 
     {:ok, resp} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
     assert resp.text == Enum.map_join(prompts, "\n\n", &"### #{&1}\n\nanswer: #{&1}")
@@ -78,7 +79,8 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
 
     {:ok, _} =
       start_session(name, [coord_script], List.duplicate(worker_script, 12),
-        synthesizer: synthesizer
+        synthesizer: synthesizer,
+        max_subtasks: 12
       )
 
     {:ok, resp} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
@@ -98,7 +100,8 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
 
     {:ok, _} =
       start_session(name, [coord_script], List.duplicate(worker_script, 12),
-        synthesizer: synthesizer
+        synthesizer: synthesizer,
+        max_subtasks: 12
       )
 
     {:ok, resp} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
@@ -153,6 +156,83 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
 
     {:ok, resp} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
     assert resp.text == "coordinator answer"
+  end
+
+  test "decomposition at max_subtasks fans out", %{name: name} do
+    coord_script = [Event.new(:result, %{text: "a\nb"})]
+    worker_script = fn prompt -> [Event.new(:result, %{text: "w:#{prompt}"})] end
+
+    {:ok, _} =
+      start_session(name, [coord_script], [worker_script, worker_script], max_subtasks: 2)
+
+    {:ok, resp} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
+    assert resp.text == "### a\n\nw:a\n\n### b\n\nw:b"
+  end
+
+  test "decomposition over max_subtasks errors and starts no workers", %{name: name} do
+    coord_script = [Event.new(:result, %{text: "a\nb\nc"})]
+
+    {:ok, _} = start_session(name, [coord_script], [], max_subtasks: 2)
+
+    assert {:error, {:too_many_subtasks, 3, 2}} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
+
+    {:ok, info} = GenAgentEnsemble.status(name)
+    assert info.agents == ["#{name}-coord"]
+    assert info.phase == :idle
+  end
+
+  test "default max_subtasks rejects an oversized decomposition", %{name: name} do
+    text = Enum.map_join(1..11, "\n", &"t#{&1}")
+
+    {:ok, _} = start_session(name, [[Event.new(:result, %{text: text})]], [])
+
+    assert {:error, {:too_many_subtasks, 11, 10}} =
+             GenAgentEnsemble.ask(name, "q", timeout: 5_000)
+  end
+
+  test "empty decomposition is within the limit", %{name: name} do
+    coord_script = [Event.new(:result, %{text: "coordinator answer"})]
+
+    {:ok, _} =
+      start_session(name, [coord_script], [], decomposer: fn _ -> [] end, max_subtasks: 1)
+
+    {:ok, resp} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
+    assert resp.text == "coordinator answer"
+  end
+
+  test "init rejects invalid max_subtasks", %{name: name} do
+    Process.flag(:trap_exit, true)
+
+    for bad <- [0, -1, 1.5, "3", nil] do
+      assert {:error, {:init_failed, :error, ArgumentError}} =
+               start_session(name, [], [], max_subtasks: bad)
+    end
+  end
+
+  test "queued run continues after an over-limit run" do
+    {:ok, state, _} =
+      SupStrat.init(
+        coordinator: {"coord", TestAgent, []},
+        worker_template: {"w", TestAgent, []},
+        decomposer: decomposer_newlines(),
+        max_subtasks: 2
+      )
+
+    {:ok, [{:dispatch, "coord", "first", :t1}], state} =
+      SupStrat.handle_tell("first", [], :t1, state)
+
+    {:ok, [], state} = SupStrat.handle_tell("second", [], :t2, state)
+
+    response = %GenAgent.Response{text: "x\ny\nz"}
+
+    assert {:ok, ops, state} = SupStrat.handle_response("coord", response, state)
+
+    assert ops == [
+             {:reply_error, :t1, {:too_many_subtasks, 3, 2}},
+             {:dispatch, "coord", "second", :t2}
+           ]
+
+    assert state.phase == {:decomposing, :t2}
   end
 
   test "second tell queues behind an in-flight fan-out", %{name: name} do

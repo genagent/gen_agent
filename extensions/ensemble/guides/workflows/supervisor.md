@@ -89,6 +89,7 @@ iex> E.start_link(
 ...>        system: "Answer the question in 2-3 sentences.",
 ...>        model: "claude-sonnet-4-6"},
 ...>     decomposer: fn text -> String.split(text, "\n", trim: true) end,
+...>     max_subtasks: 5,
 ...>     synthesizer: fn worker_outputs ->
 ...>       worker_outputs
 ...>       |> Enum.map(fn {_name, text} -> "- " <> text end)
@@ -146,9 +147,11 @@ iex> E.await("research", tok) |> E.puts()
   Common custom
   synthesizers: markdown bullet list, JSON merge, "elect the
   strongest answer" with a second LLM call.
-- **Worker count is dynamic.** Decomposer output length determines
-  how many workers run. If it returns an empty list, the ensemble
-  replies with the coordinator's response without invoking a synthesizer.
+- **Worker count is dynamic but bounded.** Decomposer output length
+  determines how many workers run, up to `:max_subtasks` (a positive
+  integer, default 10; any other value raises `ArgumentError` at init).
+  If it returns an empty list, the ensemble replies with the
+  coordinator's response without invoking a synthesizer.
 
 ## Gotchas
 
@@ -156,6 +159,11 @@ iex> E.await("research", tok) |> E.puts()
   decomposition is in progress, it's queued and runs after the
   current fan-out completes. Not concurrent fan-outs -- use multiple
   Supervisor ensembles if you need those.
+- **Over-limit decompositions fail the run.** If the decomposer returns
+  more than `:max_subtasks` sub-prompts, the caller receives
+  `{:error, {:too_many_subtasks, count, max}}`. No workers are started
+  and the list is not truncated. Queued requests continue normally.
+  Prompt the coordinator for fewer sub-prompts or raise the limit.
 - **Workers are ephemeral.** Each fan-out spawns fresh workers and
   stops them after synthesis. This means no per-worker conversation
   history accumulation across runs -- the trade-off is the
