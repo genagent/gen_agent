@@ -27,7 +27,12 @@ defmodule GenAgentEnsemble.Strategy do
   `:output_tokens`). The reserved `:by_agent` key contains
   `%{agent_name => summed_numeric_usage_map}`; these maps sum to the top-level
   totals. Supervisor includes the coordinator and all completed workers.
-  Pipeline preserves the final stage's other response fields.
+  Pipeline preserves the final stage's other response fields and adds
+  `metadata.pipeline`: `stages` holds ordered `{stage_name, response}` pairs
+  with every unmodified stage response, and `total_duration_ms` sums their
+  durations (excluding queue wait and orchestration overhead). Top-level
+  `duration_ms` still describes the final stage. Other metadata keys survive;
+  `:pipeline` is reserved for the current run.
 
   Missing or non-map usage is ignored. If no turn reports a usage map,
   `usage` remains `nil`. Empty maps or maps containing only nonnumeric

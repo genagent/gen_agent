@@ -24,8 +24,7 @@ gets.
 - You have a known, ordered sequence of transformations.
 - Each stage has a distinct role best expressed by a different
   system prompt.
-- You don't need to see the intermediate outputs -- only the final
-  is returned.
+- You want a final answer with inspectable intermediate responses.
 
 Classic shapes:
 
@@ -116,12 +115,6 @@ can see which stage is currently executing.
 
 ## Gotchas
 
-- **Only the last stage's response is returned.** Intermediate
-  outputs are consumed silently. The
-  `[:gen_agent, :prompt, :stop]` telemetry event does not carry
-  response text, so it cannot be used to read them. If you need
-  intermediate outputs, write a custom strategy that captures each
-  stage's response.
 - **Errors short-circuit the pipeline.** If any stage's turn errors,
   the whole ensemble replies `{:error, {stage_name, reason}}` and
   the later stages never run.
@@ -137,7 +130,8 @@ can see which stage is currently executing.
 ## Usage accounting
 
 Every completed stage counts. The final stage's response keeps its other
-fields, with `usage` replaced by the full pipeline totals.
+fields, with `usage` replaced by the full pipeline totals and `metadata.pipeline`
+added as described below.
 
 `Response.usage` contains summed numeric provider fields and a reserved
 `:by_agent` map of agent names to their summed numeric fields. It stays `nil`
@@ -145,3 +139,35 @@ when no turn reports usage. Nonnumeric fields are dropped, and each invocation
 starts fresh. Failed turns cannot be counted; session-cumulative backend usage
 would overcount. See [usage accounting](overview.md#usage-accounting) for the
 complete shape and per-turn reporting assumption.
+
+## Stage results and duration
+
+`GenAgentEnsemble.ask/3` and `GenAgentEnsemble.await/3` return
+`{:ok, response}`. Inspect `response.metadata.pipeline`:
+
+```elixir
+%{
+  stages: [{"ideator", ideator_response}, {"editor", editor_response},
+           {"headliner", headliner_response}],
+  total_duration_ms: 15000
+}
+```
+
+`stages` contains ordered, full, unmodified `GenAgent.Response` values,
+including the final stage's original usage and metadata. Existing final-stage
+metadata keys are preserved, except `:pipeline`, which is reserved for this
+run. `total_duration_ms` sums stage durations; it excludes queue wait and
+orchestration overhead. Top-level `response.duration_ms` remains the final
+stage's duration.
+
+Repeated `await` calls return the same result. `poll` and `inbox` consume it.
+The strategy retains at most one run's configured stages, clears them on
+success, error, active cancellation or dispatch rejection, and starts queued
+runs fresh. Cancelling a queued token preserves the active run. Errors retain
+the existing error tuples and do not return partial results. Completed token
+storage has no automatic bound; consume results when finished with them.
+There is no additional history cache.
+
+For live capture (including turns before an aborted run), a custom agent's
+`handle_response/3` or `post_turn/3` callback can inspect each full response;
+a custom strategy is unnecessary. Prompt-stop telemetry does not carry text.
