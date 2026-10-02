@@ -130,8 +130,12 @@ applies its own configuration: the host's Claude settings files and its
 default permission mode. The backend does not choose a posture for you, so
 what the agent can do depends on that host configuration.
 
-- `permission_mode: :plan` -- the agent plans and reads but does not edit.
-  The quick start uses it because it only asks a question.
+- `permission_mode: :plan` -- the agent plans instead of editing project
+  files. The quick start uses it because it only asks a question. Plan mode
+  is a CLI permission mode, not a filesystem sandbox: in non-interactive use
+  the CLI can still run shell commands (for example a test runner that writes
+  build output), and it writes its plan file under `~/.claude/plans`. The
+  CLI also ignores `:model` in plan mode and uses its configured model.
 - `permission_mode: :accept_edits` -- file edits are approved automatically.
   Use it only for agents that are meant to change files.
 - `permission_mode: :bypass_permissions` and
