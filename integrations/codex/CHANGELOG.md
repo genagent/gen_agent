@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.2...gen_agent_codex-v0.4.3) (2026-10-02)
+
+
+### Bug Fixes
+
+* **codex:** require wrapper with Forcola 0.4 support ([#362](https://github.com/genagent/gen_agent/issues/362)) ([378ff10](https://github.com/genagent/gen_agent/commit/378ff10e5d931704b7df6c3f5fac40f2924cdcf0))
+
 ## [0.4.2](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.1...gen_agent_codex-v0.4.2) (2026-10-02)
 
 

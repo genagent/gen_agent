@@ -1,7 +1,7 @@
 defmodule GenAgentCodex.MixProject do
   use Mix.Project
 
-  @version "0.4.2"
+  @version "0.4.3"
   @source_url "https://github.com/genagent/gen_agent"
   @source_path "integrations/codex"
 
