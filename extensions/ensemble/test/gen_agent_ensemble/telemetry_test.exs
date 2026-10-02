@@ -141,7 +141,9 @@ defmodule GenAgentEnsemble.TelemetryTest do
         ]
       )
 
-    assert {:ok, %{text: "answered\n\nanswered"}} = GenAgentEnsemble.ask(name, "private")
+    assert {:ok, %{text: "### one\n\nanswered\n\n### two\n\nanswered"}} =
+             GenAgentEnsemble.ask(name, "private")
+
     {_, %{token: token}} = assert_event([:token, :start], %{session: name})
 
     assert_event([:dispatch, :start], %{

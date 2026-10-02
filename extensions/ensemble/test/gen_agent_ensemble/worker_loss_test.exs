@@ -124,7 +124,7 @@ defmodule GenAgentEnsemble.WorkerLossTest do
     assert_receive {:controlled_prompt, "worker", "new", fresh_worker}, 2_000
     send(fresh_worker, {:result, "FRESH_RESULT"})
     assert {:ok, :completed, response} = await_poll(name, fresh)
-    assert response.text == "FRESH_RESULT"
+    assert response.text == "### new\n\nFRESH_RESULT"
   end
 
   test "a completed sibling does not conceal a later worker death", %{name: name} do

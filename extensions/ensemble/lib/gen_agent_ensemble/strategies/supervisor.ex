@@ -21,8 +21,10 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
       Workers are named `"\#{prefix}-1"`, `"\#{prefix}-2"`, ...
     * `:decomposer` (required) -- `(String.t() -> [String.t()])` that
       turns coordinator output into sub-prompts.
-    * `:synthesizer` (optional) -- `([{worker_name, String.t()}] -> String.t())`.
-      Defaults to joining worker outputs with "\\n\\n".
+    * `:synthesizer` (optional) -- a function accepting ordered
+      `[{worker_name, text}]`, or a two-argument function also accepting
+      the corresponding ordered sub-prompts. The default labels each
+      worker response with its assigned sub-prompt.
 
   ## Limits
 
@@ -48,6 +50,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     :worker_opts,
     :decomposer,
     :synthesizer,
+    subtasks: [],
     phase: :idle,
     queue: nil,
     usage: Usage.new()
@@ -58,7 +61,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     {c_name, c_mod, c_opts} = Keyword.fetch!(opts, :coordinator)
     {w_prefix, w_mod, w_opts} = Keyword.fetch!(opts, :worker_template)
     decomposer = Keyword.fetch!(opts, :decomposer)
-    synthesizer = Keyword.get(opts, :synthesizer, &default_synthesizer/1)
+    synthesizer = Keyword.get(opts, :synthesizer, &default_synthesizer/2)
 
     state = %__MODULE__{
       coordinator: c_name,
@@ -80,7 +83,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   def handle_ask(prompt, _opts, token, state), do: start_or_queue(prompt, token, state)
 
   defp start_or_queue(prompt, token, %{phase: :idle} = state) do
-    state = %{state | usage: Usage.new(), phase: {:decomposing, token}}
+    state = %{state | usage: Usage.new(), subtasks: [], phase: {:decomposing, token}}
     {:ok, [{:dispatch, state.coordinator, prompt, token}], state}
   end
 
@@ -122,12 +125,12 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
       0 ->
         response = %{response | usage: Usage.to_usage(state.usage)}
         # Nothing to fan out; reply immediately with coordinator's text.
-        state = %{state | phase: :idle}
+        state = %{state | phase: :idle, subtasks: []}
         {ops, state} = maybe_prepend_next(state, [{:reply, token, response}])
         {:ok, ops, state}
 
       _ ->
-        {:ok, ops, %{state | phase: {:fanning_out, token, progress}}}
+        {:ok, ops, %{state | phase: {:fanning_out, token, progress}, subtasks: sub_prompts}}
     end
   end
 
@@ -152,11 +155,17 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
         |> String.to_integer()
       end)
 
-    combined = state.synthesizer.(worker_outputs)
+    combined =
+      if is_function(state.synthesizer, 2) do
+        state.synthesizer.(worker_outputs, state.subtasks)
+      else
+        state.synthesizer.(worker_outputs)
+      end
+
     final_response = %Response{text: combined, usage: Usage.to_usage(state.usage)}
     stop_ops = Enum.map(progress, fn {worker, _} -> {:stop, worker} end)
 
-    state = %{state | phase: :idle}
+    state = %{state | phase: :idle, subtasks: []}
     {ops, state} = maybe_prepend_next(state, stop_ops ++ [{:reply, token, final_response}])
     {:ok, ops, state}
   end
@@ -164,7 +173,14 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   defp maybe_prepend_next(%{phase: :idle} = state, ops_so_far) do
     case Queue.pop(state.queue) do
       {:ok, {token, prompt}, rest} ->
-        state = %{state | usage: Usage.new(), phase: {:decomposing, token}, queue: rest}
+        state = %{
+          state
+          | usage: Usage.new(),
+            subtasks: [],
+            phase: {:decomposing, token},
+            queue: rest
+        }
+
         {ops_so_far ++ [{:dispatch, state.coordinator, prompt, token}], state}
 
       :empty ->
@@ -176,13 +192,13 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   def handle_error(agent, reason, state) do
     case state.phase do
       {:decomposing, token} when agent == state.coordinator ->
-        state = %{state | phase: :idle}
+        state = %{state | phase: :idle, subtasks: []}
         {ops, state} = maybe_prepend_next(state, [{:reply_error, token, reason}])
         {:ok, ops, state}
 
       {:fanning_out, token, progress} ->
         stop_ops = for {worker, _} <- progress, do: {:stop, worker}
-        state = %{state | phase: :idle}
+        state = %{state | phase: :idle, subtasks: []}
 
         {ops, state} =
           maybe_prepend_next(state, stop_ops ++ [{:reply_error, token, {agent, reason}}])
@@ -227,7 +243,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
       failure = {:worker_down, agent, reason}
       stop_ops = for {worker, _} <- progress, worker != agent, do: {:stop, worker}
       fail_ops = [{:reply_error, token, failure} | queued_fail_ops(state.queue, failure)]
-      state = %{state | phase: :idle, queue: Queue.new()}
+      state = %{state | phase: :idle, subtasks: [], queue: Queue.new()}
       {:ok, stop_ops ++ fail_ops, state}
     else
       {:ok, [], state}
@@ -263,7 +279,11 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     {:fanning_out, done, map_size(progress)}
   end
 
-  defp default_synthesizer(worker_outputs) do
-    Enum.map_join(worker_outputs, "\n\n", fn {_worker, text} -> text end)
+  defp default_synthesizer(worker_outputs, subtasks) do
+    worker_outputs
+    |> Enum.zip(subtasks)
+    |> Enum.map_join("\n\n", fn {{_worker, text}, subtask} ->
+      "### #{subtask}\n\n#{text}"
+    end)
   end
 end

@@ -28,15 +28,18 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
       name: name,
       strategy: SupStrat,
       opts:
-        [
-          coordinator: coord,
-          worker_template: worker,
-          decomposer: decomposer_newlines()
-        ] ++ extra_opts
+        Keyword.merge(
+          [
+            coordinator: coord,
+            worker_template: worker,
+            decomposer: decomposer_newlines()
+          ],
+          extra_opts
+        )
     )
   end
 
-  test "fans out to N workers and concatenates", %{name: name} do
+  test "fans out to N workers and labels their responses", %{name: name} do
     coord_script = [Event.new(:result, %{text: "what\nwhy\nhow"})]
 
     worker_script =
@@ -53,7 +56,7 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
     {:ok, resp} = GenAgentEnsemble.ask(name, "big question", timeout: 5_000)
 
     assert resp.text ==
-             "answer: what\n\nanswer: why\n\nanswer: how"
+             "### what\n\nanswer: what\n\n### why\n\nanswer: why\n\n### how\n\nanswer: how"
   end
 
   test "default synthesizer keeps decomposition order with two-digit worker names", %{name: name} do
@@ -64,7 +67,27 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
     {:ok, _} = start_session(name, [coord_script], List.duplicate(worker_script, 12))
 
     {:ok, resp} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
-    assert resp.text == Enum.map_join(prompts, "\n\n", &"answer: #{&1}")
+    assert resp.text == Enum.map_join(prompts, "\n\n", &"### #{&1}\n\nanswer: #{&1}")
+  end
+
+  test "two-argument synthesizer receives subtasks aligned with ordered outputs", %{name: name} do
+    prompts = Enum.map(1..12, &"task-#{&1}")
+    coord_script = [Event.new(:result, %{text: Enum.join(prompts, "\n")})]
+    worker_script = fn _prompt -> [Event.new(:result, %{text: "same answer"})] end
+    synthesizer = fn outputs, subtasks -> inspect(Enum.zip(outputs, subtasks)) end
+
+    {:ok, _} =
+      start_session(name, [coord_script], List.duplicate(worker_script, 12),
+        synthesizer: synthesizer
+      )
+
+    {:ok, resp} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
+
+    expected =
+      Enum.with_index(prompts, 1)
+      |> Enum.map(fn {prompt, index} -> {{"#{name}-w-#{index}", "same answer"}, prompt} end)
+
+    assert resp.text == inspect(expected)
   end
 
   test "custom synthesizer receives outputs in decomposition order", %{name: name} do
@@ -119,12 +142,17 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
   end
 
   test "empty decomposition replies with coordinator text", %{name: name} do
-    # Coordinator returns empty text; decomposer yields no sub-prompts.
-    coord_script = [Event.new(:result, %{text: ""})]
-    {:ok, _} = start_session(name, [coord_script], [])
+    coord_script = [Event.new(:result, %{text: "coordinator answer"})]
+    synthesizer = fn _, _ -> flunk("empty decomposition should skip synthesis") end
+
+    {:ok, _} =
+      start_session(name, [coord_script], [],
+        decomposer: fn _ -> [] end,
+        synthesizer: synthesizer
+      )
 
     {:ok, resp} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
-    assert resp.text == ""
+    assert resp.text == "coordinator answer"
   end
 
   test "second tell queues behind an in-flight fan-out", %{name: name} do
@@ -145,8 +173,8 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
     r1 = await_completion(name, t1)
     r2 = await_completion(name, t2)
 
-    assert r1.text == "w:x\n\nw:y"
-    assert r2.text == "w:p\n\nw:q"
+    assert r1.text == "### x\n\nw:x\n\n### y\n\nw:y"
+    assert r2.text == "### p\n\nw:p\n\n### q\n\nw:q"
   end
 
   test "worker turn error fails the outer token and stops siblings", %{name: name} do
