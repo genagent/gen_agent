@@ -3,6 +3,10 @@ defmodule GenAgent.ResponseTest do
 
   alias GenAgent.{Event, Response}
 
+  test "manually constructed responses leave final_message unspecified" do
+    assert %Response{text: "synthetic"}.final_message == nil
+  end
+
   describe "from_events/2" do
     test "takes text from the :result event when present" do
       events = [
@@ -14,6 +18,7 @@ defmodule GenAgent.ResponseTest do
       response = Response.from_events(events)
 
       assert response.text == "hello"
+      assert response.final_message == "hello"
       assert response.events == events
       assert response.terminal == List.last(events)
       assert response.event_coverage.mode == :exact
@@ -40,7 +45,31 @@ defmodule GenAgent.ResponseTest do
         Event.new(:result, %{})
       ]
 
-      assert Response.from_events(events).text == "first message\n\nsecond"
+      response = Response.from_events(events)
+      assert response.text == "first message\n\nsecond"
+      assert response.final_message == "second"
+    end
+
+    test "does not split a single message on its own paragraph break" do
+      events = [
+        Event.new(:text, %{text: "first paragraph\n\nsecond paragraph", message_boundary: true}),
+        Event.new(:result, %{})
+      ]
+
+      response = Response.from_events(events)
+      assert response.text == "first paragraph\n\nsecond paragraph"
+      assert response.final_message == response.text
+    end
+
+    test "uses explicit terminal text when it differs from streamed text" do
+      events = [
+        Event.new(:text, %{text: "draft", message_boundary: true}),
+        Event.new(:result, %{text: "final"})
+      ]
+
+      response = Response.from_events(events)
+      assert response.text == "final"
+      assert response.final_message == "final"
     end
 
     test "extracts usage from the most recent :usage event" do
