@@ -93,9 +93,11 @@ session struct so multi-turn conversations work transparently:
 ```
 
 Conversation history lives in `session.messages` as an in-order list
-of `%{"role" => ..., "content" => ...}` maps, appended on both sides
-of each turn (user message on dispatch, assistant message on terminal
-`:result` event).
+of `%{role: ..., content: ...}` maps with atom keys. The user message is
+appended on dispatch. The assistant message is appended when the terminal
+`:result` event carries non-blank text. If the response is a refusal
+(`stop_reason: "refusal"`) or its text is empty or only whitespace, the
+unanswered user message is removed instead, so history keeps alternating.
 
 ## Backend options
 

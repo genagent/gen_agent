@@ -21,6 +21,10 @@ values the state machine consumes.
 The `codex` CLI must be installed and on your `PATH`. See the
 [Codex docs](https://github.com/openai/codex) for install instructions.
 
+The default CodexWrapper runner starts the CLI through `/bin/sh` and
+redirects stdin from `/dev/null`, so it needs both on the host. The optional
+Forcola runner (see [Cancellation](#cancellation)) is POSIX-only.
+
 ## Installation
 
 ```elixir
@@ -87,8 +91,8 @@ code required.
 ## Streaming
 
 The backend uses `CodexWrapper.Exec.stream/2` and
-`CodexWrapper.ExecResume.stream/2`. CodexWrapper 0.5.1 closes CLI stdin,
-so the earlier Port startup hang is fixed. `handle_stream_event/2`
+`CodexWrapper.ExecResume.stream/2`. Both runners close CLI stdin, so the
+CLI does not wait for input. `handle_stream_event/2`
 receives normalized events as they arrive while `ask/3` returns the
 completed turn. `thread.started` supplies the ID used by the next
 turn's `exec resume` command.
@@ -159,6 +163,13 @@ The subprocess inherits the BEAM's full environment and current directory.
 it does not replace or sanitize the rest. Set `:cwd` (or `:working_dir`) to
 run the CLI in a specific directory instead of the BEAM's.
 
+### Stderr
+
+Streaming turns parse NDJSON from the CLI's stdout, so the wrapper does not
+merge stderr into it. With the default Port runner, CLI stderr flows to the
+BEAM's own stderr. It does not appear in the `GenAgent.Event` stream and is
+not part of the response.
+
 ### Cancellation
 
 On interrupt, watchdog, and stop, GenAgent cancels its prompt task. With
@@ -176,6 +187,23 @@ config :codex_wrapper, runner: CodexWrapper.Runner.Forcola
 
 See `CodexWrapper.Runner` for details.
 
+### Timeouts
+
+Two timeouts apply to a turn, and they are independent:
+
+- GenAgent's `:watchdog_ms` (default 600,000 ms) is a `:state_timeout` on the
+  agent. When it fires, GenAgent cancels the prompt task with `:timeout`, as
+  described above.
+- The backend's `:timeout` is passed to the wrapper's runner for the
+  streaming command. Its meaning depends on the runner. The Port runner
+  treats it as an idle bound: the wait for the next output line, not the
+  whole run (default 300,000 ms when unset). The Forcola runner treats it as
+  a bound on the whole run; when unset it uses
+  `config :codex_wrapper, forcola_default_timeout_ms:` (default 300,000 ms).
+
+Because of the Port runner's idle semantics, a long turn that keeps emitting
+events is limited only by `:watchdog_ms`.
+
 See `GenAgent.Backends.Codex` for the full module docs.
 
 ## Event translation
@@ -192,7 +220,8 @@ Codex CLI's NDJSON output is translated into `GenAgent.Event` values by
 | `item.completed` (`tool_result`) | `:tool_result` |
 | `item.completed` (`mcp_tool_call`, `command_execution`, `file_change`) | `:tool_use` + `:tool_result`, carrying the complete item including ID, status and output |
 | `turn.completed` | `:usage` + terminal `:result` (with captured `thread_id` as `session_id`) |
-| `turn.failed` / `error` | terminal `:error` |
+| `turn.failed` | terminal `:error`; the reason falls back to the most recent `error` event when the failure carries none |
+| `error` | retained, not emitted; becomes a terminal `:error` only if the stream ends without `turn.completed` or `turn.failed` |
 | anything else | filtered |
 
 Unlike Claude, Codex emits `thread_id` in the **first** event of a turn,
@@ -201,9 +230,9 @@ it into the `:result` event emitted at the end. The backend also
 checkpoints this raw ID immediately, so a failed or interrupted turn
 can resume the same thread. `item.started` and
 `item.updated` are ignored; completed items are reported once. Unknown
-item categories are filtered. A stream that ends without a terminal
-event returns `:no_terminal_event`; the wrapper stream API does not
-report the subprocess exit code.
+item categories are filtered. A stream that ends with no turn outcome
+and no retained `error` event returns `:no_terminal_event`; the wrapper
+stream API does not report the subprocess exit code.
 
 ## Testing
 

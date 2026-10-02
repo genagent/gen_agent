@@ -107,7 +107,8 @@ in the next request. This backend threads one id across turns:
 ```elixir
 # Turn 1: fresh conversation, no previous_response_id
 {:ok, r1} = GenAgent.ask("my-assistant", "Remember the number 42")
-# Turn 2: backend sends previous_response_id = r1.response_id
+# Turn 2: backend sends previous_response_id from r1's terminal event
+# (r1.terminal.data.response_id), carried forward automatically
 # OpenAI replays turn 1's context on the server side
 {:ok, r2} = GenAgent.ask("my-assistant", "What number did I ask you to remember?")
 # r2.text =~ "42"
