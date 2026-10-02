@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.2.3...gen_agent_claude-v0.2.4) (2026-10-02)
+
+
+### Bug Fixes
+
+* **claude:** preserve CLI result text and errors ([#375](https://github.com/genagent/gen_agent/issues/375)) ([0ea224b](https://github.com/genagent/gen_agent/commit/0ea224bc69fb394625388474ede02676d5b59a5c))
+
 ## [0.2.3](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.2.2...gen_agent_claude-v0.2.3) (2026-10-02)
 
 
