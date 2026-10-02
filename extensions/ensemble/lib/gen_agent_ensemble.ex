@@ -44,6 +44,39 @@ defmodule GenAgentEnsemble do
   defdelegate tell(name, prompt, opts), to: GenAgentEnsemble.Server
 
   @doc """
+  Like `tell/3`, returning `{:ok, token}`, with one terminal message sent to
+  the supplied PID:
+
+      {:gen_agent_ensemble, :completion, session, token, {:ok, response} | {:error, reason}}
+
+  The recipient defaults to the caller. It must be a PID (otherwise raises
+  `FunctionClauseError`).
+  Notification does not consume the result stored for `poll/2` or `inbox/1`.
+  Halt delivers `{:error, {:halted, reason}}` before stopping the session;
+  stored results are unavailable after the session terminates.
+  """
+  def tell_with_completion(name, prompt, recipient \\ self(), opts \\ []),
+    do: GenAgentEnsemble.Server.tell_with_completion(name, prompt, recipient, opts)
+
+  @doc """
+  Wait for an existing tell token without consuming its result.
+
+  Returns `{:ok, response}` or `{:error, reason}`. All registered waiters
+  receive the terminal result. `poll/2` and `inbox/1` still consume the
+  stored copy; an await processed after consumption returns
+  `{:error, :not_found}`, as does an unknown token. Server message order
+  determines races between registration, completion, and consumption.
+
+  Timeout is a non-negative number of milliseconds or `:infinity`, default
+  30_000. Zero checks the current result without waiting. Expiry returns
+  `{:error, :timeout}` and removes only this waiter; a late result can still
+  be retrieved. Invalid timeouts raise `FunctionClauseError`.
+  Unavailable or terminated sessions retain normal `GenServer.call/3` exit
+  semantics. Halt replies to registered waiters before stopping the session.
+  """
+  defdelegate await(name, token, timeout \\ 30_000), to: GenAgentEnsemble.Server
+
+  @doc """
   Synchronous prompt. Blocks until the strategy replies or the
   default timeout expires.
   """

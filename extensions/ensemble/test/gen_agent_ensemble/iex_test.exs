@@ -91,29 +91,31 @@ defmodule GenAgentEnsemble.IExTest do
       response = E.await(name, token, 2_000)
 
       assert %Response{text: "done"} = response
+      assert {:ok, :completed, ^response} = E.poll(name, token)
     end
 
     test "raises on timeout when the token never completes", %{name: name} do
-      # slow_fn sleeps longer than the await timeout
-      slow = fn _prompt ->
-        Process.sleep(500)
-        [Event.new(:result, %{text: "eventually"})]
-      end
+      {:ok, _} =
+        GenAgentEnsemble.start_link(
+          name: name,
+          strategy: Solo,
+          opts: [
+            agent:
+              {"w", GenAgentEnsemble.ControlledAgent,
+               backend: GenAgentEnsemble.ControlledBackend, observer: self()}
+          ]
+        )
 
-      {:ok, _} = start_solo(name, [slow])
       {:ok, token} = E.tell(name, "slow")
 
       assert_raise RuntimeError, ~r/timed out/, fn ->
-        E.await(name, token, 50)
+        E.await(name, token, 0)
       end
     end
 
     test "raises on error", %{name: name} do
       {:ok, _} = start_solo(name, [{:error, :nope}])
       {:ok, token} = E.tell(name, "boom")
-
-      # Give the mock time to fail the token
-      Process.sleep(50)
 
       assert_raise RuntimeError, ~r/failed.*nope/, fn ->
         E.await(name, token, 500)
@@ -132,8 +134,8 @@ defmodule GenAgentEnsemble.IExTest do
       {:ok, ta} = E.tell(name, "p1")
       {:ok, tb} = E.tell(name, "p2")
 
-      # Let both tells complete and land in the inbox.
-      Process.sleep(100)
+      E.await(name, ta)
+      E.await(name, tb)
 
       drained = E.drain(name)
       assert Map.new(drained) == %{ta => "x", tb => "y"}
@@ -143,7 +145,7 @@ defmodule GenAgentEnsemble.IExTest do
       {:ok, _} = start_solo(name, [{:error, :kaput}])
       {:ok, t} = E.tell(name, "bad")
 
-      Process.sleep(50)
+      assert {:error, :kaput} = GenAgentEnsemble.await(name, t)
 
       assert [{^t, {:error, :kaput}}] = E.drain(name)
     end

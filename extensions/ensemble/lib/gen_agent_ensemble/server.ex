@@ -17,12 +17,16 @@ defmodule GenAgentEnsemble.Server do
     :agents,
     # monitor refs, %{mref => agent_name}
     :monitors,
-    # tokens awaiting reply, %{token => {:tell, nil} | {:ask, from}}
+    # tokens awaiting reply, %{token => {:tell, recipient | nil} | {:ask, from}}
     :pending,
     # %{token => %{started_at: integer, kind: :ask | :tell, dispatches: integer}}
     :token_contexts,
     # completed tell results, %{token => {:ok, response} | {:error, reason}}
     :completed,
+    # %{token => %{monitor_ref => {from, timer_ref | nil}}}
+    :waiters,
+    # %{monitor_ref => token}
+    :waiter_monitors,
     # %{gen_agent_ref => {agent_name, run_token}}
     :in_flight,
     # %{gen_agent_ref => {started_at, ordinal}}
@@ -45,6 +49,14 @@ defmodule GenAgentEnsemble.Server do
   end
 
   def tell(name, prompt, opts \\ []), do: GenServer.call(via(name), {:tell, prompt, opts})
+
+  def tell_with_completion(name, prompt, recipient, opts \\ []) when is_pid(recipient),
+    do: GenServer.call(via(name), {:tell, prompt, opts, recipient})
+
+  def await(name, token, timeout \\ 30_000)
+      when timeout == :infinity or (is_integer(timeout) and timeout >= 0) do
+    GenServer.call(via(name), {:await, token, timeout}, :infinity)
+  end
 
   def ask(name, prompt, opts \\ []) do
     {timeout, strategy_opts} = Keyword.pop(opts, :timeout, 30_000)
@@ -80,6 +92,8 @@ defmodule GenAgentEnsemble.Server do
       state
       | strategy_state: :redacted,
         completed: :redacted,
+        waiters: :redacted,
+        waiter_monitors: :redacted,
         in_flight: :redacted,
         dispatch_contexts: :redacted,
         pending: :redacted,
@@ -148,6 +162,8 @@ defmodule GenAgentEnsemble.Server do
         pending: %{},
         token_contexts: %{},
         completed: %{},
+        waiters: %{},
+        waiter_monitors: %{},
         in_flight: %{},
         dispatch_contexts: %{}
       }
@@ -205,9 +221,12 @@ defmodule GenAgentEnsemble.Server do
   defp callback_failure_kind(%{__struct__: module}) when is_atom(module), do: module
   defp callback_failure_kind(_), do: :other
 
-  defp handle_call_impl({:tell, prompt, opts}, _from, state) do
+  defp handle_call_impl({:tell, prompt, opts}, from, state),
+    do: handle_call_impl({:tell, prompt, opts, nil}, from, state)
+
+  defp handle_call_impl({:tell, prompt, opts, recipient}, _from, state) do
     token = mint_token()
-    state = start_token(state, token, :tell, {:tell, nil})
+    state = start_token(state, token, :tell, {:tell, recipient})
 
     {ops, strategy_state} =
       call_strategy(state.strategy_mod, :handle_tell, [prompt, opts, token, state.strategy_state])
@@ -225,6 +244,35 @@ defmodule GenAgentEnsemble.Server do
 
     state = %{state | strategy_state: strategy_state} |> apply_ops(ops)
     {:noreply, state}
+  end
+
+  defp handle_call_impl({:await, token, timeout}, from, state) do
+    case {Map.fetch(state.completed, token), Map.get(state.pending, token)} do
+      {{:ok, result}, _} ->
+        {:reply, result, state}
+
+      {:error, {:tell, _}} when timeout == 0 ->
+        {:reply, {:error, :timeout}, state}
+
+      {:error, {:tell, _}} ->
+        mref = Process.monitor(elem(from, 0))
+
+        timer =
+          if timeout != :infinity,
+            do: Process.send_after(self(), {:await_timeout, mref}, timeout)
+
+        waiters = Map.get(state.waiters, token, %{}) |> Map.put(mref, {from, timer})
+
+        {:noreply,
+         %{
+           state
+           | waiters: Map.put(state.waiters, token, waiters),
+             waiter_monitors: Map.put(state.waiter_monitors, mref, token)
+         }}
+
+      _ ->
+        {:reply, {:error, :not_found}, state}
+    end
   end
 
   defp handle_call_impl({:poll, token}, _from, state) do
@@ -316,6 +364,15 @@ defmodule GenAgentEnsemble.Server do
 
         {:noreply, handle_prompt_error(state, bare_agent, token, reason)}
     end
+  end
+
+  defp handle_info_impl({:await_timeout, mref}, state) do
+    {:noreply, remove_waiter(state, mref, {:error, :timeout})}
+  end
+
+  defp handle_info_impl({:DOWN, mref, :process, _pid, _reason}, state)
+       when is_map_key(state.waiter_monitors, mref) do
+    {:noreply, remove_waiter(state, mref, nil)}
   end
 
   defp handle_info_impl({:DOWN, mref, :process, _pid, reason}, state) do
@@ -421,6 +478,7 @@ defmodule GenAgentEnsemble.Server do
 
   @impl true
   def terminate(reason, state) do
+    Enum.each(state.waiter_monitors, fn {mref, _} -> remove_waiter(state, mref, nil) end)
     emit_unfinished_work(state)
     outcome = if state.halted, do: :halted, else: if(reason == :normal, do: :ok, else: :error)
 
@@ -647,10 +705,40 @@ defmodule GenAgentEnsemble.Server do
         GenServer.reply(from, result)
         {:ok, %{state | pending: pending}}
 
-      {{:tell, _}, pending} ->
+      {{:tell, recipient}, pending} ->
         state = finish_token(state, token, result)
+
+        if recipient do
+          send(recipient, {:gen_agent_ensemble, :completion, state.session_name, token, result})
+        end
+
+        state =
+          Enum.reduce(Map.get(state.waiters, token, %{}), state, fn {mref, _}, acc ->
+            remove_waiter(acc, mref, result)
+          end)
+
         completed = Map.put(state.completed, token, result)
         {:ok, %{state | pending: pending, completed: completed}}
+    end
+  end
+
+  defp remove_waiter(state, mref, result) do
+    case Map.pop(state.waiter_monitors, mref) do
+      {nil, _} ->
+        state
+
+      {token, monitors} ->
+        {{from, timer}, remaining} = Map.pop(Map.fetch!(state.waiters, token), mref)
+        if timer, do: Process.cancel_timer(timer)
+        Process.demonitor(mref, [:flush])
+        if result, do: GenServer.reply(from, result)
+
+        waiters =
+          if map_size(remaining) == 0,
+            do: Map.delete(state.waiters, token),
+            else: Map.put(state.waiters, token, remaining)
+
+        %{state | waiters: waiters, waiter_monitors: monitors}
     end
   end
 
