@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.5](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.4...gen_agent_codex-v0.4.5) (2026-10-02)
+
+
+### Bug Fixes
+
+* **codex:** report completed-turn usage deltas ([#371](https://github.com/genagent/gen_agent/issues/371)) ([9d89ff3](https://github.com/genagent/gen_agent/commit/9d89ff3569b4bee3d1056f968c8bc1246416b4fa))
+
 ## [0.4.4](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.3...gen_agent_codex-v0.4.4) (2026-10-02)
 
 
