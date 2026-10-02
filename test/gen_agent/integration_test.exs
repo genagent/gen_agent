@@ -452,15 +452,16 @@ defmodule GenAgent.IntegrationTest do
   # ---------------------------------------------------------------------------
 
   describe "use GenAgent" do
-    test "provides default handle_event that keeps state" do
-      # SimpleAgent does not override handle_event -- the default from the
-      # use macro should accept any event and return :noreply.
-      name = start_simple([])
-      assert :ok = GenAgent.notify(name, {:random_event, 1})
+    test "generates default handle_event/2 and handle_error/3 that keep state" do
+      # SimpleAgent overrides neither; call the macro-generated defaults
+      # directly, since the server falls back when they are missing.
+      state = %SimpleAgent.State{responses: [{make_ref(), "x"}]}
 
-      # Agent should still be idle and alive with unchanged state.
-      Process.sleep(10)
-      assert GenAgent.status(name).state == :idle
+      assert function_exported?(SimpleAgent, :handle_event, 2)
+      assert function_exported?(SimpleAgent, :handle_error, 3)
+
+      assert {:noreply, ^state} = SimpleAgent.handle_event({:random_event, 1}, state)
+      assert {:noreply, ^state} = SimpleAgent.handle_error(make_ref(), :boom, state)
     end
   end
 

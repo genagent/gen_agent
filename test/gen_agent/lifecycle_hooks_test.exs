@@ -70,25 +70,25 @@ defmodule GenAgent.LifecycleHooksTest do
       parent = self()
 
       pre_run = fn state ->
-        send(parent, {:ordering, :pre_run})
-        {:ok, state}
+        {:ok, %{state | extra: Map.put(state.extra, :pre_run_ran, true)}}
       end
 
-      responder = fn _ref, _resp, state ->
-        send(parent, {:ordering, :handle_response})
-        {:noreply, state}
+      # pre_turn runs at dispatch; report whether pre_run had already
+      # updated the state by then.
+      pre_turn = fn prompt, state ->
+        send(parent, {:pre_turn_saw, state.extra[:pre_run_ran]})
+        {:ok, prompt, state}
       end
 
       pid =
         start_server(task_sup, [result_events("ok")],
           pre_run: pre_run,
-          responder: responder
+          pre_turn: pre_turn
         )
 
       assert {:ok, _} = ask(pid, "go")
 
-      assert_received {:ordering, :pre_run}
-      assert_received {:ordering, :handle_response}
+      assert_received {:pre_turn_saw, true}
     end
 
     test "error return stops the agent with :pre_run_failed", %{task_sup: task_sup} do
@@ -144,14 +144,17 @@ defmodule GenAgent.LifecycleHooksTest do
         {:ok, "[prefix] " <> prompt, state}
       end
 
-      # Mock backend records the prompt it receives in Mock state;
-      # use the result events but also assert the rewritten prompt
-      # reached the dispatch via telemetry (below test covers telemetry).
-      pid =
-        start_server(task_sup, [result_events("ok")], pre_turn: pre_turn)
+      # A function script receives the prompt the backend was given.
+      script = fn prompt ->
+        send(parent, {:backend_prompt, prompt})
+        result_events("ok")
+      end
+
+      pid = start_server(task_sup, [script], pre_turn: pre_turn)
 
       assert {:ok, _} = ask(pid, "hello")
       assert_received {:rewrote, "hello"}
+      assert_received {:backend_prompt, "[prefix] hello"}
     end
 
     test ":skip delivers :pre_turn_skipped to ask caller", %{task_sup: task_sup} do
@@ -239,25 +242,29 @@ defmodule GenAgent.LifecycleHooksTest do
     test "runs between decision callback and transition", %{task_sup: task_sup} do
       parent = self()
 
-      responder = fn _ref, _resp, state ->
-        send(parent, {:ordering, :handle_response})
-        {:noreply, state}
+      record = fn state, entry ->
+        %{state | extra: Map.update(state.extra, :trace, [entry], &(&1 ++ [entry]))}
       end
 
-      post_turn = fn _outcome, _ref, state ->
-        send(parent, {:ordering, :post_turn})
-        {:ok, state}
+      responder = fn _ref, _resp, state -> {:halt, record.(state, :handle_response)} end
+      post_turn = fn _outcome, _ref, state -> {:ok, record.(state, :post_turn)} end
+
+      # post_run fires on the halt transition, so the trace it sees must
+      # have the decision callback first and post_turn second.
+      post_run = fn state ->
+        send(parent, {:trace, state.extra[:trace]})
+        :ok
       end
 
       pid =
         start_server(task_sup, [result_events("ok")],
           responder: responder,
-          post_turn: post_turn
+          post_turn: post_turn,
+          post_run: post_run
         )
 
       assert {:ok, _} = ask(pid, "go")
-      assert_received {:ordering, :handle_response}
-      assert_received {:ordering, :post_turn}
+      assert_receive {:trace, [:handle_response, :post_turn]}, 500
     end
 
     test "crash is caught and transition proceeds", %{task_sup: task_sup} do

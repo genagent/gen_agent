@@ -733,11 +733,8 @@ defmodule GenAgent.ServerTest do
       assert status(pid).halted
     end
 
-    test "default handle_error is {:noreply, state} (via use GenAgent)",
+    test "agent stays idle and usable after a failed turn with a noreply error handler",
          %{task_sup: task_sup} do
-      # Without an error_handler keyword, TestAgent defaults to noreply,
-      # which mirrors the `use GenAgent` default. Verify a failed turn
-      # leaves the agent idle and ready for more work.
       pid = start_server(task_sup, [{:error, :boom}, result_events("ok after error")])
 
       assert {:error, :boom} = ask(pid, "first")
