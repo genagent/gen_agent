@@ -26,25 +26,25 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag }}
+          persist-credentials: false
 
-      - uses: erlef/setup-beam@v1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           elixir-version: "1.19"
           otp-version: "27"
 
-      - name: Refresh core dependency for an integration
-        if: ${{ inputs.package != '.' }}
+      - name: Prepare tagged package if absent from Hex
+        id: prepare
         env:
           PACKAGE: ${{ inputs.package }}
-        run: |
-          cd "$PACKAGE"
-          GEN_AGENT_HEX=1 mix deps.update gen_agent
+        run: scripts/publish-package.sh "$PACKAGE" prepare
 
       - name: Publish tagged package if absent from Hex
+        if: ${{ steps.prepare.outputs.already_published == 'false' }}
         env:
           PACKAGE: ${{ inputs.package }}
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
-        run: scripts/publish-package.sh "$PACKAGE"
+        run: scripts/publish-package.sh "$PACKAGE" publish
