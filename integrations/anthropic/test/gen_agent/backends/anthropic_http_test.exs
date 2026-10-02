@@ -1,0 +1,92 @@
+defmodule GenAgent.Backends.AnthropicHTTPTest do
+  use ExUnit.Case, async: false
+
+  alias GenAgent.Backends.Anthropic
+
+  defmodule Adapter do
+    @moduledoc false
+
+    def run(request) do
+      send(self(), {:req_request, request})
+      {request, Process.get({__MODULE__, :reply})}
+    end
+  end
+
+  setup do
+    previous_options = Req.default_options()
+    Req.default_options(Keyword.put(previous_options, :adapter, Adapter))
+    on_exit(fn -> Req.default_options(previous_options) end)
+    :ok
+  end
+
+  test "default Req path posts JSON and decodes a successful response" do
+    reply_json(200, %{
+      id: "msg_test",
+      model: "claude-test",
+      stop_reason: "end_turn",
+      content: [%{type: "text", text: "hello"}],
+      usage: %{input_tokens: 3, output_tokens: 2}
+    })
+
+    {:ok, session} = Anthropic.start_session(api_key: "test-key", model: "claude-test")
+    assert {:ok, [usage, result], _session} = Anthropic.prompt(session, "ping")
+    assert usage.kind == :usage
+    assert usage.data == %{input_tokens: 3, output_tokens: 2}
+    assert result.kind == :result
+    assert result.data.text == "hello"
+
+    assert_receive {:req_request, request}
+    assert request.method == :post
+    assert URI.to_string(request.url) == "https://api.anthropic.com/v1/messages"
+    assert Req.Request.get_header(request, "x-api-key") == ["test-key"]
+    assert Req.Request.get_header(request, "anthropic-version") == ["2023-06-01"]
+
+    assert Jason.decode!(request.body) == %{
+             "model" => "claude-test",
+             "max_tokens" => 1024,
+             "messages" => [%{"role" => "user", "content" => "ping"}]
+           }
+
+    assert request.options[:receive_timeout] == 60_000
+    refute Map.has_key?(request.options, :connect_options)
+    assert request.options[:retry] == false
+  end
+
+  test "non-200 responses preserve status and decoded body, with custom timeouts" do
+    error_body = %{"type" => "error", "error" => %{"type" => "overloaded_error"}}
+    reply_json(529, error_body)
+
+    {:ok, session} =
+      Anthropic.start_session(
+        api_key: "test-key",
+        receive_timeout: 12_345,
+        connect_timeout: 2_345
+      )
+
+    assert {:error, {:http_error, 529, ^error_body}} = Anthropic.prompt(session, "ping")
+    assert_receive {:req_request, request}
+    assert request.options[:receive_timeout] == 12_345
+    assert request.options[:connect_options] == [timeout: 2_345]
+  end
+
+  test "transport errors pass through without retry" do
+    error = %Req.TransportError{reason: :timeout}
+    Process.put({Adapter, :reply}, error)
+
+    {:ok, session} = Anthropic.start_session(api_key: "test-key")
+    assert {:error, ^error} = Anthropic.prompt(session, "ping")
+    assert_receive {:req_request, _request}
+    refute_receive {:req_request, _request}
+  end
+
+  defp reply_json(status, body) do
+    Process.put(
+      {Adapter, :reply},
+      Req.Response.new(
+        status: status,
+        headers: %{"content-type" => ["application/json"]},
+        body: Jason.encode!(body)
+      )
+    )
+  end
+end
