@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a0fa6d-5a4a-77f1-9cbf-7765caac9ae1"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `codex-fixture-nonexistent-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"error","message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'codex-fixture-nonexistent-model' model is not supported when using Codex with a ChatGPT account.\"}}"}
+{"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'codex-fixture-nonexistent-model' model is not supported when using Codex with a ChatGPT account.\"}}"}}

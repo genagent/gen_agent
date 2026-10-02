@@ -3,10 +3,64 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
 
   alias CodexWrapper.JsonLineEvent
   alias GenAgent.Backends.Codex.EventTranslator
+  alias GenAgent.CodexTranscripts, as: Transcripts
   alias GenAgent.Event
   alias GenAgent.Response
 
   defp event(type, data), do: %JsonLineEvent{event_type: type, data: data, raw: ""}
+
+  for recording <- Transcripts.names() do
+    @tag recording: recording
+    test "translates recorded #{recording} exactly", %{recording: recording} do
+      recording
+      |> Transcripts.load()
+      |> EventTranslator.translate()
+      |> Transcripts.assert_events(recording)
+    end
+  end
+
+  test "recorded command lifecycle emits actions only on completion" do
+    events = Transcripts.load("command")
+    started = Enum.at(events, 3)
+    completed = Enum.at(events, 4)
+    assert started.event_type == "item.started"
+    assert started.data["item"]["status"] == "in_progress"
+    assert started.data["item"]["aggregated_output"] == ""
+    assert started.data["item"]["exit_code"] == nil
+    assert completed.event_type == "item.completed"
+    assert completed.data["item"]["id"] == started.data["item"]["id"]
+    assert EventTranslator.translate([started]) == []
+
+    assert Enum.map(EventTranslator.translate([completed]), & &1.kind) == [
+             :tool_use,
+             :tool_result
+           ]
+  end
+
+  test "recorded error item and notification do not terminate before turn.failed" do
+    events = Transcripts.load("failure")
+
+    assert Enum.map(events, & &1.event_type) ==
+             ["thread.started", "item.completed", "turn.started", "error", "turn.failed"]
+
+    assert Enum.at(events, 1).data["item"]["type"] == "error"
+    # Issue #184: the non-agent error item is currently filtered.
+    assert EventTranslator.translate(Enum.take(events, 3)) == []
+
+    observer = self()
+
+    stream =
+      Stream.map(events, fn event ->
+        if event.event_type == "turn.failed", do: send(observer, :reached_turn_failed)
+        event
+      end)
+
+    for event <- EventTranslator.translate_stream(stream) do
+      assert_receive :reached_turn_failed
+      assert event.kind == :error
+      assert event.data == %{reason: Transcripts.failure(), data: List.last(events).data}
+    end
+  end
 
   describe "thread_id capture" do
     test "injects thread_id from thread.started into the :result event as session_id" do
@@ -105,7 +159,7 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
       assert [%Event{kind: :result}] = EventTranslator.translate(events)
     end
 
-    test "current MCP, command and file items retain their IDs, results and status" do
+    test "synthetic: current MCP, command and file items retain their IDs, results and status" do
       items = [
         %{
           "type" => "mcp_tool_call",
@@ -156,7 +210,7 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
       assert List.last(translated).data.session_id == "t-1"
     end
 
-    test "started and updated actions are not counted again" do
+    test "synthetic: started and updated actions are not counted again" do
       item = %{"type" => "mcp_tool_call", "id" => "call-1", "status" => "completed"}
 
       events = [
