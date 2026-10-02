@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.2.2...gen_agent_claude-v0.2.3) (2026-10-02)
+
+
+### Bug Fixes
+
+* **claude:** validate backend options before session start ([#373](https://github.com/genagent/gen_agent/issues/373)) ([158765c](https://github.com/genagent/gen_agent/commit/158765c71d3dd844053c54286606897d35b4708f))
+
 ## [0.2.2](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.2.1...gen_agent_claude-v0.2.2) (2026-10-02)
 
 
