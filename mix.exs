@@ -47,6 +47,7 @@ defmodule GenAgent.MixProject do
       source_ref: "v#{@version}",
       extras: [
         "README.md",
+        "MIGRATION.md",
         "CHANGELOG.md",
         "LICENSE",
         "guides/patterns/overview.md": [title: "Patterns Overview"],
@@ -83,7 +84,7 @@ defmodule GenAgent.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib guides mix.exs README.md CHANGELOG.md LICENSE .formatter.exs),
+      files: ~w(lib guides mix.exs README.md MIGRATION.md CHANGELOG.md LICENSE .formatter.exs),
       maintainers: ["Josh Rotenberg"]
     ]
   end
