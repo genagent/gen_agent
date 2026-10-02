@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.0](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.2.3...gen_agent_openai-v0.3.0) (2026-10-02)
+
+
+### Features
+
+* **core:** checkpoint CLI sessions during active turns ([52f2919](https://github.com/genagent/gen_agent/commit/52f2919f2e677a14b428b05f1ad6dd1628741cd0))
+
+
+### Bug Fixes
+
+* **backends:** fail to start HTTP backends without credentials ([3a10e03](https://github.com/genagent/gen_agent/commit/3a10e034176e49a1c138fde95c2d64bcfb9244ad))
+* **openai:** reject failed incomplete and refused responses ([#270](https://github.com/genagent/gen_agent/issues/270)) ([49c365b](https://github.com/genagent/gen_agent/commit/49c365b9bbe591f7ef4f63b8b4c027401fe22f0a))
+* redact sensitive agent state from diagnostics ([#280](https://github.com/genagent/gen_agent/issues/280)) ([3038766](https://github.com/genagent/gen_agent/commit/3038766b00c1854a2db31ca74bba5a48da13c9ad))
+
 ## [0.2.3](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.2.2...gen_agent_openai-v0.2.3) (2026-10-01)
 
 

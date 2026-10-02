@@ -3,6 +3,6 @@
   "integrations/claude": "0.2.0",
   "integrations/codex": "0.4.0",
   "integrations/anthropic": "0.2.5",
-  "integrations/openai": "0.2.3",
+  "integrations/openai": "0.3.0",
   "extensions/ensemble": "0.2.1"
 }
