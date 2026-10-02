@@ -3,7 +3,9 @@ defmodule Primitives.ScriptedBackend do
   A local backend that echoes words as lazy text events, then usage and a result.
 
   `:delay_ms` delays each turn (default 0). `:script` maps prompt strings to
-  `:echo`, `{:slow, milliseconds}`, `{:error, reason}`, or `{:gate, owner_pid}`.
+  `:echo`, `{:slow, milliseconds}`, `{:error, reason}`, `{:fail, reason}`, `{:tools, [{name, input, output}]}`,
+  or `{:gate, owner_pid}`. Errors emit a terminal event; failures return a
+  synchronous error. Tools emit use/result pairs after the text deltas.
   A gate sends `{:scripted_turn, prompt, task_pid, token}` to its owner and
   waits for `{:release, token}`. This makes queue demonstrations deterministic.
   Token counts are illustrative word counts, not provider tokenization.
@@ -21,6 +23,13 @@ defmodule Primitives.ScriptedBackend do
   def prompt(session, prompt) do
     behavior = Map.get(session.script, prompt, :echo)
 
+    case behavior do
+      {:fail, reason} -> {:error, reason}
+      _ -> stream_prompt(session, prompt, behavior)
+    end
+  end
+
+  defp stream_prompt(session, prompt, behavior) do
     stream =
       Stream.flat_map([prompt], fn text ->
         wait(behavior, text)
@@ -40,9 +49,13 @@ defmodule Primitives.ScriptedBackend do
             _ -> Event.new(:result, %{text: Enum.join(words, " ")})
           end
 
-        Stream.concat(deltas, [
-          Event.new(:usage, %{input_tokens: length(words), output_tokens: length(words)}),
-          terminal
+        Stream.concat([
+          deltas,
+          tool_events(behavior),
+          [
+            Event.new(:usage, %{input_tokens: length(words), output_tokens: length(words)}),
+            terminal
+          ]
         ])
       end)
 
@@ -51,6 +64,17 @@ defmodule Primitives.ScriptedBackend do
 
   @impl true
   def terminate_session(_session), do: :ok
+
+  defp tool_events({:tools, tools}) do
+    Stream.flat_map(tools, fn {name, input, output} ->
+      [
+        Event.new(:tool_use, %{name: name, input: input}),
+        Event.new(:tool_result, %{name: name, output: output})
+      ]
+    end)
+  end
+
+  defp tool_events(_behavior), do: []
 
   defp wait({:slow, milliseconds}, _prompt), do: Process.sleep(milliseconds)
 

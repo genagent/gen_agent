@@ -232,3 +232,15 @@ iex> E.await("arch-review", tok, 600_000) |> E.puts()
   gpt-5-mini is a reasoning model and can burn output tokens on
   hidden reasoning -- set `:max_output_tokens` high enough to
   leave room for the actual message.
+
+## Usage accounting
+
+Every completed response in every round counts, including abstains. Both
+converged and diverged replies, including custom synthesis, carry usage.
+
+`Response.usage` contains summed numeric provider fields and a reserved
+`:by_agent` map of agent names to their summed numeric fields. It stays `nil`
+when no turn reports usage. Nonnumeric fields are dropped, and each invocation
+starts fresh. Failed turns cannot be counted; session-cumulative backend usage
+would overcount. See [usage accounting](overview.md#usage-accounting) for the
+complete shape and per-turn reporting assumption.

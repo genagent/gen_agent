@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.3.0...gen_agent_ensemble-v0.4.0) (2026-10-02)
+
+
+### Features
+
+* **ensemble:** aggregate usage across multi-agent strategies ([#319](https://github.com/genagent/gen_agent/issues/319)) ([89fa88b](https://github.com/genagent/gen_agent/commit/89fa88b6fa876caf844c14e949d81606fcd4c563))
+
 ## [0.3.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.2.1...gen_agent_ensemble-v0.3.0) (2026-10-02)
 
 

@@ -45,6 +45,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
 
   alias GenAgent.Response
   alias GenAgentEnsemble.Queue
+  alias GenAgentEnsemble.Usage
 
   defstruct [
     :a,
@@ -55,7 +56,8 @@ defmodule GenAgentEnsemble.Strategies.Debate do
     :reply_kind,
     agents: MapSet.new(),
     phase: :idle,
-    queue: nil
+    queue: nil,
+    usage: Usage.new()
   ]
 
   @impl true
@@ -110,7 +112,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
 
   defp start_or_queue(prompt, token, %{phase: :idle} = state) do
     phase = {:running, token, state.first, 0, []}
-    {:ok, [{:dispatch, state.first, prompt, token}], %{state | phase: phase}}
+    {:ok, [{:dispatch, state.first, prompt, token}], %{state | phase: phase, usage: Usage.new()}}
   end
 
   defp start_or_queue(prompt, token, state) do
@@ -129,6 +131,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   end
 
   defp advance(token, agent, response, turns, transcript, state) do
+    state = %{state | usage: Usage.add(state.usage, agent, response.usage)}
     transcript = transcript ++ [{agent, response.text}]
     turns = turns + 1
     converged? = turns >= 2 and safely_converged?(state.converge, response.text)
@@ -152,7 +155,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
 
   defp finalize(token, transcript, state) do
     text = render_reply(state.reply_kind, transcript)
-    response = %Response{text: text}
+    response = %Response{text: text, usage: Usage.to_usage(state.usage)}
     state = %{state | phase: :idle}
     {ops, state} = maybe_start_next(state, [{:reply, token, response}])
     {:ok, ops, state}
@@ -174,7 +177,13 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   defp maybe_start_next(%{phase: :idle} = state, ops_so_far) do
     case Queue.pop(state.queue) do
       {:ok, {token, prompt}, rest} ->
-        state = %{state | phase: {:running, token, state.first, 0, []}, queue: rest}
+        state = %{
+          state
+          | phase: {:running, token, state.first, 0, []},
+            queue: rest,
+            usage: Usage.new()
+        }
+
         {ops_so_far ++ [{:dispatch, state.first, prompt, token}], state}
 
       :empty ->
