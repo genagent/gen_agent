@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.1.5...gen_agent_claude-v0.2.0) (2026-10-02)
+
+
+### Features
+
+* **core:** checkpoint CLI sessions during active turns ([52f2919](https://github.com/genagent/gen_agent/commit/52f2919f2e677a14b428b05f1ad6dd1628741cd0))
+
+
+### Bug Fixes
+
+* **core:** compact retained events without losing turns ([#282](https://github.com/genagent/gen_agent/issues/282)) ([f9c9375](https://github.com/genagent/gen_agent/commit/f9c9375adbc4ef446f2bc52e336ac0006da5399c))
+
 ## [0.1.5](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.1.4...gen_agent_claude-v0.1.5) (2026-10-01)
 
 
