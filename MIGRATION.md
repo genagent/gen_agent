@@ -144,3 +144,81 @@ directory. The sibling Mix projects resolve core and each other by path.
 For a publishable archive, set `GEN_AGENT_HEX=1` so the dependencies resolve
 from Hex instead. See [RELEASING.md](https://github.com/genagent/gen_agent/blob/main/RELEASING.md)
 for release order and tags.
+
+## Depending on a package from another project
+
+Pick the form that matches how the consumer gets the code. The examples use
+`gen_agent_claude`; substitute the package name and directory from the table
+above, and check the package's `mix.exs` for its current version.
+
+### Published Hex package
+
+This is the supported choice for applications. No environment variable is
+needed, and `gen_agent` resolves from Hex through the package's requirement.
+
+```elixir
+{:gen_agent_claude, "~> 0.2.2"}
+```
+
+### Git dependency on one package (sparse)
+
+Mix can fetch a single directory of a Git repository with `:sparse`:
+
+```elixir
+{:gen_agent_claude,
+ git: "https://github.com/genagent/gen_agent.git",
+ sparse: "integrations/claude"}
+```
+
+A sparse checkout contains only that directory, so the core project files are
+absent. The package's default `gen_agent` dependency (`path: "../.."`) points
+at the checkout root, which has no core `mix.exs`. Set `GEN_AGENT_HEX=1` so the package takes `gen_agent` from Hex. The
+variable is read by the package's `mix.exs` each time Mix loads it, so export
+it for every Mix command in the consumer, not only `mix deps.get`:
+
+```sh
+export GEN_AGENT_HEX=1
+mix deps.get
+mix compile
+```
+
+Without it, `mix deps.get` succeeds but `mix compile` fails: Mix cannot
+compile `:gen_agent` because there is no `mix.exs` at `../..`.
+Pin a branch, tag, or commit with `ref:`, `branch:`, or `tag:` when the
+consumer needs a reproducible source. A git dependency still resolves
+`gen_agent` from Hex, so the requirement in the package's `mix.exs` decides
+which core version is used, not the commit of the core source in the same
+repository.
+
+### Git dependency with a full checkout (subdir)
+
+`:subdir` fetches the whole repository and uses a directory inside it as the
+Mix project:
+
+```elixir
+{:gen_agent_claude,
+ git: "https://github.com/genagent/gen_agent.git",
+ subdir: "integrations/claude"}
+```
+
+Here `../..` resolves to the root of the fetched repository, which contains
+the core source, so the default path dependency can be satisfied without
+`GEN_AGENT_HEX=1`. Set `GEN_AGENT_HEX=1` to use the published core instead, as
+in the sparse case.
+
+### Local path dependency
+
+When working in a full checkout of this repository, point at the package
+directory:
+
+```elixir
+{:gen_agent_claude, path: "../gen_agent/integrations/claude"}
+```
+
+The package finds the core at `../..` inside that checkout, so
+`GEN_AGENT_HEX=1` is not needed. This is a source checkout workflow for
+developing across packages. Do not use it for an application that is
+published or deployed from a machine without the checkout; use the Hex
+form there. If the consumer also depends on `gen_agent` directly, declare it
+with the same path (`path: "../gen_agent"`) or with `override: true` so the
+two declarations agree.
