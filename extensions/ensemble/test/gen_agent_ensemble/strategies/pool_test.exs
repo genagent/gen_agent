@@ -1,6 +1,26 @@
 defmodule GenAgentEnsemble.Strategies.PoolTest do
   use ExUnit.Case, async: false
 
+  defmodule RejectingReplacementAgent do
+    use GenAgent
+
+    @impl true
+    def init_agent(opts) do
+      start_count = Keyword.fetch!(opts, :start_count)
+      initial_starts = Keyword.fetch!(opts, :initial_starts)
+      attempt = Agent.get_and_update(start_count, fn count -> {count, count + 1} end)
+
+      if attempt < initial_starts do
+        {:ok, Keyword.take(opts, [:observer, :tag, :scripts]), %{}}
+      else
+        {:error, :replacement_blocked}
+      end
+    end
+
+    @impl true
+    def handle_response(_ref, _response, state), do: {:noreply, state}
+  end
+
   alias GenAgent.Backends.Mock
   alias GenAgent.Event
   alias GenAgentEnsemble.{ControlledAgent, ControlledBackend}
@@ -149,6 +169,64 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
     assert info.queued == 0
   end
 
+  test "failed replacement removes its slot while surviving workers continue", %{name: name} do
+    start_count = start_supervised!({Agent, fn -> 0 end})
+    echo = fn prompt -> [Event.new(:result, %{text: "echo:#{prompt}"})] end
+
+    worker =
+      {"#{name}-w", RejectingReplacementAgent,
+       [backend: Mock, start_count: start_count, initial_starts: 2, scripts: [echo]]}
+
+    {:ok, _pid} =
+      GenAgentEnsemble.start_link(
+        name: name,
+        strategy: Pool,
+        opts: [worker_count: 2, worker_template: worker]
+      )
+
+    dead_worker = "#{name}/#{name}-w-1"
+    Process.exit(GenAgent.whereis(dead_worker), :kill)
+
+    info = await_worker_count(name, 1)
+    assert info.free == 1
+    assert info.busy == 0
+    assert info.workers == ["#{name}-w-2"]
+    assert {:ok, %{text: "echo:survivor"}} = GenAgentEnsemble.ask(name, "survivor")
+  end
+
+  test "failed replacement fails queued work and halts an exhausted pool", %{name: name} do
+    start_count = start_supervised!({Agent, fn -> 0 end})
+
+    worker =
+      {"#{name}-w", RejectingReplacementAgent,
+       [
+         backend: ControlledBackend,
+         start_count: start_count,
+         initial_starts: 1,
+         observer: self(),
+         tag: "worker"
+       ]}
+
+    {:ok, pool} =
+      GenAgentEnsemble.start_link(
+        name: name,
+        strategy: Pool,
+        opts: [worker_count: 1, worker_template: worker]
+      )
+
+    monitor = Process.monitor(pool)
+    first = Task.async(fn -> GenAgentEnsemble.ask(name, "first", timeout: 5_000) end)
+    assert_receive {:controlled_prompt, "worker", "first", _task}, 2_000
+    second = Task.async(fn -> GenAgentEnsemble.ask(name, "second", timeout: 5_000) end)
+    assert await_queued(name, 1).queued == 1
+
+    Process.exit(GenAgent.whereis("#{name}/#{name}-w-1"), :kill)
+
+    assert {:error, {:worker_down, :killed}} = Task.await(first, 5_000)
+    assert {:error, {:worker_start_failed, _}} = Task.await(second, 5_000)
+    assert_receive {:DOWN, ^monitor, :process, ^pool, :normal}, 2_000
+  end
+
   test "status reports pool shape", %{name: name} do
     {:ok, _} = start_pool(name, 3, [])
     {:ok, info} = GenAgentEnsemble.status(name)
@@ -198,6 +276,36 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
 
       other ->
         flunk("expected a replacement for #{name}, got: #{inspect(other)}")
+    end
+  end
+
+  defp await_worker_count(name, count, retries \\ 100) do
+    {:ok, info} = GenAgentEnsemble.status(name)
+
+    if length(info.workers) == count do
+      info
+    else
+      if retries > 0 do
+        Process.sleep(20)
+        await_worker_count(name, count, retries - 1)
+      else
+        flunk("expected #{count} workers, got: #{inspect(info)}")
+      end
+    end
+  end
+
+  defp await_queued(name, count, retries \\ 100) do
+    {:ok, info} = GenAgentEnsemble.status(name)
+
+    if info.queued == count do
+      info
+    else
+      if retries > 0 do
+        Process.sleep(20)
+        await_queued(name, count, retries - 1)
+      else
+        flunk("expected #{count} queued requests, got: #{inspect(info)}")
+      end
     end
   end
 end

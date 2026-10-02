@@ -123,4 +123,6 @@ Uses whichever worker is free. If all are busy, queues behind them.
 - **Worker death starts a fresh worker.** An in-flight token fails
   with `{:worker_down, reason}`; queued requests can continue on the
   replacement. The new worker has a fresh backend session and loses
-  the dead worker's conversation history.
+  the dead worker's conversation history. If replacement startup fails,
+  that slot is removed. Other workers continue; if none remain, the pool
+  halts and pending requests fail.

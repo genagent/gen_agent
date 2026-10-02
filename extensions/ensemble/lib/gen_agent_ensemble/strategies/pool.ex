@@ -23,6 +23,9 @@ defmodule GenAgentEnsemble.Strategies.Pool do
       `{:worker_down, reason}`. A fresh worker starts from the template
       under the same name and can take the next queued prompt. Its
       previous backend session and conversation history are lost.
+    * If replacement cannot start, that worker is removed from the pool.
+      A queued prompt assigned to it fails; other workers keep running.
+      If none remain, the ensemble halts and closes all pending tokens.
   """
 
   @behaviour GenAgentEnsemble.Strategy
@@ -131,6 +134,33 @@ defmodule GenAgentEnsemble.Strategies.Pool do
     else
       {:ok, [], state}
     end
+  end
+
+  @impl true
+  def handle_start_rejected(worker, reason, state) do
+    {token, busy} = Map.pop(state.busy, worker)
+
+    state = %{
+      state
+      | workers: MapSet.delete(state.workers, worker),
+        free: Enum.reject(state.free, &(&1 == worker)),
+        busy: busy
+    }
+
+    fail_ops =
+      case token do
+        nil -> []
+        token -> [{:reply_error, token, {:worker_start_failed, reason}}]
+      end
+
+    ops =
+      if MapSet.size(state.workers) == 0 do
+        fail_ops ++ [{:halt, {:pool_exhausted, {:worker_start_failed, reason}}}]
+      else
+        fail_ops
+      end
+
+    {:ok, ops, state}
   end
 
   @impl true

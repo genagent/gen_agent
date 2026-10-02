@@ -381,6 +381,21 @@ defmodule GenAgentEnsemble.Server do
     {:halt, reject_dispatch(state, agent, token, reason)}
   end
 
+  defp handle_op_failure({:start, {agent, _module, _opts}}, reason, state) do
+    if function_exported?(state.strategy_mod, :handle_start_rejected, 3) do
+      {ops, strategy_state} =
+        call_strategy(state.strategy_mod, :handle_start_rejected, [
+          agent,
+          reason,
+          state.strategy_state
+        ])
+
+      {:halt, %{state | strategy_state: strategy_state} |> apply_ops(ops)}
+    else
+      {:cont, state}
+    end
+  end
+
   defp handle_op_failure(_op, _reason, state), do: {:cont, state}
 
   defp reject_dispatch(state, agent, token, reason) do
