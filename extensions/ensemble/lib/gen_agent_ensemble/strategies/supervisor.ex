@@ -141,7 +141,11 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     worker_outputs =
       progress
       |> Enum.map(fn {worker, {:done, resp}} -> {worker, resp.text} end)
-      |> Enum.sort_by(fn {worker, _} -> worker end)
+      |> Enum.sort_by(fn {worker, _} ->
+        worker
+        |> String.replace_prefix("#{state.worker_prefix}-", "")
+        |> String.to_integer()
+      end)
 
     combined = state.synthesizer.(worker_outputs)
     final_response = %Response{text: combined}
