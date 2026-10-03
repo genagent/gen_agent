@@ -4,7 +4,18 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
 
   N agents run in order. The incoming prompt hits stage 1. Each
   stage's response text becomes the prompt for the next stage. The
-  last stage's response is the reply returned to the caller.
+  last stage's response is the reply returned to the caller, with aggregate
+  usage and `metadata.pipeline` containing `stages` (ordered
+  `{stage_name, GenAgent.Response.t()}` pairs, including the unmodified final
+  response) and `total_duration_ms` (the sum of stage durations, excluding
+  queue wait and orchestration overhead). Top-level `duration_ms` remains
+  the final stage's duration. Other metadata keys are preserved; `:pipeline`
+  is reserved for this run's results.
+
+  Only the active run's responses are accumulated. Completion, errors,
+  cancellation, and dispatch rejection clear them. Completed results use
+  the existing token storage; `await` is repeatable, while `poll` and `inbox`
+  consume results. No separate history is retained.
 
   ## Options
 
@@ -31,6 +42,7 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
   defstruct stages: [],
             phase: :idle,
             queue: nil,
+            responses: [],
             usage: Usage.new()
 
   @impl true
@@ -55,7 +67,7 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
     first = hd(state.stages)
 
     {:ok, [{:dispatch, first, prompt, token}],
-     %{state | usage: Usage.new(), phase: {:in_stage, 0, token}}}
+     %{state | responses: [], usage: Usage.new(), phase: {:in_stage, 0, token}}}
   end
 
   defp dispatch_or_queue(prompt, token, state) do
@@ -81,7 +93,13 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
 
   defp advance(idx, token, response, state) do
     stage = Enum.at(state.stages, idx)
-    state = %{state | usage: Usage.add(state.usage, stage, response.usage)}
+
+    state = %{
+      state
+      | usage: Usage.add(state.usage, stage, response.usage),
+        responses: [{stage, response} | state.responses]
+    }
+
     next_idx = idx + 1
 
     if next_idx < length(state.stages) do
@@ -90,8 +108,18 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
       {:ok, [{:dispatch, next_stage, response.text, token}],
        %{state | phase: {:in_stage, next_idx, token}}}
     else
-      response = %{response | usage: Usage.to_usage(state.usage)}
-      state = %{state | phase: :idle}
+      pipeline = %{
+        stages: Enum.reverse(state.responses),
+        total_duration_ms: Enum.sum(Enum.map(state.responses, fn {_, r} -> r.duration_ms end))
+      }
+
+      response = %{
+        response
+        | usage: Usage.to_usage(state.usage),
+          metadata: Map.put(response.metadata, :pipeline, pipeline)
+      }
+
+      state = reset_run(state)
       {ops, state} = maybe_start_next(state, [{:reply, token, response}])
       {:ok, ops, state}
     end
@@ -101,7 +129,7 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
   def handle_error(stage, reason, state) do
     case state.phase do
       {:in_stage, _idx, token} ->
-        state = %{state | phase: :idle}
+        state = reset_run(state)
         {ops, state} = maybe_start_next(state, [{:reply_error, token, {stage, reason}}])
         {:ok, ops, state}
 
@@ -116,7 +144,7 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
 
     case state.phase do
       {:in_stage, _, ^token} ->
-        {ops, state} = maybe_start_next(%{state | phase: :idle, usage: Usage.new()}, [])
+        {ops, state} = maybe_start_next(reset_run(state), [])
         {:ok, ops, state}
 
       _ ->
@@ -151,12 +179,22 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
     %{stages: state.stages, phase: phase, queued: Queue.len(state.queue)}
   end
 
+  defp reset_run(state),
+    do: %{state | phase: :idle, usage: Usage.new(), responses: []}
+
   defp maybe_start_next(%{phase: :idle} = state, ops_so_far) do
     case Queue.pop(state.queue) do
       {:ok, {token, prompt}, rest} ->
         first = hd(state.stages)
 
-        state = %{state | usage: Usage.new(), phase: {:in_stage, 0, token}, queue: rest}
+        state = %{
+          state
+          | responses: [],
+            usage: Usage.new(),
+            phase: {:in_stage, 0, token},
+            queue: rest
+        }
+
         {ops_so_far ++ [{:dispatch, first, prompt, token}], state}
 
       :empty ->
