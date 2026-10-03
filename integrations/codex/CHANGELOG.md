@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.7](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.6...gen_agent_codex-v0.4.7) (2026-10-03)
+
+
+### Bug Fixes
+
+* **codex:** require wrapper oversized-line errors ([#388](https://github.com/genagent/gen_agent/issues/388)) ([19561f7](https://github.com/genagent/gen_agent/commit/19561f7efdacce476ca4ec39d75b191f93a609b9))
+* **codex:** translate current item types without duplicate payloads ([#386](https://github.com/genagent/gen_agent/issues/386)) ([c4baa01](https://github.com/genagent/gen_agent/commit/c4baa01ff07070b73b19055a62968025d60c4b46)), closes [#184](https://github.com/genagent/gen_agent/issues/184)
+
 ## [0.4.6](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.5...gen_agent_codex-v0.4.6) (2026-10-03)
 
 
