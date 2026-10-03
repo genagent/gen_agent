@@ -43,10 +43,14 @@ defmodule GenAgent.Backends.ClaudeTest do
     end
 
     test "aliases :cwd to :working_dir for ergonomics" do
-      {:ok, session} = Claude.start_session(stream_fn: fake_stream([]), cwd: "/home/me")
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, session} = Claude.start_session(stream_fn: fake_stream([]), cwd: "/home/me")
+          assert session.opts[:working_dir] == "/home/me"
+          refute Keyword.has_key?(session.opts, :cwd)
+        end)
 
-      assert session.opts[:working_dir] == "/home/me"
-      refute Keyword.has_key?(session.opts, :cwd)
+      assert log =~ ":cwd is deprecated"
     end
 
     test "does not override an explicit :working_dir with :cwd" do
@@ -115,6 +119,20 @@ defmodule GenAgent.Backends.ClaudeTest do
                Claude.start_session(allowed_tools: ["Read"], permision_mode: :plan)
 
       assert {:error, {:unknown_option, :sandbox}} = Claude.start_session(sandbox: :read_only)
+    end
+
+    test "normalizes legacy system prompt names without losing instructions" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, session} = Claude.start_session(system: "Be terse.")
+          assert session.opts[:system_prompt] == "Be terse."
+          refute Keyword.has_key?(session.opts, :system)
+        end)
+
+      assert log =~ ":system is deprecated"
+
+      assert {:error, {:conflicting_options, [:system_prompt, :instructions]}} =
+               Claude.start_session(system_prompt: "new", instructions: "old")
     end
 
     test "accepts every option the locked wrapper supports" do

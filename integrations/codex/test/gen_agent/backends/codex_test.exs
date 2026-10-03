@@ -49,10 +49,14 @@ defmodule GenAgent.Backends.CodexTest do
     end
 
     test "aliases :cwd to :working_dir" do
-      {:ok, session} = Codex.start_session(exec_fn: fake_exec([]), cwd: "/home/me")
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, session} = Codex.start_session(exec_fn: fake_exec([]), cwd: "/home/me")
+          refute Keyword.has_key?(session.exec_opts, :cwd)
+          refute Keyword.has_key?(session.exec_opts, :working_dir)
+        end)
 
-      refute Keyword.has_key?(session.exec_opts, :cwd)
-      refute Keyword.has_key?(session.exec_opts, :working_dir)
+      assert log =~ ":cwd is deprecated"
     end
 
     test "rejects invalid sandbox modes before a prompt" do

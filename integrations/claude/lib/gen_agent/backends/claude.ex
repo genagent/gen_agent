@@ -15,11 +15,12 @@ defmodule GenAgent.Backends.Claude do
   `{:error, {:unknown_option, key}}` and malformed values return
   `{:error, {:invalid_option, key, value}}`:
 
-    * Config: `:binary` (a path or `:bundled`), `:working_dir` (aliased as
-      `:cwd`), `:env` (a map or `{name, value}` list; `false` unsets),
+    * Config: `:binary` (a path or `:bundled`), `:working_dir` (deprecated
+      alias `:cwd`), `:env` (a map or `{name, value}` list; `false` unsets),
       `:timeout`, `:verbose`, `:debug`
     * Query: every key `ClaudeWrapper.Query.apply_opts/2` handles, such as
-      `:model`, `:system_prompt`, `:append_system_prompt`, `:settings`,
+      `:model`, `:system_prompt` (with deprecated `:system` and `:instructions`
+      aliases), `:append_system_prompt`, `:settings`,
       `:max_turns`, `:max_budget_usd`, `:permission_mode`, `:effort`,
       `:json_schema`, `:allowed_tools`, `:files`, `:output_format`,
       `:include_partial_messages` (on by default)
@@ -49,6 +50,8 @@ defmodule GenAgent.Backends.Claude do
 
   @behaviour GenAgent.Backend
 
+  require Logger
+
   alias GenAgent.Backends.Claude.EventTranslator
 
   defstruct [
@@ -75,7 +78,8 @@ defmodule GenAgent.Backends.Claude do
       true ->
         {stream_fn, opts} = Keyword.pop(opts, :stream_fn, &ClaudeWrapper.stream/2)
 
-        with :ok <- validate_opts(opts) do
+        with :ok <- validate_opts(opts),
+             {:ok, opts} <- normalize_system_prompt(opts) do
           {:ok,
            %__MODULE__{
              opts: normalize_opts(opts),
@@ -146,6 +150,8 @@ defmodule GenAgent.Backends.Claude do
     :model,
     :fallback_model,
     :system_prompt,
+    :system,
+    :instructions,
     :system_prompt_file,
     :append_system_prompt,
     :append_system_prompt_file,
@@ -279,12 +285,34 @@ defmodule GenAgent.Backends.Claude do
   defp check(_key, _value, true), do: :ok
   defp check(key, value, false), do: {:error, {:invalid_option, key, value}}
 
+  defp normalize_system_prompt(opts) do
+    present = Enum.filter([:system_prompt, :system, :instructions], &Keyword.has_key?(opts, &1))
+
+    case Enum.uniq(Enum.map(present, &Keyword.fetch!(opts, &1))) do
+      [_first, _second | _] ->
+        {:error, {:conflicting_options, present}}
+
+      _ ->
+        Enum.each(present -- [:system_prompt], fn alias_key ->
+          Logger.warning("#{inspect(alias_key)} is deprecated; use :system_prompt")
+        end)
+
+        value = if present == [], do: nil, else: Keyword.fetch!(opts, hd(present))
+        opts = Keyword.drop(opts, [:system, :instructions])
+        {:ok, if(present == [], do: opts, else: Keyword.put(opts, :system_prompt, value))}
+    end
+  end
+
   defp normalize_opts(opts) do
     opts = Keyword.put_new(opts, :include_partial_messages, true)
 
     case Keyword.pop(opts, :cwd) do
-      {nil, rest} -> rest
-      {cwd, rest} -> Keyword.put_new(rest, :working_dir, cwd)
+      {nil, rest} ->
+        rest
+
+      {cwd, rest} ->
+        Logger.warning(":cwd is deprecated; use :working_dir")
+        Keyword.put_new(rest, :working_dir, cwd)
     end
   end
 
