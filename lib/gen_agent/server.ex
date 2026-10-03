@@ -32,6 +32,7 @@ defmodule GenAgent.Server do
 
     defstruct [
       :name,
+      :registered,
       :backend,
       :backend_session,
       :task_supervisor,
@@ -168,6 +169,9 @@ defmodule GenAgent.Server do
          {:ok, backend_session} <- initialize_backend(backend, backend_opts) do
       data = %Data{
         name: name,
+        registered:
+          Keyword.get(opts, :register) ==
+            {:via, Registry, {GenAgent.Registry, name}},
         backend: backend,
         backend_session: backend_session,
         task_supervisor: task_supervisor,
@@ -800,7 +804,27 @@ defmodule GenAgent.Server do
     :keep_state_and_data
   end
 
+  # Registry registration links the agent to its Registry partition. Because
+  # agents trap exits to clean up prompt tasks, losing that partition would
+  # otherwise leave a live agent that can no longer be addressed by name.
+  # Prompt tasks are linked too, so verify ownership instead of treating every
+  # linked-process exit as a Registry failure.
+  defp dispatch_event(:info, {:EXIT, _pid, _reason}, _state, %Data{registered: true} = data) do
+    if registered_here?(data.name) do
+      :keep_state_and_data
+    else
+      {:stop, {:shutdown, :registry_lost}, data}
+    end
+  end
+
   defp dispatch_event(:info, _msg, _state, _data), do: :keep_state_and_data
+
+  defp registered_here?(name) do
+    Registry.whereis_name({GenAgent.Registry, name}) == self()
+  catch
+    # The Registry may still be down when its linked partition's EXIT arrives.
+    _, _ -> false
+  end
 
   defp request_origin({:ask, _from}), do: :ask
   defp request_origin({:tell, _recipient}), do: :tell
