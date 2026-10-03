@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.4.0...gen_agent_anthropic-v0.4.1) (2026-10-03)
+
+
+### Bug Fixes
+
+* **backends:** validate options and align shared names ([#389](https://github.com/genagent/gen_agent/issues/389)) ([68abf7c](https://github.com/genagent/gen_agent/commit/68abf7cde4ca185980ac3f8375d94390f98bf3d4))
+
 ## [0.4.0](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.3.0...gen_agent_anthropic-v0.4.0) (2026-10-03)
 
 
