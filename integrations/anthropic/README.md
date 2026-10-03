@@ -94,10 +94,20 @@ session struct so multi-turn conversations work transparently:
 
 Conversation history lives in `session.messages` as an in-order list
 of `%{role: ..., content: ...}` maps with atom keys. The user message is
-appended on dispatch. The assistant message is appended when the terminal
-`:result` event carries non-blank text. If the response is a refusal
-(`stop_reason: "refusal"`) or its text is empty or only whitespace, the
-unanswered user message is removed instead, so history keeps alternating.
+included in the API request. The assistant message is appended when the
+terminal `:result` event carries non-blank text. If that text is empty or
+only whitespace, the unanswered user message is removed. Refusals and
+incomplete responses also leave prior history intact, so a later turn does
+not resend a failed prompt.
+
+`end_turn` and `stop_sequence` are successful stops. Their terminal event
+data includes `:stop_reason` and, when the API provides it,
+`:stop_details`; callers can read them through `response.terminal.data`.
+A refusal returns `{:error, {:refusal, stop_details}}`. A `max_tokens` or
+`model_context_window_exceeded` stop returns
+`{:error, {:response_incomplete, %{stop_reason: reason, stop_details: details}}}`.
+Other stops are rejected as `{:error, {:unexpected_stop_reason, reason}}`
+because this text-only backend cannot complete a paused or tool-use turn.
 
 ## Backend options
 

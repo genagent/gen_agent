@@ -298,6 +298,58 @@ defmodule GenAgent.Backends.AnthropicTest do
       assert is_binary(data.session_id)
     end
 
+    test "only completed text stops produce results; rejected stops retain details and usage" do
+      for {stop_reason, expected_reason} <- [
+            {"refusal", {:refusal, %{"type" => "refusal"}}},
+            {"max_tokens",
+             {:response_incomplete,
+              %{stop_reason: "max_tokens", stop_details: %{"type" => "refusal"}}}},
+            {"model_context_window_exceeded",
+             {:response_incomplete,
+              %{
+                stop_reason: "model_context_window_exceeded",
+                stop_details: %{"type" => "refusal"}
+              }}},
+            {"pause_turn", {:unexpected_stop_reason, "pause_turn"}}
+          ] do
+        http_fn = fn _req ->
+          {:ok,
+           ok_response("partial", stop_reason: stop_reason).(nil)
+           |> elem(1)
+           |> Map.put("stop_details", %{"type" => "refusal"})}
+        end
+
+        {:ok, session} = Anthropic.start_session(http_fn: http_fn)
+        {:ok, events, returned_session} = Anthropic.prompt(session, "unanswered")
+
+        assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
+        assert data.reason == expected_reason
+        assert data.stop_reason == stop_reason
+        assert data.stop_details == %{"type" => "refusal"}
+        assert data.text == "partial"
+        assert returned_session.messages == []
+      end
+    end
+
+    test "stop_sequence remains a successful terminal result with stop details" do
+      details = %{"type" => "stop_sequence"}
+
+      http_fn = fn _req ->
+        {:ok,
+         ok_response("done", stop_reason: "stop_sequence").(nil)
+         |> elem(1)
+         |> Map.put("stop_details", details)}
+      end
+
+      {:ok, session} = Anthropic.start_session(http_fn: http_fn)
+
+      {:ok, [%Event{kind: :usage}, %Event{kind: :result, data: data}], _session} =
+        Anthropic.prompt(session, "prompt")
+
+      assert data.stop_reason == "stop_sequence"
+      assert data.stop_details == details
+    end
+
     test "propagates HTTP errors" do
       failing = fn _req -> {:error, {:http_error, 429, %{"type" => "rate_limit"}}} end
 
@@ -374,16 +426,6 @@ defmodule GenAgent.Backends.AnthropicTest do
                  %{role: "assistant", content: "reply"}
                ]
       end
-    end
-
-    test "removes a refused turn even when the response contains text" do
-      {:ok, session} = Anthropic.start_session(api_key: "sk-test", http_fn: ok_response("x"))
-      session = %{session | messages: [%{role: "user", content: "refused"}]}
-
-      session =
-        Anthropic.update_session(session, %{text: "I cannot help", stop_reason: "refusal"})
-
-      assert session.messages == []
     end
   end
 

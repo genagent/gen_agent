@@ -17,16 +17,23 @@ defmodule GenAgent.Backends.Anthropic do
 
   ## How the two halves of a turn land in the session
 
-  1. `prompt/2` appends the user's message to `session.messages`
-     **before** making the API call, and returns the updated session
-     along with the event list. The state machine stores that updated
-     session.
+  1. `prompt/2` includes the user's message in the API request. It returns
+     that updated session only for a completed turn. A rejected terminal
+     stop leaves the previous history intact.
   2. When the state machine delivers the terminal `:result` event,
      it calls `update_session/2` with the event's data, and this
      backend appends the assistant's message to `session.messages`.
-     If the response is empty or refused, it removes the unanswered
-     user message instead.
+     If the response is empty, it removes the unanswered user message instead.
   3. The next `prompt/2` sends the updated history to the API.
+
+  `end_turn` and `stop_sequence` produce a terminal `:result` event whose
+  data includes `:text`, `:stop_reason`, `:stop_details` (when provided),
+  `:model`, `:message_id`, and `:session_id`. `refusal` produces an `:error`
+  with reason `{:refusal, stop_details}`. `max_tokens` and
+  `model_context_window_exceeded` produce `:error` with reason
+  `{:response_incomplete, %{stop_reason: reason, stop_details: details}}`.
+  Other stop reasons are rejected as `{:unexpected_stop_reason, reason}`,
+  because this text-only backend cannot complete tool or paused turns.
 
   This uses both sides of the `GenAgent.Backend` contract in a way
   the CLI backends don't: CLI backends leave `prompt/2`'s returned
@@ -125,14 +132,17 @@ defmodule GenAgent.Backends.Anthropic do
 
   @impl GenAgent.Backend
   def prompt(%__MODULE__{} = session, prompt) when is_binary(prompt) do
-    session = append_message(session, "user", prompt)
-
-    request = build_request(session)
+    pending_session = append_message(session, "user", prompt)
+    request = build_request(pending_session)
 
     case session.http_fn.(request) do
       {:ok, body} ->
         events = response_to_events(body, session.client_session_id)
-        {:ok, events, session}
+
+        next_session =
+          if List.last(events).kind == :error, do: session, else: pending_session
+
+        {:ok, events, next_session}
 
       {:error, reason} ->
         {:error, reason}
@@ -142,10 +152,6 @@ defmodule GenAgent.Backends.Anthropic do
   end
 
   @impl GenAgent.Backend
-  def update_session(%__MODULE__{} = session, %{stop_reason: "refusal"}) do
-    drop_last_user_message(session)
-  end
-
   # Text that is empty or only whitespace is not a usable assistant turn:
   # remove the unanswered user message so history keeps alternating.
   def update_session(%__MODULE__{} = session, %{text: text}) when is_binary(text) do
@@ -212,13 +218,29 @@ defmodule GenAgent.Backends.Anthropic do
         text: text,
         session_id: client_session_id,
         stop_reason: stop_reason,
+        stop_details: body["stop_details"],
         model: body["model"],
         message_id: body["id"]
       }
       |> drop_nil_values()
 
-    usage_events ++ [Event.new(:result, result_data)]
+    terminal_event =
+      case stop_error(stop_reason, body["stop_details"]) do
+        nil -> Event.new(:result, result_data)
+        reason -> Event.new(:error, Map.put(result_data, :reason, reason))
+      end
+
+    usage_events ++ [terminal_event]
   end
+
+  defp stop_error(reason, _details) when reason in ["end_turn", "stop_sequence"], do: nil
+  defp stop_error("refusal", details), do: {:refusal, details}
+
+  defp stop_error(reason, details)
+       when reason in ["max_tokens", "model_context_window_exceeded"],
+       do: {:response_incomplete, %{stop_reason: reason, stop_details: details}}
+
+  defp stop_error(reason, _details), do: {:unexpected_stop_reason, reason}
 
   defp extract_text(%{"content" => content}) when is_list(content) do
     content
