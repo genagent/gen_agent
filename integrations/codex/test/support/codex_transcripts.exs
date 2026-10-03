@@ -31,8 +31,8 @@ defmodule GenAgent.CodexTranscripts do
 
   def expected("failure") do
     data = List.last(load("failure")).data
-    # Issue #184: the recorded non-agent error item is currently filtered.
-    [{:error, %{reason: data["error"], data: data}}]
+    item = Enum.at(load("failure"), 1).data["item"]
+    [{:tool_result, item}, {:error, %{reason: data["error"], data: data}}]
   end
 
   def expected(name) do
@@ -69,7 +69,7 @@ defmodule GenAgent.CodexTranscripts do
 
     [
       {:text, %{text: "I’ll run the command and report its output.", message_boundary: true}},
-      {:tool_use, item},
+      {:tool_use, Map.take(item, ["id", "type"])},
       {:tool_result, item},
       {:text, %{text: "```text\ncodex-fixture\n```", message_boundary: true}}
     ]

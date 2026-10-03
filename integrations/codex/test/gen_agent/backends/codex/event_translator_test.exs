@@ -19,7 +19,7 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
     end
   end
 
-  test "recorded command lifecycle emits actions only on completion" do
+  test "recorded command lifecycle emits a small start marker and one full completion" do
     events = Transcripts.load("command")
     started = Enum.at(events, 3)
     completed = Enum.at(events, 4)
@@ -29,12 +29,12 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
     assert started.data["item"]["exit_code"] == nil
     assert completed.event_type == "item.completed"
     assert completed.data["item"]["id"] == started.data["item"]["id"]
-    assert EventTranslator.translate([started]) == []
 
-    assert Enum.map(EventTranslator.translate([completed]), & &1.kind) == [
-             :tool_use,
-             :tool_result
-           ]
+    assert [%Event{kind: :tool_use, data: %{"id" => "item_1", "type" => "command_execution"}}] =
+             EventTranslator.translate([started])
+
+    assert [%Event{kind: :tool_result, data: item}] = EventTranslator.translate([completed])
+    assert item == completed.data["item"]
   end
 
   test "recorded error item and notification do not terminate before turn.failed" do
@@ -44,8 +44,9 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
              ["thread.started", "item.completed", "turn.started", "error", "turn.failed"]
 
     assert Enum.at(events, 1).data["item"]["type"] == "error"
-    # Issue #184: the non-agent error item is currently filtered.
-    assert EventTranslator.translate(Enum.take(events, 3)) == []
+
+    assert [%Event{kind: :tool_result, data: %{"type" => "error"}}] =
+             EventTranslator.translate(Enum.take(events, 3))
 
     observer = self()
 
@@ -55,11 +56,12 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
         event
       end)
 
-    for event <- EventTranslator.translate_stream(stream) do
-      assert_receive :reached_turn_failed
-      assert event.kind == :error
-      assert event.data == %{reason: Transcripts.failure(), data: List.last(events).data}
-    end
+    assert [%Event{kind: :tool_result, data: %{"type" => "error"}}, terminal] =
+             EventTranslator.translate_stream(stream) |> Enum.to_list()
+
+    assert_receive :reached_turn_failed
+    assert terminal.kind == :error
+    assert terminal.data == %{reason: Transcripts.failure(), data: List.last(events).data}
   end
 
   describe "thread_id capture" do
@@ -134,20 +136,14 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
                "I will inspect the file.\n\nThe file is correct."
     end
 
-    test "tool_call becomes :tool_use with the whole item as data" do
-      item = %{"type" => "tool_call", "id" => "t1", "name" => "bash", "input" => %{}}
-      events = [event("item.completed", %{"item" => item}), event("turn.completed", %{})]
+    test "legacy tool_call and tool_result names outside the exec schema are filtered" do
+      events = [
+        event("item.completed", %{"item" => %{"type" => "tool_call"}}),
+        event("item.completed", %{"item" => %{"type" => "tool_result"}}),
+        event("turn.completed", %{})
+      ]
 
-      assert [%Event{kind: :tool_use, data: ^item}, %Event{kind: :result}] =
-               EventTranslator.translate(events)
-    end
-
-    test "tool_result becomes :tool_result" do
-      item = %{"type" => "tool_result", "output" => "file1\nfile2"}
-      events = [event("item.completed", %{"item" => item}), event("turn.completed", %{})]
-
-      assert [%Event{kind: :tool_result, data: ^item}, %Event{kind: :result}] =
-               EventTranslator.translate(events)
+      assert [%Event{kind: :result}] = EventTranslator.translate(events)
     end
 
     test "unknown item types are filtered out" do
@@ -159,7 +155,7 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
       assert [%Event{kind: :result}] = EventTranslator.translate(events)
     end
 
-    test "synthetic: current MCP, command and file items retain their IDs, results and status" do
+    test "current action item types keep full completion once and compact start markers" do
       items = [
         %{
           "type" => "mcp_tool_call",
@@ -183,12 +179,37 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
           "id" => "edit-1",
           "changes" => [%{"path" => "fixture.txt", "kind" => "add"}],
           "status" => "failed"
+        },
+        %{
+          "type" => "web_search",
+          "id" => "search-1",
+          "query" => "example",
+          "action" => %{"type" => "search"}
+        },
+        %{
+          "type" => "collab_tool_call",
+          "id" => "collab-1",
+          "tool" => "wait",
+          "sender_thread_id" => "t-1",
+          "receiver_thread_ids" => ["t-2"],
+          "prompt" => nil,
+          "agents_states" => %{},
+          "status" => "completed"
         }
       ]
 
       events =
         [event("thread.started", %{"thread_id" => "t-1"})] ++
-          Enum.map(items, &event("item.completed", %{"item" => &1})) ++
+          Enum.flat_map(items, fn item ->
+            if item["type"] == "file_change" do
+              [event("item.completed", %{"item" => item})]
+            else
+              [
+                event("item.started", %{"item" => item}),
+                event("item.completed", %{"item" => item})
+              ]
+            end
+          end) ++
           [event("turn.completed", %{})]
 
       translated = EventTranslator.translate(events)
@@ -199,6 +220,9 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
                  :tool_result,
                  :tool_use,
                  :tool_result,
+                 :tool_result,
+                 :tool_use,
+                 :tool_result,
                  :tool_use,
                  :tool_result,
                  :result
@@ -206,11 +230,13 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
 
       assert Enum.at(translated, 1).data["id"] == "call-2"
       assert Enum.at(translated, 3).data["aggregated_output"] == "fixture"
-      assert Enum.at(translated, 5).data["status"] == "failed"
+      assert Enum.at(translated, 4).data["status"] == "failed"
+      assert Enum.at(translated, 6).data["query"] == "example"
+      assert Enum.at(translated, 8).data["receiver_thread_ids"] == ["t-2"]
       assert List.last(translated).data.session_id == "t-1"
     end
 
-    test "synthetic: started and updated actions are not counted again" do
+    test "started and updated actions do not duplicate the full completion" do
       item = %{"type" => "mcp_tool_call", "id" => "call-1", "status" => "completed"}
 
       events = [
@@ -219,8 +245,37 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
         event("item.completed", %{"item" => item})
       ]
 
-      assert [%Event{kind: :tool_use}, %Event{kind: :tool_result}] =
+      assert [%Event{kind: :tool_use, data: marker}, %Event{kind: :tool_result, data: ^item}] =
                EventTranslator.translate(events)
+
+      assert marker == %{"id" => "call-1", "type" => "mcp_tool_call"}
+    end
+
+    test "reasoning, plan, and non-fatal error items remain activity records" do
+      items = [
+        %{"id" => "reason-1", "type" => "reasoning", "text" => "Checking..."},
+        %{
+          "id" => "plan-1",
+          "type" => "todo_list",
+          "items" => [%{"text" => "Check", "completed" => true}]
+        },
+        %{"id" => "warning-1", "type" => "error", "message" => "Using fallback metadata"}
+      ]
+
+      translated =
+        Enum.map(items, &event("item.completed", %{"item" => &1}))
+        |> Kernel.++([event("turn.completed", %{})])
+        |> EventTranslator.translate()
+
+      assert Enum.map(translated, & &1.kind) == [
+               :tool_result,
+               :tool_result,
+               :tool_result,
+               :result
+             ]
+
+      assert Enum.map(Enum.take(translated, 3), & &1.data) == items
+      assert Response.from_events(translated).text == ""
     end
   end
 

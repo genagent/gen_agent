@@ -13,14 +13,14 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
     * `turn.started` -- filtered.
     * `item.completed` with `item.type == "agent_message"` -- emits a
       `:text` event with the item's text content and a message boundary.
-    * `item.completed` with `item.type == "tool_call"` or similar --
-      emits a `:tool_use` event. (Exact shape depends on what Codex
-      surfaces; we pass the raw item through in `:data`.)
-    * `item.completed` with `mcp_tool_call`, `command_execution`, or
-      `file_change` emits `:tool_use` and `:tool_result` with the full
-      item in both events. This retains IDs, arguments, outputs and
-      completion status. `item.started`/`item.updated` are ignored so
-      each action is counted once.
+    * `item.started` for an action emits a small `:tool_use` marker with
+      its ID and type (plus MCP/collab tool names when present).
+      `item.completed` emits one `:tool_result` containing the full item.
+      File changes may have only a completion event. Updates to actions
+      are ignored so accumulated output is captured once.
+    * Completed `reasoning`, `todo_list`, and non-fatal `error` items emit
+      `:tool_result` activity records with their item type in `:data`.
+      They do not become assistant response text or terminal errors.
     * `turn.completed` -- emits a `:usage` event (if token counts are
       present) followed by a terminal `:result` event carrying the
       captured `thread_id` as `session_id` and the raw completed usage as
@@ -73,6 +73,18 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
     :cache_write_input_tokens,
     :reasoning_output_tokens
   ]
+
+  # Codex exec JSONL's ThreadItemDetails action variants. The wrapper parses
+  # raw JSON maps and does not impose its own item schema.
+  @action_item_types [
+    "command_execution",
+    "file_change",
+    "mcp_tool_call",
+    "collab_tool_call",
+    "web_search"
+  ]
+
+  @activity_item_types ["reasoning", "todo_list", "error"]
 
   @typedoc "Raw completed usage totals keyed by counter name; absent keys are unknown."
   @type usage_total :: %{optional(atom()) => non_neg_integer()}
@@ -149,6 +161,14 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
   defp translate_one(%JsonLineEvent{event_type: "turn.started"}, _state), do: []
 
   defp translate_one(
+         %JsonLineEvent{event_type: "item.started", data: %{"item" => %{"type" => type} = item}},
+         _state
+       )
+       when type in @action_item_types do
+    [Event.new(:tool_use, Map.take(item, ["id", "type", "server", "tool"]))]
+  end
+
+  defp translate_one(
          %JsonLineEvent{event_type: "item.completed", data: %{"item" => item}},
          _state
        )
@@ -191,17 +211,9 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
     [Event.new(:text, %{text: text, message_boundary: true})]
   end
 
-  defp translate_item(%{"type" => "tool_call"} = item) do
-    [Event.new(:tool_use, item)]
-  end
-
-  defp translate_item(%{"type" => "tool_result"} = item) do
-    [Event.new(:tool_result, item)]
-  end
-
   defp translate_item(%{"type" => type} = item)
-       when type in ["mcp_tool_call", "command_execution", "file_change"] do
-    [Event.new(:tool_use, item), Event.new(:tool_result, item)]
+       when type in @action_item_types or type in @activity_item_types do
+    [Event.new(:tool_result, item)]
   end
 
   defp translate_item(_), do: []
