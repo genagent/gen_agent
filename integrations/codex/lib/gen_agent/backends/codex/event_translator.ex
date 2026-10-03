@@ -29,6 +29,8 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
       If the stream ends before a turn outcome, emits a terminal `:error`.
     * `turn.failed` -- emits a terminal `:error` event, using the latest
       notification as a fallback when the failure has no reason.
+    * `CodexWrapper.StreamError` -- emits a terminal `:error` with the
+      typed `{:idle_timeout, ms}` or `{:timeout, ms}` reason.
     * Unknown event types -- filtered.
 
   If a turn's event list contains no `turn.completed`, `turn.failed`, or
@@ -82,7 +84,7 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
   @doc """
   Translate a full turn's worth of events.
   """
-  @spec translate([JsonLineEvent.t()], keyword()) :: [Event.t()]
+  @spec translate([JsonLineEvent.t() | CodexWrapper.StreamError.t()], keyword()) :: [Event.t()]
   def translate(events, opts \\ []) when is_list(events) do
     events |> translate_stream(opts) |> Enum.to_list()
   end
@@ -131,6 +133,10 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
 
   defp translate_event(%JsonLineEvent{event_type: "turn.completed"} = event, state) do
     {translate_one(event, state), %{state | terminal?: true}}
+  end
+
+  defp translate_event(%CodexWrapper.StreamError{reason: reason}, state) do
+    {[Event.new(:error, %{reason: reason})], %{state | terminal?: true}}
   end
 
   defp translate_event(event, state), do: {translate_one(event, state), state}

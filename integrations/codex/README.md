@@ -100,7 +100,9 @@ turn's `exec resume` command.
 ## Backend options
 
 **Config:**
-- `:binary`, `:working_dir` (aliased as `:cwd`), `:env`, `:timeout`
+- `:binary`, `:working_dir` (aliased as `:cwd`), `:env`, `:timeout`,
+  `:idle_timeout_ms`. `:timeout` bounds the whole turn; `:idle_timeout_ms`
+  bounds gaps between output frames (default 300,000 ms).
 
 **Exec:**
 - `:model`, `:sandbox`, `:approval_policy`, `:full_auto`,
