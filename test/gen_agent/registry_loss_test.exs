@@ -42,6 +42,8 @@ defmodule GenAgent.RegistryLossTest do
     assert GenAgent.whereis(global_name) == nil
     assert GenAgent.whereis(caller_name) == nil
 
+    assert_registry_partition_restarted(partition)
+
     assert {:ok, fresh_pid} =
              GenAgent.start_agent(TestAgent, name: global_name, backend: Mock)
 
@@ -121,6 +123,25 @@ defmodule GenAgent.RegistryLossTest do
     assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, _}, 2_000
     assert_receive {:ask_result, {:exit, _}}, 2_000
     assert GenAgent.whereis(name) == nil
+    assert_registry_partition_restarted(partition)
+  end
+
+  defp assert_registry_partition_restarted(old_partition, attempts \\ 200)
+
+  defp assert_registry_partition_restarted(_old_partition, 0) do
+    flunk("Registry partition did not restart")
+  end
+
+  defp assert_registry_partition_restarted(old_partition, attempts) do
+    case Supervisor.which_children(GenAgent.Registry) do
+      [{_, new_partition, _, _}]
+      when is_pid(new_partition) and new_partition != old_partition ->
+        assert Process.alive?(new_partition)
+
+      _ ->
+        Process.sleep(10)
+        assert_registry_partition_restarted(old_partition, attempts - 1)
+    end
   end
 
   defp unique_name(prefix), do: :"#{prefix}_#{System.unique_integer([:positive])}"
