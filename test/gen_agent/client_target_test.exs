@@ -48,4 +48,22 @@ defmodule GenAgent.ClientTargetTest do
     assert :ok = GenAgent.stop(name)
     assert {:error, :not_found} = GenAgent.status(name)
   end
+
+  test "an in-flight noproc exit is not mistaken for an absent name" do
+    name = {:failing_agent, make_ref()}
+    parent = self()
+
+    pid =
+      spawn(fn ->
+        {:ok, _} = Registry.register(GenAgent.Registry, name, nil)
+        send(parent, {:registered, self()})
+
+        receive do
+          {:"$gen_call", _from, :status} -> exit(:noproc)
+        end
+      end)
+
+    assert_receive {:registered, ^pid}
+    assert {:noproc, {:gen_statem, :call, _}} = catch_exit(GenAgent.status(name))
+  end
 end

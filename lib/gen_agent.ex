@@ -15,8 +15,8 @@ defmodule GenAgent do
   Public client functions address agents by their registered `:name`. The pid
   returned by `start_agent/2` is for monitoring and supervision, not a client
   address. Synchronous calls return `{:error, :not_found}` when that name is
-  not registered. A call already in flight can still exit if its agent dies,
-  and a caller-supplied timeout exits on expiry. Asynchronous casts are best
+  absent at lookup. A concurrent stop or agent death after lookup can still
+  exit the call, and a caller-supplied timeout exits on expiry. Casts are best
   effort and return `:ok` even when no agent is registered.
 
   ## Installation
@@ -1033,10 +1033,10 @@ defmodule GenAgent do
   end
 
   defp call(name, request, timeout) do
-    :gen_statem.call(via(name), request, timeout)
-  catch
-    :exit, {:noproc, {:gen_statem, :call, [{:via, Registry, {GenAgent.Registry, ^name}} | _]}} ->
-      {:error, :not_found}
+    case whereis(name) do
+      nil -> {:error, :not_found}
+      _pid -> :gen_statem.call(via(name), request, timeout)
+    end
   end
 
   defp via(name), do: {:via, Registry, {GenAgent.Registry, name}}
