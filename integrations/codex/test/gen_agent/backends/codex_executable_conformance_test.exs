@@ -151,6 +151,20 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
     assert File.read!(Path.join(context.directory, "resume.env")) == "configured\n"
   end
 
+  test "a quiet CLI turn reports the configured idle timeout", context do
+    name = start_agent(context, idle_timeout_ms: 200, timeout: 5_000)
+
+    assert {:error, {:idle_timeout, 200}} = GenAgent.ask(name, "hold")
+    assert_receive {:failed, _ref, {:idle_timeout, 200}}
+  end
+
+  test "the whole-turn deadline is distinct from the idle timeout", context do
+    name = start_agent(context, idle_timeout_ms: nil, timeout: 200)
+
+    assert {:error, {:timeout, 200}} = GenAgent.ask(name, "hold")
+    assert_receive {:failed, _ref, {:timeout, 200}}
+  end
+
   for recording <- Transcripts.names() do
     @tag recording: recording
     test "replays #{recording} through the wrapper and Port runner", context do

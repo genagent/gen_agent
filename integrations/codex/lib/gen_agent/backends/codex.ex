@@ -2,7 +2,7 @@ defmodule GenAgent.Backends.Codex do
   @moduledoc """
   `GenAgent.Backend` implementation backed by `CodexWrapper`.
 
-  CodexWrapper 0.5.4 streams NDJSON while closing CLI stdin. This
+  CodexWrapper 0.5.6 streams NDJSON while closing CLI stdin. This
   backend forwards translated events as they arrive, so
   `handle_stream_event/2` can observe progress during a turn.
 
@@ -42,7 +42,11 @@ defmodule GenAgent.Backends.Codex do
 
   Config-level (forwarded to `CodexWrapper.Config.new/1`):
 
-    * `:binary`, `:working_dir` (aliased as `:cwd`), `:env`, `:timeout`
+    * `:binary`, `:working_dir` (aliased as `:cwd`), `:env`, `:timeout`,
+      `:idle_timeout_ms`. `:timeout` bounds the whole CLI turn;
+      `:idle_timeout_ms` bounds gaps between output frames and defaults to
+      300,000 ms. Without `:timeout`, the Forcola runner uses a one-hour
+      whole-run default; GenAgent's watchdog may end the turn earlier.
 
   Exec-level (forwarded to `CodexWrapper.Exec`):
 
@@ -81,7 +85,7 @@ defmodule GenAgent.Backends.Codex do
   alias CodexWrapper.{Config, Exec, ExecResume}
   alias GenAgent.Backends.Codex.EventTranslator
 
-  @config_keys [:binary, :working_dir, :env, :timeout]
+  @config_keys [:binary, :working_dir, :env, :timeout, :idle_timeout_ms]
   @unsupported_resume_keys [:cd, :add_dirs, :search, :ephemeral]
   @exec_keys [
     :model,
