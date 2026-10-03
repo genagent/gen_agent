@@ -54,6 +54,33 @@ defmodule GenAgent.Backends.CodexTest do
       refute Keyword.has_key?(session.exec_opts, :cwd)
       refute Keyword.has_key?(session.exec_opts, :working_dir)
     end
+
+    test "rejects invalid sandbox modes before a prompt" do
+      for value <- [:invalid, "read-only", 123] do
+        assert {:error, {:invalid_option, :sandbox, ^value}} =
+                 Codex.start_session(sandbox: value)
+
+        assert {:error, {:invalid_option, :sandbox, ^value}} =
+                 Codex.resume_session("thread-id", sandbox: value)
+      end
+
+      for mode <- [:read_only, :workspace_write, :danger_full_access] do
+        assert {:ok, _session} = Codex.start_session(sandbox: mode)
+      end
+    end
+
+    test "rejects invalid working directories, including the :cwd alias" do
+      for value <- [:invalid, 123] do
+        assert {:error, {:invalid_option, :working_dir, ^value}} =
+                 Codex.start_session(working_dir: value)
+
+        assert {:error, {:invalid_option, :working_dir, ^value}} =
+                 Codex.start_session(cwd: value)
+
+        assert {:error, {:invalid_option, :working_dir, ^value}} =
+                 Codex.resume_session("thread-id", working_dir: value)
+      end
+    end
   end
 
   describe "usage deltas across turns" do

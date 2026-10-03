@@ -62,7 +62,8 @@ defmodule GenAgent.Backends.Codex do
   overrides because resume does not accept their exec flags.
   `:ignore_user_config` applies to both fresh and resumed turns. The CLI
   accepts `:profile` only on the initial `exec`, so it applies to the
-  first turn only.
+  first turn only. Invalid `:sandbox` and `:working_dir` values return
+  `{:error, {:invalid_option, key, value}}` at session startup.
 
   Backend-only:
 
@@ -120,7 +121,9 @@ defmodule GenAgent.Backends.Codex do
     opts = opts |> normalize_cwd() |> drop_disabled_options()
     {config_opts, exec_opts} = Keyword.split(opts, @config_keys)
 
-    with :ok <- validate_exec_opts(exec_opts) do
+    with :ok <- validate_exec_opts(exec_opts),
+         :ok <- validate_sandbox(exec_opts[:sandbox]),
+         :ok <- validate_working_dir(config_opts[:working_dir]) do
       config = Config.new(config_opts)
 
       {:ok,
@@ -358,4 +361,13 @@ defmodule GenAgent.Backends.Codex do
         end
     end
   end
+
+  defp validate_sandbox(value)
+       when value in [nil, :read_only, :workspace_write, :danger_full_access],
+       do: :ok
+
+  defp validate_sandbox(value), do: {:error, {:invalid_option, :sandbox, value}}
+
+  defp validate_working_dir(value) when is_binary(value) or is_nil(value), do: :ok
+  defp validate_working_dir(value), do: {:error, {:invalid_option, :working_dir, value}}
 end
