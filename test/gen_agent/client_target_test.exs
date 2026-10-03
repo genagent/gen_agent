@@ -44,5 +44,8 @@ defmodule GenAgent.ClientTargetTest do
     assert {:error, :not_found} = GenAgent.ask(pid, "hello")
     assert {:error, :not_found} = GenAgent.stop(pid)
     assert Process.alive?(pid)
+
+    assert :ok = GenAgent.stop(name)
+    assert {:error, :not_found} = GenAgent.status(name)
   end
 end
