@@ -185,6 +185,24 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
     assert response.session_id == Transcripts.thread_id("resume-initial")
   end
 
+  test "an oversized CLI JSONL event fails the turn instead of losing its text", context do
+    output_path = Path.join(context.directory, "oversized.jsonl")
+
+    oversized =
+      Jason.encode!(%{
+        "type" => "item.completed",
+        "item" => %{"type" => "agent_message", "text" => String.duplicate("x", 1_048_600)}
+      })
+
+    File.write!(output_path, oversized <> "\n" <> ~s({"type":"turn.completed"}) <> "\n")
+    File.write!(context.binary, "#!/bin/sh\ncat \"$GEN_AGENT_OUTPUT\"\n")
+
+    name = start_agent(context, env: [{"GEN_AGENT_OUTPUT", output_path}])
+
+    assert {:error, {:line_too_long, 1_048_576}} = GenAgent.ask(name, "oversized")
+    assert_receive {:failed, _ref, {:line_too_long, 1_048_576}}
+  end
+
   for recording <- Transcripts.names() do
     @tag recording: recording
     test "replays #{recording} through the wrapper and Port runner", context do
