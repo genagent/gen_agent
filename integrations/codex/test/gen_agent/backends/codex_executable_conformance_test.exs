@@ -165,6 +165,26 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
     assert_receive {:failed, _ref, {:timeout, 200}}
   end
 
+  test "a completed turn keeps its buffered terminal event after slow consumption", context do
+    exec_fn = fn prompt, session ->
+      stream =
+        prompt
+        |> CodexWrapper.Exec.new()
+        |> CodexWrapper.Exec.stream(session.config)
+        |> Stream.transform(false, fn event, paused? ->
+          unless paused?, do: Process.sleep(350)
+          {[event], true}
+        end)
+
+      {:ok, stream}
+    end
+
+    name = start_agent(context, timeout: 200, idle_timeout_ms: nil, exec_fn: exec_fn)
+
+    assert {:ok, response} = GenAgent.ask(name, "first prompt")
+    assert response.session_id == Transcripts.thread_id("resume-initial")
+  end
+
   for recording <- Transcripts.names() do
     @tag recording: recording
     test "replays #{recording} through the wrapper and Port runner", context do
