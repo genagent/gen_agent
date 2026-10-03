@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.2](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.6.1...gen_agent_ensemble-v0.6.2) (2026-10-03)
+
+
+### Bug Fixes
+
+* **core:** attribute startup failures to the right component ([#366](https://github.com/genagent/gen_agent/issues/366)) ([1ffbe5c](https://github.com/genagent/gen_agent/commit/1ffbe5ce12b1793bd2d75f2ded1e051db877e95f))
+* **core:** return not_found for missing agent calls ([#379](https://github.com/genagent/gen_agent/issues/379)) ([c78c718](https://github.com/genagent/gen_agent/commit/c78c718385f23eddce8d23c3fa903160af074ca9))
+
 ## [0.6.1](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.6.0...gen_agent_ensemble-v0.6.1) (2026-10-02)
 
 
