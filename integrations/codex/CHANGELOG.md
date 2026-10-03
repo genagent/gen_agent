@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.6](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.5...gen_agent_codex-v0.4.6) (2026-10-03)
+
+
+### Bug Fixes
+
+* **codex:** report CLI stream timeouts to GenAgent ([#383](https://github.com/genagent/gen_agent/issues/383)) ([c0ca936](https://github.com/genagent/gen_agent/commit/c0ca936ab415ea562bc0851f08f50128aeabe0d6))
+* **codex:** require buffered timeout drain fix ([#384](https://github.com/genagent/gen_agent/issues/384)) ([172b24c](https://github.com/genagent/gen_agent/commit/172b24c20aff847f5aaaabb4db085d3bc8c12741))
+* **codex:** validate session sandbox and working directory ([#377](https://github.com/genagent/gen_agent/issues/377)) ([255ce70](https://github.com/genagent/gen_agent/commit/255ce7032ec6757f7f4fa5b56c27184c5e8a0465))
+
 ## [0.4.5](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.4...gen_agent_codex-v0.4.5) (2026-10-02)
 
 
