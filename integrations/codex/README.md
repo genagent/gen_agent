@@ -51,7 +51,7 @@ defmodule MyApp.Coder do
     path = Keyword.fetch!(opts, :cwd)
 
     backend_opts = [
-      cwd: path,
+      working_dir: path,
       sandbox: :read_only,
       skip_git_repo_check: true
     ]
@@ -122,13 +122,16 @@ and rejects `verbose: true` because the CLI has no such global flag. Explicit
 | `ignore_user_config: true` | Skips the host's Codex configuration | Skips the host's Codex configuration |
 | `profile: "name"` | Selects a named configuration profile | Not supported by `codex exec resume` |
 
-`:working_dir` / `:cwd` remains the subprocess directory on both turns.
+`:working_dir` remains the subprocess directory on both turns. `:cwd` is a
+deprecated alias.
 Options that the resume command cannot preserve (`:cd`, `:add_dirs`,
 `:search`) fail at session startup with
 `{:error, {:unsupported_resume_option, option}}`.
 Other unrecognized options fail on both start and resume with
-`{:error, {:unsupported_option, option}}`. Generic callback options such as
-`:system`, `:system_prompt`, and `:max_tokens` are not Codex backend options;
+`{:error, {:unknown_option, option}}`. System-prompt options (`:system`,
+`:instructions`, `:system_prompt`) and output caps (`:max_tokens`,
+`:max_output_tokens`) are known concepts Codex cannot provide and return
+`{:error, {:unsupported_option, option}}`;
 an agent's `init_agent/1` must return options accepted by its selected backend.
 
 **Backend-only:**

@@ -56,8 +56,8 @@ defmodule MyApp.Assistant do
   @impl true
   def init_agent(_opts) do
     backend_opts = [
-      system: "You are a concise, helpful assistant.",
-      max_tokens: 512
+      system_prompt: "You are a concise, helpful assistant.",
+      max_output_tokens: 512
     ]
 
     {:ok, backend_opts, %State{}}
@@ -117,8 +117,10 @@ because this text-only backend cannot complete a paused or tool-use turn.
   `{:error, {:backend_start_failed, :missing_api_key}}`), unless a one-arity
   `:http_fn` is supplied.
 - `:model` -- model name. Defaults to `"claude-sonnet-4-5"`.
-- `:max_tokens` -- max tokens per turn. Defaults to `1024`.
-- `:system` -- system prompt (string).
+- `:max_output_tokens` -- max tokens per turn. Defaults to `1024`.
+  `:max_tokens` remains a deprecated alias.
+- `:system_prompt` -- system prompt (string). `:system` and
+  `:instructions` remain deprecated aliases.
 - `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
   to `60_000`. The 60-second default can be short for long reasoning turns.
 - `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults
@@ -129,6 +131,8 @@ because this text-only backend cannot complete a paused or tool-use turn.
   tests that want to stub out the API.
 
 See `GenAgent.Backends.Anthropic` for the full module docs.
+Unknown keys fail session startup with `{:unknown_option, key}`; conflicting
+values supplied through aliases fail with `{:conflicting_options, keys}`.
 
 ## Why no tool use?
 

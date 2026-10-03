@@ -48,7 +48,7 @@ defmodule MyApp.Coder do
     path = Keyword.fetch!(opts, :cwd)
 
     backend_opts = [
-      cwd: path,
+      working_dir: path,
       system_prompt: "You are a coding assistant.",
       permission_mode: :plan
     ]
@@ -114,7 +114,7 @@ GenAgent does not call `resume_session/2`; every agent start calls
 `start_session/1` with the options returned from `init_agent/1`. To continue
 a prior conversation after the agent process restarts, save
 `response.session_id` and pass it back as `:resume` in those options, with
-the same `:cwd` as before:
+the same working directory as before:
 
 ```elixir
 defmodule MyApp.Reviewer do
@@ -126,8 +126,8 @@ defmodule MyApp.Reviewer do
 
     backend_opts =
       case MyApp.SessionStore.get("reviewer") do
-        nil -> [cwd: cwd]
-        saved_id -> [cwd: cwd, resume: saved_id]
+        nil -> [working_dir: cwd]
+        saved_id -> [working_dir: cwd, resume: saved_id]
       end
 
     {:ok, backend_opts, %{}}
@@ -173,7 +173,7 @@ version.
 
 **Process:**
 - `:binary` -- path to the `claude` executable.
-- `:working_dir` (aliased as `:cwd`) -- directory the CLI runs in.
+- `:working_dir` (deprecated alias `:cwd`) -- directory the CLI runs in.
 - `:env` -- environment variables set on top of the inherited environment.
   See [Environment and working directory](#environment-and-working-directory).
 - `:debug` -- passes `--debug` to the CLI.
@@ -263,7 +263,7 @@ read the project and cannot edit files or run shell commands:
 @impl true
 def init_agent(opts) do
   backend_opts = [
-    cwd: Keyword.fetch!(opts, :cwd),
+    working_dir: Keyword.fetch!(opts, :cwd),
     system_prompt: "You review code. Do not modify files.",
     tools: ["Read", "Grep", "Glob"],
     allowed_tools: ["Read", "Grep", "Glob"],

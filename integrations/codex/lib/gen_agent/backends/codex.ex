@@ -42,7 +42,7 @@ defmodule GenAgent.Backends.Codex do
 
   Config-level (forwarded to `CodexWrapper.Config.new/1`):
 
-    * `:binary`, `:working_dir` (aliased as `:cwd`), `:env`, `:timeout`,
+    * `:binary`, `:working_dir` (deprecated alias `:cwd`), `:env`, `:timeout`,
       `:idle_timeout_ms`. `:timeout` bounds the whole CLI turn;
       `:idle_timeout_ms` bounds gaps between output frames and defaults to
       300,000 ms. Without `:timeout`, the Forcola runner uses a one-hour
@@ -78,9 +78,13 @@ defmodule GenAgent.Backends.Codex do
   Codex has no equivalent of Claude's `--system-prompt`; if you need
   system-level instructions, pass them via `AGENTS.md` in the working
   directory or through Codex's configuration layer.
+  Unknown keys return `{:error, {:unknown_option, key}}`; known unsupported
+  system prompt and output cap options return `{:error, {:unsupported_option, key}}`.
   """
 
   @behaviour GenAgent.Backend
+
+  require Logger
 
   alias CodexWrapper.{Config, Exec, ExecResume}
   alias GenAgent.Backends.Codex.EventTranslator
@@ -338,8 +342,12 @@ defmodule GenAgent.Backends.Codex do
 
   defp normalize_cwd(opts) do
     case Keyword.pop(opts, :cwd) do
-      {nil, rest} -> rest
-      {cwd, rest} -> Keyword.put_new(rest, :working_dir, cwd)
+      {nil, rest} ->
+        rest
+
+      {cwd, rest} ->
+        Logger.warning(":cwd is deprecated; use :working_dir")
+        Keyword.put_new(rest, :working_dir, cwd)
     end
   end
 
@@ -354,8 +362,19 @@ defmodule GenAgent.Backends.Codex do
       {key, _value} when key in @unsupported_resume_keys ->
         {:error, {:unsupported_resume_option, key}}
 
-      {key, _value} ->
+      {key, _value}
+      when key in [
+             :system_prompt,
+             :system,
+             :instructions,
+             :max_tokens,
+             :max_output_tokens,
+             :verbose
+           ] ->
         {:error, {:unsupported_option, key}}
+
+      {key, _value} ->
+        {:error, {:unknown_option, key}}
 
       nil ->
         if opts[:approval_policy] in [nil, :untrusted, :on_request, :never] do

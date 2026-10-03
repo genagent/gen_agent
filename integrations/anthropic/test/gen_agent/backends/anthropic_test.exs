@@ -143,6 +143,50 @@ defmodule GenAgent.Backends.AnthropicTest do
       assert session.max_tokens == 4096
     end
 
+    test "accepts shared names and forwards them in the request" do
+      ref = make_ref()
+
+      {:ok, session} =
+        Anthropic.start_session(
+          http_fn: recording_fn(ref, ok_response("hi")),
+          system_prompt: "Be terse.",
+          max_output_tokens: 256
+        )
+
+      assert session.system == "Be terse."
+      assert session.max_tokens == 256
+      {:ok, _, _} = Anthropic.prompt(session, "hello")
+      assert_receive {^ref, %{body: %{system: "Be terse.", max_tokens: 256}}}
+    end
+
+    test "rejects unknown and malformed options before credential lookup" do
+      assert {:error, {:unknown_option, :modle}} = Anthropic.start_session(modle: "wrong")
+
+      assert {:error, {:invalid_options, %{model: "wrong"}}} =
+               Anthropic.start_session(%{model: "wrong"})
+    end
+
+    test "warns for legacy names and rejects conflicting prompt values" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, session} =
+                   Anthropic.start_session(
+                     http_fn: ok_response("hi"),
+                     system: "old",
+                     max_tokens: 128
+                   )
+
+          assert session.system == "old"
+          assert session.max_tokens == 128
+        end)
+
+      assert log =~ ":system is deprecated"
+      assert log =~ ":max_tokens is deprecated"
+
+      assert {:error, {:conflicting_options, [:system_prompt, :system]}} =
+               Anthropic.start_session(system_prompt: "new", system: "old")
+    end
+
     test "receive_timeout defaults to 60_000" do
       {:ok, session} = Anthropic.start_session(http_fn: ok_response("hi"))
       assert session.receive_timeout == 60_000

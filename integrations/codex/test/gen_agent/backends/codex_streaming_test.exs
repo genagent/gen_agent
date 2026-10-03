@@ -100,12 +100,20 @@ defmodule GenAgent.Backends.CodexStreamingTest do
              Codex.start_session(approval_policy: :on_failure)
   end
 
-  test "unknown options report an unsupported option on start and resume" do
-    for option <- [:system_prompt, :system, :max_tokens, :modle] do
+  test "unsupported concepts and unknown options are distinct on start and resume" do
+    for option <- [:system_prompt, :system, :instructions, :max_tokens, :max_output_tokens] do
       assert {:error, {:unsupported_option, ^option}} =
                Codex.start_session([{option, "fixture"}])
 
       assert {:error, {:unsupported_option, ^option}} =
+               Codex.resume_session("fixture-thread", [{option, "fixture"}])
+    end
+
+    for option <- [:modle] do
+      assert {:error, {:unknown_option, ^option}} =
+               Codex.start_session([{option, "fixture"}])
+
+      assert {:error, {:unknown_option, ^option}} =
                Codex.resume_session("fixture-thread", [{option, "fixture"}])
     end
 
