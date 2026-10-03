@@ -213,6 +213,10 @@ defmodule GenAgent.Server do
 
   @impl :gen_statem
   def terminate(reason, _state, %Data{} = data) do
+    if graceful_termination?(reason) do
+      reply_to_pending_asks(data, reason)
+    end
+
     if data.current_request do
       cleanup_task(data.current_request)
     end
@@ -223,6 +227,23 @@ defmodule GenAgent.Server do
   end
 
   def terminate(_reason, _state, _data), do: :ok
+
+  defp graceful_termination?(reason) when reason in [:normal, :shutdown], do: true
+  defp graceful_termination?(_reason), do: false
+
+  defp reply_to_pending_asks(%Data{} = data, reason) do
+    outcome = {:error, {:agent_terminated, reason}}
+
+    case data.current_request do
+      %{kind: {:ask, from}} -> :gen_statem.reply(from, outcome)
+      _ -> :ok
+    end
+
+    Enum.each(:queue.to_list(data.mailbox), fn
+      {_ref, {:ask, from}, _prompt} -> :gen_statem.reply(from, outcome)
+      _other -> :ok
+    end)
+  end
 
   @impl :gen_statem
   def format_status(status) when is_map(status) do

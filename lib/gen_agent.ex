@@ -669,6 +669,11 @@ defmodule GenAgent do
   `info` includes the queue, count or byte limit reached, current count
   and bytes, incoming bytes, and configured maxima.
 
+  An orderly agent stop replies to an active or queued ask with
+  `{:error, {:agent_terminated, reason}}`. A call the agent has not yet
+  handled, an abrupt agent death, or a forced kill can still exit the
+  caller; catch `:exit` if the caller must survive those cases.
+
   The default timeout is `:infinity`. The agent's own watchdog is the
   primary timeout mechanism -- callers generally should not need to set
   their own. Supplying a shorter timeout here will exit on expiry
@@ -723,8 +728,9 @@ defmodule GenAgent do
 
   Delivery is a single BEAM message sent at most once per accepted request.
   It is independent of the bounded `poll/3` result cache. A dead recipient
-  does not receive the message, and abrupt agent death can leave accepted
-  requests without a completion message; a monitor reports that uncertainty.
+  does not receive the message, and any agent exit, including an orderly
+  stop, can leave accepted requests without a completion message; a monitor
+  reports that uncertainty.
   This does not prove that an external provider process has settled.
   The request ref remains suitable for `interrupt_request/3` while active
   or `cancel_request/3` while queued. A new agent under the same name never
@@ -1000,6 +1006,10 @@ defmodule GenAgent do
   Terminates the agent process cleanly via its owning `DynamicSupervisor`.
   Pass the supervisor as the second argument for an agent started with
   `child_spec/2`; the default is `GenAgent.AgentSupervisor`.
+  Active and queued `ask/3` callers receive an `:agent_terminated` error
+  when the agent processes the orderly shutdown. Accepted
+  `tell_with_completion/4` requests do not receive a synthetic completion;
+  recipients should monitor the agent to detect that uncertainty.
   Returns `:ok` or `{:error, :not_found}`.
   """
   @spec stop(name(), GenServer.server()) :: :ok | {:error, :not_found}

@@ -279,6 +279,51 @@ defmodule GenAgent.RequestCompletionTest do
     refute_receive {:gen_agent, :completion, ^name, ^queued_ref, _}, 50
   end
 
+  test "graceful stop replies to active and queued ask callers" do
+    {name, _pid} = start_agent()
+    parent = self()
+
+    spawn_ask = fn label, prompt ->
+      spawn(fn ->
+        result =
+          try do
+            GenAgent.ask(name, prompt)
+          catch
+            :exit, reason -> {:exit, reason}
+          end
+
+        send(parent, {:ask_result, label, result})
+      end)
+    end
+
+    spawn_ask.(:active, "held")
+    assert_receive {:started, "held", _task}, 1_000
+    spawn_ask.(:queued, "queued")
+    assert_eventually(fn -> GenAgent.runtime_snapshot(name).pending_prompts == 1 end)
+
+    assert :ok = GenAgent.stop(name)
+    assert_receive {:ask_result, :active, {:error, {:agent_terminated, :shutdown}}}, 1_000
+    assert_receive {:ask_result, :queued, {:error, {:agent_terminated, :shutdown}}}, 1_000
+  end
+
+  test "callback crash still exits an ask caller" do
+    {name, _pid} = start_agent()
+    parent = self()
+
+    spawn(fn ->
+      result =
+        try do
+          GenAgent.ask(name, "crash")
+        catch
+          :exit, reason -> {:exit, reason}
+        end
+
+      send(parent, {:ask_result, result})
+    end)
+
+    assert_receive {:ask_result, {:exit, _reason}}, 1_000
+  end
+
   test "callback crash and agent death leave outcome uncertain; replacement uses a new ref" do
     {name, pid} = start_agent()
     monitor = Process.monitor(pid)
