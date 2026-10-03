@@ -572,6 +572,8 @@ defmodule GenAgent do
 
   The child uses `restart: :temporary`. If it exits, call `start_agent/2`
   explicitly to create another agent; its previous state is not restored.
+  An agent also exits if its Registry partition is lost, so it cannot remain
+  alive but unreachable by name after a Registry restart.
   The returned pid is for monitoring or supervision. Pass the registered
   `:name` to the public client functions, including `stop/1`.
   """
