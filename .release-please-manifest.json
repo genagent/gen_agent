@@ -1,5 +1,5 @@
 {
-  ".": "0.6.2",
+  ".": "0.7.0",
   "integrations/claude": "0.2.5",
   "integrations/codex": "0.4.8",
   "integrations/anthropic": "0.4.1",
