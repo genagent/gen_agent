@@ -12,6 +12,13 @@ defmodule GenAgent do
   GenAgent handles the mechanics of turns. Implementations handle the
   semantics of turns.
 
+  Public client functions address agents by their registered `:name`. The pid
+  returned by `start_agent/2` is for monitoring and supervision, not a client
+  address. Synchronous calls return `{:error, :not_found}` when that name is
+  absent at lookup. A concurrent stop or agent death after lookup can still
+  exit the call, and a caller-supplied timeout exits on expiry. Casts are best
+  effort and return `:ok` even when no agent is registered.
+
   ## Installation
 
       def deps do
@@ -565,6 +572,8 @@ defmodule GenAgent do
 
   The child uses `restart: :temporary`. If it exits, call `start_agent/2`
   explicitly to create another agent; its previous state is not restored.
+  The returned pid is for monitoring or supervision. Pass the registered
+  `:name` to the public client functions, including `stop/1`.
   """
   @spec start_agent(module(), keyword()) :: DynamicSupervisor.on_start_child()
   def start_agent(module, opts) when is_atom(module) and is_list(opts) do
@@ -660,16 +669,17 @@ defmodule GenAgent do
 
   The default timeout is `:infinity`. The agent's own watchdog is the
   primary timeout mechanism -- callers generally should not need to set
-  their own. Supplying a shorter timeout here will raise on expiry
+  their own. Supplying a shorter timeout here will exit on expiry
   without affecting the agent. A queued ask is dropped if its calling
   process dies. If that ask is already active, it keeps running. A live
   caller's timeout leaves its ask queued or running. For cancellable queued
   work, use `tell/3` or `tell_with_completion/4` and `cancel_request/3`.
+  Returns `{:error, :not_found}` if the agent name is not registered.
   """
   @spec ask(name(), String.t(), timeout()) ::
           {:ok, Response.t()} | {:error, term()}
   def ask(name, prompt, timeout \\ @default_call_timeout) when is_binary(prompt) do
-    :gen_statem.call(via(name), {:ask, prompt}, timeout)
+    call(name, {:ask, prompt}, timeout)
   end
 
   @doc """
@@ -679,10 +689,11 @@ defmodule GenAgent do
   result. The same queueing semantics as `ask/2` apply. When a pending
   queue limit is reached, returns `{:error, {:overloaded, info}}` without
   an accepted ref.
+  Returns `{:error, :not_found}` if the agent name is not registered.
   """
   @spec tell(name(), String.t(), timeout()) :: {:ok, request_ref()} | {:error, term()}
   def tell(name, prompt, timeout \\ @default_call_timeout) when is_binary(prompt) do
-    :gen_statem.call(via(name), {:tell, prompt}, timeout)
+    call(name, {:tell, prompt}, timeout)
   end
 
   @doc """
@@ -741,12 +752,13 @@ defmodule GenAgent do
   after its request has finished. A request that never starts a turn
   (cancelled, rejected by `pre_turn/2`, halted or failed dispatch)
   produces no events.
+  Returns `{:error, :not_found}` if the agent name is not registered.
   """
   @spec tell_with_completion(name(), String.t(), pid(), timeout()) ::
           {:ok, request_ref()} | {:error, term()}
   def tell_with_completion(name, prompt, recipient \\ self(), timeout \\ @default_call_timeout)
       when is_binary(prompt) and is_pid(recipient) do
-    :gen_statem.call(via(name), {:tell_with_completion, prompt, recipient}, timeout)
+    call(name, {:tell_with_completion, prompt, recipient}, timeout)
   end
 
   @spec tell_with_completion(name(), String.t(), pid(), timeout(), keyword()) ::
@@ -772,7 +784,7 @@ defmodule GenAgent do
         {:tell_with_completion, prompt, recipient, on_halt}
       end
 
-    :gen_statem.call(via(name), message, timeout)
+    call(name, message, timeout)
   end
 
   @doc """
@@ -789,13 +801,14 @@ defmodule GenAgent do
 
   Only refs returned from `tell/2` are pollable. Refs from `ask/2` are
   internal and reply directly to the caller.
+  Returns `{:error, :not_found}` if the agent name is not registered.
   """
   @spec poll(name(), request_ref(), timeout()) ::
           {:ok, :pending}
           | {:ok, :completed, Response.t()}
           | {:error, term()}
   def poll(name, ref, timeout \\ @default_call_timeout) when is_reference(ref) do
-    :gen_statem.call(via(name), {:poll, ref}, timeout)
+    call(name, {:poll, ref}, timeout)
   end
 
   @doc """
@@ -828,10 +841,11 @@ defmodule GenAgent do
   full; the agent's `c:handle_error/3` receives that overload. The legacy
   `notify/2` remains a best-effort asynchronous cast and always returns
   `:ok`.
+  Returns `{:error, :not_found}` if the agent name is not registered.
   """
   @spec notify_ack(name(), term(), timeout()) :: :ok | {:error, term()}
   def notify_ack(name, event, timeout \\ @default_call_timeout) do
-    :gen_statem.call(via(name), {:notify_ack, event}, timeout)
+    call(name, {:notify_ack, event}, timeout)
   end
 
   @doc """
@@ -863,11 +877,12 @@ defmodule GenAgent do
   The acknowledgement describes the agent's decision and BEAM task
   cancellation. It does not establish provider or OS process settlement.
   The default call timeout is `:infinity`.
+  Returns `{:error, :not_found}` if the agent name is not registered.
   """
   @spec interrupt_request(name(), request_ref(), timeout()) ::
-          {:ok, :accepted} | {:error, :not_current | :idle}
+          {:ok, :accepted} | {:error, :not_current | :idle | :not_found}
   def interrupt_request(name, ref, timeout \\ @default_call_timeout) when is_reference(ref) do
-    :gen_statem.call(via(name), {:interrupt_request, ref}, timeout)
+    call(name, {:interrupt_request, ref}, timeout)
   end
 
   @doc """
@@ -892,11 +907,12 @@ defmodule GenAgent do
   processes cancellation and dispatch in order: if dispatch happened
   first, this returns `{:error, :current}` and leaves the turn alone.
   The default call timeout is `:infinity`.
+  Returns `{:error, :not_found}` if the agent name is not registered.
   """
   @spec cancel_request(name(), request_ref(), timeout()) ::
           {:ok, :cancelled} | {:error, :current | :already_finished | :not_found}
   def cancel_request(name, ref, timeout \\ @default_call_timeout) when is_reference(ref) do
-    :gen_statem.call(via(name), {:cancel_request, ref}, timeout)
+    call(name, {:cancel_request, ref}, timeout)
   end
 
   @doc """
@@ -919,17 +935,20 @@ defmodule GenAgent do
   `agent_state`. While a turn is processing, that value is the server's
   latest retained state, not a live read of state inside the prompt task.
   Use `runtime_snapshot/2` for a bounded metadata-only view.
+  Returns `{:error, :not_found}` if the agent name is not registered.
   """
-  @spec status(name(), timeout()) :: %{
-          state: :idle | :processing,
-          name: term(),
-          queued: non_neg_integer(),
-          current_request: request_ref() | nil,
-          halted: boolean(),
-          agent_state: term()
-        }
+  @spec status(name(), timeout()) ::
+          %{
+            state: :idle | :processing,
+            name: term(),
+            queued: non_neg_integer(),
+            current_request: request_ref() | nil,
+            halted: boolean(),
+            agent_state: term()
+          }
+          | {:error, :not_found}
   def status(name, timeout \\ @default_call_timeout) do
-    :gen_statem.call(via(name), :status, timeout)
+    call(name, :status, timeout)
   end
 
   @typedoc "Bounded, metadata-only observation of one agent's runtime state."
@@ -966,10 +985,11 @@ defmodule GenAgent do
   The snapshot is a point-in-time view of this BEAM coordinator, not
   durable application state, admission authority, or proof that external
   provider work has settled. The default call timeout is `:infinity`.
+  Returns `{:error, :not_found}` if the agent name is not registered.
   """
-  @spec runtime_snapshot(name(), timeout()) :: runtime_snapshot()
+  @spec runtime_snapshot(name(), timeout()) :: runtime_snapshot() | {:error, :not_found}
   def runtime_snapshot(name, timeout \\ @default_call_timeout) do
-    :gen_statem.call(via(name), :runtime_snapshot, timeout)
+    call(name, :runtime_snapshot, timeout)
   end
 
   @doc """
@@ -989,7 +1009,8 @@ defmodule GenAgent do
   end
 
   @doc """
-  Look up the pid of a registered agent, or `nil` if not found.
+  Look up the pid of a registered agent, or `nil` if not found. Pass the name,
+  not this pid, to public client functions.
   """
   @spec whereis(name()) :: pid() | nil
   def whereis(name) do
@@ -1009,6 +1030,13 @@ defmodule GenAgent do
   @spec list() :: [name()]
   def list do
     Registry.select(GenAgent.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+  end
+
+  defp call(name, request, timeout) do
+    case whereis(name) do
+      nil -> {:error, :not_found}
+      _pid -> :gen_statem.call(via(name), request, timeout)
+    end
   end
 
   defp via(name), do: {:via, Registry, {GenAgent.Registry, name}}

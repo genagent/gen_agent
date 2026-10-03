@@ -702,6 +702,9 @@ defmodule GenAgentEnsemble.Server do
              dispatch_contexts: Map.put(state.dispatch_contexts, ref, {started_at, ordinal})
          }}
 
+      {:error, :not_found} ->
+        {:error, {:agent_not_running, name}}
+
       {:error, reason} ->
         emit(
           :dispatch,
