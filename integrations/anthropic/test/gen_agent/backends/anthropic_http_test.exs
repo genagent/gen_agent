@@ -50,6 +50,34 @@ defmodule GenAgent.Backends.AnthropicHTTPTest do
     assert request.options[:receive_timeout] == 60_000
     refute Map.has_key?(request.options, :connect_options)
     assert request.options[:retry] == false
+    assert request.options[:redirect] == false
+  end
+
+  test "cross-host redirects never forward the API key or conversation" do
+    {:ok, session} = Anthropic.start_session(api_key: "test-key")
+
+    for status <- [302, 307, 308] do
+      Process.put(
+        {Adapter, :reply},
+        Req.Response.new(
+          status: status,
+          headers: %{"location" => ["https://other.example/messages"]},
+          body: "redirect"
+        )
+      )
+
+      assert {:error, {:http_error, ^status, _body}} = Anthropic.prompt(session, "private prompt")
+      assert_receive {:req_request, request}
+      assert URI.to_string(request.url) == "https://api.anthropic.com/v1/messages"
+      assert Req.Request.get_header(request, "x-api-key") == ["test-key"]
+
+      assert Jason.decode!(request.body)["messages"] == [
+               %{"role" => "user", "content" => "private prompt"}
+             ]
+
+      assert request.options[:redirect] == false
+      refute_receive {:req_request, _request}
+    end
   end
 
   test "non-200 responses preserve status and decoded body, with custom timeouts" do

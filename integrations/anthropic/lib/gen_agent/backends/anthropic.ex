@@ -248,7 +248,7 @@ defmodule GenAgent.Backends.Anthropic do
 
   defp default_http(%{url: url, headers: headers, body: body} = request) do
     req_opts =
-      [headers: headers, json: body, retry: false]
+      [headers: headers, json: body, retry: false, redirect: false]
       |> maybe_put_opt(:receive_timeout, request[:receive_timeout])
       |> maybe_put_opt(:connect_options, connect_options(request[:connect_timeout]))
 
