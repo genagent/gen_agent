@@ -196,6 +196,7 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
         reason = Transcripts.failure()
         assert {:error, ^reason} = GenAgent.ask(name, "replay:#{recording}")
         assert GenAgent.status(name).agent_state.errors == [reason]
+        assert_receive {:stream_event, :tool_result, _}
         assert_receive {:stream_event, :error, _}
         refute_receive {:stream_event, _, _}
       else

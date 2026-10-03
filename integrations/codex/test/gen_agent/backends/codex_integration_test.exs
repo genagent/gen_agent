@@ -436,6 +436,42 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
                [:tool_use, :tool_result, :text, :usage, :result]
     end
 
+    test "a large command output fits the default captured event byte limit once" do
+      output = String.duplicate("x", 600_000)
+
+      item = %{
+        "id" => "cmd-large",
+        "type" => "command_execution",
+        "command" => "cat large-output",
+        "aggregated_output" => output,
+        "exit_code" => 0,
+        "status" => "completed"
+      }
+
+      exec_fn = fn _prompt, _session ->
+        {:ok,
+         [
+           event("item.started", %{"item" => %{item | "aggregated_output" => ""}}),
+           event("item.updated", %{"item" => item}),
+           event("item.completed", %{"item" => item}),
+           event("turn.completed", %{})
+         ]}
+      end
+
+      name = start_codex_agent(exec_fn)
+      assert {:ok, response} = GenAgent.ask(name, "read")
+      assert Enum.map(response.events, & &1.kind) == [:tool_use, :tool_result, :result]
+
+      assert Enum.at(response.events, 0).data == %{
+               "id" => "cmd-large",
+               "type" => "command_execution"
+             }
+
+      assert Enum.at(response.events, 1).data["aggregated_output"] == output
+      assert response.event_coverage.mode == :exact
+      assert response.event_coverage.retained_bytes < 1_048_576
+    end
+
     test "stream callbacks observe text before the terminal event arrives" do
       parent = self()
 
