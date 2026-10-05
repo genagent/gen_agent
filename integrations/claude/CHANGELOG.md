@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.6](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.2.5...gen_agent_claude-v0.2.6) (2026-10-05)
+
+
+### Bug Fixes
+
+* **backends:** align CLI adapter wrapper constraints ([#396](https://github.com/genagent/gen_agent/issues/396)) ([#397](https://github.com/genagent/gen_agent/issues/397)) ([ecbbec4](https://github.com/genagent/gen_agent/commit/ecbbec479745689685a78ec0aa1b7c2e8aaad4c2))
+
 ## [0.2.5](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.2.4...gen_agent_claude-v0.2.5) (2026-10-03)
 
 
