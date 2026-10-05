@@ -163,6 +163,15 @@ The hook fires once per transition into halted state. Repeated
 halt decisions while already halted do not repeat completion side
 effects; `resume/1` permits a later halt to fire the hook again.
 
+For a completed turn, `post_turn` precedes notification draining as above.
+All buffered notifications are then applied in FIFO order before `post_run`
+and `[:gen_agent, :halted]` observe the resulting state. If a notification
+halts mid-drain (including a halt from handling its rejected generated
+prompt), the remaining buffered notifications still run before completion.
+Dispatch is disabled before draining; nested halt decisions cannot finalize
+the same transition again. Later notifications can still update a halted
+agent, but do not alter the completion snapshot or rerun these observers.
+
 Does NOT run on crashes, `GenAgent.stop/1`, supervisor shutdown, or
 abnormal exits -- `terminate_agent/2` covers those.
 
