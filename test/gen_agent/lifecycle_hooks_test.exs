@@ -201,6 +201,80 @@ defmodule GenAgent.LifecycleHooksTest do
       # Agent is still alive and :idle.
       assert status(pid).state == :idle
     end
+
+    test "a self-chain pre_turn crash reaches handle_error and prompt telemetry", %{
+      task_sup: task_sup
+    } do
+      parent = self()
+
+      pre_turn = fn
+        "second", _state -> raise "limiter down"
+        prompt, state -> {:ok, prompt, state}
+      end
+
+      pid =
+        start_server(task_sup, [result_events("first")],
+          pre_turn: pre_turn,
+          responder: fn _ref, _response, state -> {:prompt, "second", state} end,
+          error_handler: fn _ref, reason, state ->
+            send(parent, {:generated_error, reason})
+            {:noreply, state}
+          end
+        )
+
+      name = status(pid).name
+      handler_id = "generated-prompt-error-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:gen_agent, :prompt, :error],
+        fn _event, _measurements, meta, _config ->
+          if meta.agent == name, do: send(parent, {:generated_prompt_error, meta.reason})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert {:ok, %{text: "first"}} = ask(pid, "first")
+      assert_receive {:generated_error, {:pre_turn_crashed, RuntimeError}}
+      assert_receive {:generated_prompt_error, {:pre_turn_crashed, RuntimeError}}
+      assert status(pid).state == :idle
+      assert status(pid).halted == false
+    end
+
+    for {mode, expected_reason} <- [
+          {:skip, :pre_turn_skipped},
+          {:invalid, :pre_turn_invalid}
+        ] do
+      @tag generated_mode: mode, expected_reason: expected_reason
+      test "an event-generated prompt with #{mode} pre_turn reports the rejection", %{
+        task_sup: task_sup,
+        generated_mode: mode,
+        expected_reason: expected_reason
+      } do
+        parent = self()
+
+        pre_turn = fn _prompt, state ->
+          if mode == :skip, do: {:skip, state}, else: :invalid_return
+        end
+
+        pid =
+          start_server(task_sup, [],
+            pre_turn: pre_turn,
+            event_handler: fn _event, state -> {:prompt, "from event", state} end,
+            error_handler: fn _ref, reason, state ->
+              send(parent, {:generated_error, reason})
+              {:noreply, state}
+            end
+          )
+
+        notify(pid, :go)
+        assert_receive {:generated_error, ^expected_reason}
+        assert status(pid).state == :idle
+        assert status(pid).halted == false
+      end
+    end
   end
 
   # ---------------------------------------------------------------------------

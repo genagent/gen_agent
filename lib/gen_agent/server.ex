@@ -221,8 +221,8 @@ defmodule GenAgent.Server do
       cleanup_task(data.current_request)
     end
 
-    safely_call(data.agent_module, :terminate_agent, [reason, data.agent_state])
-    safely_call(data.backend, :terminate_session, [data.backend_session])
+    safely_call(data.name, data.agent_module, :terminate_agent, [reason, data.agent_state])
+    safely_call(data.name, data.backend, :terminate_session, [data.backend_session])
     :ok
   end
 
@@ -356,6 +356,11 @@ defmodule GenAgent.Server do
 
       {:crashed, exception} ->
         {:stop, {:pre_run_crashed, callback_failure_kind(exception)}, data}
+
+      _other ->
+        require Logger
+        Logger.error("GenAgent #{inspect(data.name)} pre_run/1 returned unexpected shape")
+        {:stop, :pre_run_invalid, data}
     end
   end
 
@@ -1097,7 +1102,7 @@ defmodule GenAgent.Server do
     emit_event_received(data.name, event)
 
     {result, acknowledgement} =
-      case safely_handle_event(data.agent_module, event, data.agent_state) do
+      case safely_handle_event(data.name, data.agent_module, event, data.agent_state) do
         {:noreply, new_agent_state} ->
           {{:keep_state, %{data | agent_state: new_agent_state}}, :ok}
 
@@ -1149,10 +1154,8 @@ defmodule GenAgent.Server do
   # directly. Runs `pre_turn/2` first and branches on its return:
   #
   #   {:ok, prompt, state} -- normal dispatch to the backend task.
-  #   {:skip, state}       -- drop the prompt, deliver :pre_turn_skipped
-  #                           via record_error (so ask/tell callers see
-  #                           an error, self_chain/event paths no-op),
-  #                           stay in :idle.
+  #   {:skip, state}       -- reject the prompt with :pre_turn_skipped.
+  #                           Generated prompts also notify handle_error/3.
   #   {:halt, state}       -- same as skip, plus transition_to_halted.
   #
   # Returns a gen_statem handle_event result tuple.
@@ -1178,7 +1181,7 @@ defmodule GenAgent.Server do
         pseudo_current = %{request_ref: request_ref, kind: kind}
         data = %{data | agent_state: new_state}
         emit_turn_rejected(data.name, request_ref, kind, :pre_turn_skipped)
-        {data, reply_actions} = record_error(data, pseudo_current, :pre_turn_skipped)
+        {data, reply_actions} = reject_pre_turn(data, pseudo_current, :pre_turn_skipped)
         {:keep_state, data, with_process_next(reply_actions)}
 
       {:halt, new_state} ->
@@ -1189,16 +1192,37 @@ defmodule GenAgent.Server do
         data = transition_to_halted(data)
         {:keep_state, data, with_process_next(reply_actions)}
 
+      {:crashed, failure_kind} ->
+        pseudo_current = %{request_ref: request_ref, kind: kind}
+        reason = pre_turn_crash_reason(kind, failure_kind)
+        emit_turn_rejected(data.name, request_ref, kind, reason)
+        {data, reply_actions} = reject_pre_turn(data, pseudo_current, reason)
+        {:keep_state, data, with_process_next(reply_actions)}
+
       _other ->
         # Malformed pre_turn return -- treat as skip with a warning.
         require Logger
         Logger.error("GenAgent pre_turn/2 returned unexpected shape")
         pseudo_current = %{request_ref: request_ref, kind: kind}
         emit_turn_rejected(data.name, request_ref, kind, :pre_turn_invalid)
-        {data, reply_actions} = record_error(data, pseudo_current, :pre_turn_invalid)
+        {data, reply_actions} = reject_pre_turn(data, pseudo_current, :pre_turn_invalid)
         {:keep_state, data, with_process_next(reply_actions)}
     end
   end
+
+  defp pre_turn_crash_reason(kind, failure_kind) when kind in [:self_chain, :event],
+    do: {:pre_turn_crashed, failure_kind}
+
+  # Preserve the existing external caller response while distinguishing an
+  # autonomous prompt failure for handle_error/3 and telemetry consumers.
+  defp pre_turn_crash_reason(_kind, _failure_kind), do: :pre_turn_skipped
+
+  defp reject_pre_turn(data, %{kind: kind, request_ref: ref}, reason)
+       when kind in [:self_chain, :event],
+       do: {reject_generated_prompt(data, ref, reason), []}
+
+  defp reject_pre_turn(data, pseudo_current, reason),
+    do: record_error(data, pseudo_current, reason)
 
   defp dispatch(%Data{} = data, request_ref, kind, prompt, original_prompt, stream_to) do
     backend = data.backend
@@ -1267,11 +1291,19 @@ defmodule GenAgent.Server do
 
     # A retry cannot start until the caller restores the task supervisor.
     # Discard an immediate retry from handle_error/3 to avoid an internal loop.
-    decision = safely_handle_error(data.agent_module, request_ref, reason, data.agent_state)
+    decision =
+      safely_handle_error(data.name, data.agent_module, request_ref, reason, data.agent_state)
+
     {transition, decision_state} = decision_to_transition(decision)
 
     {:ok, hooked_state} =
-      safely_post_turn(data.agent_module, {:error, reason}, request_ref, decision_state)
+      safely_post_turn(
+        data.name,
+        data.agent_module,
+        {:error, reason},
+        request_ref,
+        decision_state
+      )
 
     pseudo_current = %{request_ref: request_ref, kind: kind}
     {data, reply_actions} = record_error(data, pseudo_current, reason)
@@ -1589,26 +1621,50 @@ defmodule GenAgent.Server do
     :ok
   end
 
-  defp safely_handle_event(module, event, state) do
-    if function_exported?(module, :handle_event, 2) do
-      module.handle_event(event, state)
-    else
-      {:noreply, state}
-    end
+  defp safely_handle_event(name, module, event, state) do
+    decision =
+      if function_exported?(module, :handle_event, 2) do
+        module.handle_event(event, state)
+      else
+        {:noreply, state}
+      end
+
+    normalize_decision(decision, name, :handle_event, state)
   rescue
     e ->
       require Logger
-      Logger.error("GenAgent handle_event/2 raised #{inspect(callback_failure_kind(e))}")
+
+      Logger.error(
+        "GenAgent #{inspect(name)} handle_event/2 raised #{inspect(callback_failure_kind(e))}"
+      )
+
       {:noreply, state}
   catch
     kind, reason ->
       require Logger
 
       Logger.error(
-        "GenAgent handle_event/2 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
+        "GenAgent #{inspect(name)} handle_event/2 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
       )
 
       {:noreply, state}
+  end
+
+  defp normalize_decision({:noreply, _state} = decision, _name, _callback, _old_state),
+    do: decision
+
+  defp normalize_decision({:halt, _state} = decision, _name, _callback, _old_state),
+    do: decision
+
+  defp normalize_decision({:prompt, prompt, _state} = decision, _name, _callback, _old_state)
+       when is_binary(prompt),
+       do: decision
+
+  defp normalize_decision(_decision, name, callback, old_state) do
+    require Logger
+    arity = if callback == :handle_event, do: 2, else: 3
+    Logger.error("GenAgent #{inspect(name)} #{callback}/#{arity} returned unexpected shape")
+    {:noreply, old_state}
   end
 
   # ---------------------------------------------------------------------------
@@ -1657,7 +1713,7 @@ defmodule GenAgent.Server do
             "GenAgent pre_turn/2 raised #{inspect(callback_failure_kind(e))} -- skipping turn"
           )
 
-          {:skip, state}
+          {:crashed, callback_failure_kind(e)}
       catch
         kind, reason ->
           require Logger
@@ -1666,19 +1722,24 @@ defmodule GenAgent.Server do
             "GenAgent pre_turn/2 threw #{kind}: #{inspect(callback_failure_kind(reason))} -- skipping turn"
           )
 
-          {:skip, state}
+          {:crashed, callback_failure_kind(reason)}
       end
     else
       {:ok, prompt, state}
     end
   end
 
-  defp safely_post_turn(module, outcome, ref, state) do
+  defp safely_post_turn(name, module, outcome, ref, state) do
     if function_exported?(module, :post_turn, 3) do
       try do
         case module.post_turn(outcome, ref, state) do
-          {:ok, new_state} -> {:ok, new_state}
-          _other -> {:ok, state}
+          {:ok, new_state} ->
+            {:ok, new_state}
+
+          _other ->
+            require Logger
+            Logger.error("GenAgent #{inspect(name)} post_turn/3 returned unexpected shape")
+            {:ok, state}
         end
       rescue
         e ->
@@ -1788,7 +1849,7 @@ defmodule GenAgent.Server do
   end
 
   defp apply_pending_event(data, event) do
-    case safely_handle_event(data.agent_module, event, data.agent_state) do
+    case safely_handle_event(data.name, data.agent_module, event, data.agent_state) do
       {:noreply, new_state} ->
         %{data | agent_state: new_state}
 
@@ -1809,7 +1870,7 @@ defmodule GenAgent.Server do
   defp reject_generated_prompt(data, request_ref, reason) do
     emit_prompt_error(data.name, request_ref, reason, data.agent_state)
 
-    case safely_handle_error(data.agent_module, request_ref, reason, data.agent_state) do
+    case safely_handle_error(data.name, data.agent_module, request_ref, reason, data.agent_state) do
       {:noreply, new_state} ->
         %{data | agent_state: new_state}
 
@@ -1845,6 +1906,7 @@ defmodule GenAgent.Server do
 
     {:ok, hooked_state} =
       safely_post_turn(
+        data.name,
         data.agent_module,
         {:ok, response},
         current.request_ref,
@@ -1889,6 +1951,7 @@ defmodule GenAgent.Server do
 
     decision =
       safely_handle_error(
+        data.name,
         data.agent_module,
         current.request_ref,
         reason,
@@ -1899,6 +1962,7 @@ defmodule GenAgent.Server do
 
     {:ok, hooked_state} =
       safely_post_turn(
+        data.name,
         data.agent_module,
         {:error, reason},
         current.request_ref,
@@ -1924,12 +1988,21 @@ defmodule GenAgent.Server do
     end
   end
 
-  defp safely_handle_error(module, ref, reason, state) do
+  defp safely_handle_error(name, module, ref, reason, state) do
     if function_exported?(module, :handle_error, 3) do
       try do
         module.handle_error(ref, reason, state)
+        |> normalize_decision(name, :handle_error, state)
       catch
-        _, _ -> {:noreply, state}
+        kind, failure ->
+          require Logger
+
+          Logger.error(
+            "GenAgent #{inspect(name)} handle_error/3 failed (#{kind}: #{inspect(callback_failure_kind(failure))})\n" <>
+              redacted_stacktrace(__STACKTRACE__)
+          )
+
+          {:noreply, state}
       end
     else
       {:noreply, state}
@@ -2017,16 +2090,37 @@ defmodule GenAgent.Server do
     |> Enum.any?(fn {r, _kind, _prompt} -> r == ref end)
   end
 
-  defp safely_call(module, fun, args) do
+  defp safely_call(name, module, fun, args) do
     if function_exported?(module, fun, length(args)) do
       try do
         apply(module, fun, args)
       catch
-        _, _ -> :ok
+        kind, failure ->
+          require Logger
+
+          Logger.error(
+            "GenAgent #{inspect(name)} #{inspect(module)}.#{fun}/#{length(args)} failed " <>
+              "(#{kind}: #{inspect(callback_failure_kind(failure))})\n" <>
+              redacted_stacktrace(__STACKTRACE__)
+          )
+
+          :ok
       end
     else
       :ok
     end
+  end
+
+  defp redacted_stacktrace(stacktrace) do
+    stacktrace
+    |> Enum.map(fn
+      {module, function, args, info} when is_list(args) ->
+        {module, function, length(args), info}
+
+      frame ->
+        frame
+    end)
+    |> Exception.format_stacktrace()
   end
 
   # ---------------------------------------------------------------------------
