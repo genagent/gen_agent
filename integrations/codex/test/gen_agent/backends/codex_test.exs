@@ -73,6 +73,30 @@ defmodule GenAgent.Backends.CodexTest do
       end
     end
 
+    test "defaults response_text to :all_messages and keeps it out of exec_opts" do
+      {:ok, session} = Codex.start_session(exec_fn: fake_exec([]))
+      assert session.response_text == :all_messages
+
+      {:ok, session} = Codex.start_session(exec_fn: fake_exec([]), response_text: nil)
+      assert session.response_text == :all_messages
+
+      {:ok, session} =
+        Codex.start_session(exec_fn: fake_exec([]), response_text: :final_message, model: "gpt-5")
+
+      assert session.response_text == :final_message
+      assert session.exec_opts == [model: "gpt-5"]
+    end
+
+    test "rejects invalid response_text values before a prompt" do
+      for value <- [:last_message, "final_message", true, 1] do
+        assert {:error, {:invalid_option, :response_text, ^value}} =
+                 Codex.start_session(exec_fn: fake_exec([]), response_text: value)
+
+        assert {:error, {:invalid_option, :response_text, ^value}} =
+                 Codex.resume_session("thread-id", exec_fn: fake_exec([]), response_text: value)
+      end
+    end
+
     test "rejects invalid working directories, including the :cwd alias" do
       for value <- [:invalid, 123] do
         assert {:error, {:invalid_option, :working_dir, ^value}} =
@@ -246,6 +270,33 @@ defmodule GenAgent.Backends.CodexTest do
       assert_receive {^ref, "second", "thread-resume"}
     end
 
+    test "response_text: :final_message reports the last agent message in the :result" do
+      events = [
+        event("thread.started", %{"thread_id" => "thread-final"}),
+        event("item.completed", %{"item" => %{"type" => "agent_message", "text" => "working"}}),
+        event("item.completed", %{"item" => %{"type" => "agent_message", "text" => "done"}}),
+        event("turn.completed", %{"usage" => %{"input_tokens" => 5, "output_tokens" => 1}})
+      ]
+
+      {:ok, session} = Codex.start_session(exec_fn: fake_exec(events))
+      {:ok, stream, _} = Codex.prompt(session, "go")
+      assert [_, _, _, %{kind: :result, data: data}] = Enum.to_list(stream)
+      refute Map.has_key?(data, :text)
+
+      {:ok, session} =
+        Codex.start_session(exec_fn: fake_exec(events), response_text: :final_message)
+
+      {:ok, stream, _} = Codex.prompt(session, "go")
+      translated = Enum.to_list(stream)
+      assert Enum.map(translated, & &1.kind) == [:text, :text, :usage, :result]
+
+      assert List.last(translated).data == %{
+               session_id: "thread-final",
+               usage_total: %{input_tokens: 5, output_tokens: 1},
+               text: "done"
+             }
+    end
+
     test "propagates an error from the exec_fn" do
       failing = fn _prompt, _session -> {:error, :codex_missing} end
       {:ok, session} = Codex.start_session(exec_fn: failing)
@@ -287,6 +338,29 @@ defmodule GenAgent.Backends.CodexTest do
 
       assert session.thread_id == "thread-prior"
       assert session.exec_opts[:sandbox] == :read_only
+    end
+
+    test "retains response_text and applies it to the resumed turn" do
+      {:ok, session} =
+        Codex.resume_session("thread-prior",
+          exec_fn: fake_exec([]),
+          response_text: :final_message
+        )
+
+      assert session.response_text == :final_message
+      refute Keyword.has_key?(session.exec_opts, :response_text)
+
+      events = [
+        event("thread.started", %{"thread_id" => "thread-prior"}),
+        event("turn.completed", %{"usage" => %{"input_tokens" => 9, "output_tokens" => 2}})
+      ]
+
+      {:ok, stream, _} = Codex.prompt(%{session | exec_fn: fake_exec(events)}, "go")
+
+      assert [%{kind: :result, data: %{text: "", usage_total: %{input_tokens: 9}} = data}] =
+               Enum.to_list(stream)
+
+      refute Map.has_key?(data, :usage)
     end
   end
 

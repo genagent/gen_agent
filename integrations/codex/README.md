@@ -134,13 +134,64 @@ Other unrecognized options fail on both start and resume with
 `{:error, {:unsupported_option, option}}`;
 an agent's `init_agent/1` must return options accepted by its selected backend.
 
-**Backend-only:**
+**Backend-only** (never forwarded to the CLI):
 - `:exec_fn` -- a 2-arity function `(prompt, session) -> {:ok, enumerable} | {:error, term()}`
   that replaces the default `Exec`/`ExecResume` dispatch. Intended for tests.
+- `:response_text` -- `:all_messages` (default) or `:final_message`. Selects
+  what `response.text` holds for a successful turn. See
+  [Response text](#response-text).
 
 Codex has no equivalent of Claude's `--system-prompt`; if you need
 system-level instructions, pass them via `AGENTS.md` in the working
 directory or through Codex's configuration layer.
+
+### Response text
+
+Codex emits one `agent_message` item per assistant message. A turn that
+narrates its work before answering produces several of them, and by default
+`response.text` joins them all with a blank line:
+
+```elixir
+# Codex emits:  agent_message "Let me check the file."
+#               agent_message {"answer": 42}
+{:ok, response} = GenAgent.ask("my-coder", "Answer as JSON")
+response.text
+#=> "Let me check the file.\n\n{\"answer\": 42}"
+```
+
+Set `response_text: :final_message` in the backend options to make
+`response.text` hold only the last completed `agent_message` of the turn.
+This keeps a structured final answer (for example JSON requested through
+`:output_schema`) parseable:
+
+```elixir
+backend_opts = [working_dir: path, response_text: :final_message]
+
+{:ok, response} = GenAgent.ask("my-coder", "Answer as JSON")
+response.text
+#=> "{\"answer\": 42}"
+Jason.decode!(response.text)
+#=> %{"answer" => 42}
+```
+
+Exact semantics of `:final_message`:
+
+- Only `response.text` changes. Every `agent_message` still becomes a
+  `:text` event, reaches `handle_stream_event/2`, and is retained in
+  `response.events`. GenAgent versions that expose `response.final_message`
+  derive it from the same terminal text.
+- The last message wins even when it is empty: an empty final
+  `agent_message` gives `""`.
+- A successful turn with no `agent_message` gives `""`.
+- Text is tracked per turn. A resumed turn never reports a message from an
+  earlier turn.
+- Failed turns are unchanged and still return `{:error, reason}`. Usage
+  deltas and thread checkpointing are unaffected.
+- A session resumed with `resume_session/2` keeps the mode it was given.
+- `response_text: nil` means the default. Any value other than `nil`,
+  `:all_messages`, or `:final_message` fails at session startup or resume
+  with `{:error, {:invalid_option, :response_text, value}}` before the CLI
+  is called. The option is never passed to `codex`.
 
 ### Sandbox and approvals
 
@@ -226,7 +277,7 @@ Codex CLI's NDJSON output is translated into `GenAgent.Event` values by
 | `item.completed` (`tool_call`) | `:tool_use` |
 | `item.completed` (`tool_result`) | `:tool_result` |
 | `item.completed` (`mcp_tool_call`, `command_execution`, `file_change`) | `:tool_use` + `:tool_result`, carrying the complete item including ID, status and output |
-| `turn.completed` | `:usage` (increase since the previous completed turn) + terminal `:result` (with captured `thread_id` as `session_id`) |
+| `turn.completed` | `:usage` (increase since the previous completed turn) + terminal `:result` (with captured `thread_id` as `session_id`; with `response_text: :final_message`, the last `agent_message` text as `:text`) |
 | `turn.failed` | terminal `:error`; the reason falls back to the most recent `error` event when the failure carries none |
 | `error` | retained, not emitted; becomes a terminal `:error` only if the stream ends without `turn.completed` or `turn.failed` |
 | anything else | filtered |

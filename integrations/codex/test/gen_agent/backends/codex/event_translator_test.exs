@@ -449,6 +449,152 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
     end
   end
 
+  describe "response_text" do
+    defp message(text),
+      do: event("item.completed", %{"item" => %{"type" => "agent_message", "text" => text}})
+
+    @commentary "Let me check the file first."
+    @final_json ~s({"answer":42,"source":"lib/foo.ex"})
+
+    defp commentary_then_json do
+      [
+        event("thread.started", %{"thread_id" => "t-json"}),
+        message(@commentary),
+        event("item.completed", %{"item" => %{"type" => "reasoning", "text" => "..."}}),
+        message(@final_json),
+        event("turn.completed", %{"usage" => %{"input_tokens" => 7, "output_tokens" => 3}})
+      ]
+    end
+
+    test "default :all_messages keeps the :result free of :text and joins every message" do
+      translated = EventTranslator.translate(commentary_then_json())
+
+      assert translated ==
+               EventTranslator.translate(commentary_then_json(), response_text: :all_messages)
+
+      assert Enum.map(translated, & &1.kind) == [:text, :tool_result, :text, :usage, :result]
+      refute Map.has_key?(List.last(translated).data, :text)
+
+      response = Response.from_events(translated)
+      assert response.text == @commentary <> "\n\n" <> @final_json
+      assert {:error, _} = Jason.decode(response.text)
+    end
+
+    test ":final_message reports the last agent_message as :text so JSON after commentary parses" do
+      translated =
+        EventTranslator.translate(commentary_then_json(), response_text: :final_message)
+
+      assert Enum.map(translated, & &1.kind) == [:text, :tool_result, :text, :usage, :result]
+      assert Enum.at(translated, 0).data == %{text: @commentary, message_boundary: true}
+      assert Enum.at(translated, 2).data == %{text: @final_json, message_boundary: true}
+
+      assert List.last(translated).data == %{
+               session_id: "t-json",
+               usage_total: %{input_tokens: 7, output_tokens: 3},
+               text: @final_json
+             }
+
+      response = Response.from_events(translated)
+      assert response.text == @final_json
+      assert Jason.decode!(response.text) == %{"answer" => 42, "source" => "lib/foo.ex"}
+      assert response.usage == %{input_tokens: 7, output_tokens: 3}
+      assert response.session_id == nil
+    end
+
+    test ":final_message keeps an empty last message empty" do
+      events = [message("draft answer"), message(""), event("turn.completed", %{})]
+
+      assert [%Event{kind: :text}, %Event{kind: :text}, %Event{kind: :result, data: %{text: ""}}] =
+               EventTranslator.translate(events, response_text: :final_message)
+
+      assert Response.from_events(
+               EventTranslator.translate(events, response_text: :final_message)
+             ).text ==
+               ""
+
+      assert Response.from_events(EventTranslator.translate(events)).text == "draft answer"
+    end
+
+    test ":final_message reports an empty string for a turn without agent messages" do
+      events = [
+        event("item.completed", %{"item" => %{"type" => "reasoning", "text" => "thinking"}}),
+        event("turn.completed", %{})
+      ]
+
+      assert [%Event{kind: :tool_result}, %Event{kind: :result, data: %{text: ""}}] =
+               EventTranslator.translate(events, response_text: :final_message)
+
+      assert [%Event{kind: :tool_result}, %Event{kind: :result, data: data}] =
+               EventTranslator.translate(events)
+
+      refute Map.has_key?(data, :text)
+    end
+
+    test ":final_message tracks text per invocation" do
+      first = [message("first turn"), event("turn.completed", %{})]
+      second = [event("turn.completed", %{})]
+
+      assert [%Event{kind: :text}, %Event{kind: :result, data: %{text: "first turn"}}] =
+               EventTranslator.translate(first, response_text: :final_message)
+
+      assert [%Event{kind: :result, data: %{text: ""}}] =
+               EventTranslator.translate(second, response_text: :final_message)
+    end
+
+    test ":final_message leaves failures and stream errors unchanged" do
+      failed = [message("partial"), event("turn.failed", %{"error" => "rate limited"})]
+
+      assert [%Event{kind: :text}, %Event{kind: :error, data: %{reason: "rate limited"} = data}] =
+               EventTranslator.translate(failed, response_text: :final_message)
+
+      refute Map.has_key?(data, :text)
+
+      dangling = [message("partial"), event("error", %{"message" => "network down"})]
+
+      assert [%Event{kind: :text}, %Event{kind: :error, data: %{reason: "network down"} = data}] =
+               EventTranslator.translate(dangling, response_text: :final_message)
+
+      refute Map.has_key?(data, :text)
+
+      timed_out = [message("partial"), %CodexWrapper.StreamError{reason: {:idle_timeout, 5}}]
+
+      assert [%Event{kind: :text}, %Event{kind: :error, data: %{reason: {:idle_timeout, 5}}}] =
+               EventTranslator.translate(timed_out, response_text: :final_message)
+    end
+
+    test ":final_message streams every :text event before the terminal event" do
+      parent = self()
+
+      raw =
+        Stream.resource(
+          fn -> 0 end,
+          fn
+            0 ->
+              {[message("early")], 1}
+
+            1 ->
+              {[message("late")], 2}
+
+            2 ->
+              send(parent, :terminal_read)
+              {[event("turn.completed", %{})], 3}
+
+            3 ->
+              {:halt, 3}
+          end,
+          fn _ -> :ok end
+        )
+
+      [first, second | rest] =
+        EventTranslator.translate_stream(raw, response_text: :final_message) |> Enum.to_list()
+
+      assert {first.kind, first.data.text} == {:text, "early"}
+      assert {second.kind, second.data.text} == {:text, "late"}
+      assert_receive :terminal_read
+      assert [%Event{kind: :result, data: %{text: "late"}}] = rest
+    end
+  end
+
   describe "error events" do
     test "turn.failed becomes a terminal :error" do
       events = [

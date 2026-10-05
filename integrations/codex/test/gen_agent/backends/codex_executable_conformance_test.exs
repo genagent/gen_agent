@@ -151,6 +151,35 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
     assert File.read!(Path.join(context.directory, "resume.env")) == "configured\n"
   end
 
+  test "response_text: :final_message selects the last message and never reaches the CLI",
+       context do
+    name = start_agent(context, response_text: :final_message)
+
+    assert {:ok, response} = GenAgent.ask(name, "replay:command")
+    assert response.text == "```text\ncodex-fixture\n```"
+
+    assert Enum.map(response.events, & &1.kind) == [
+             :text,
+             :tool_use,
+             :tool_result,
+             :text,
+             :usage,
+             :result
+           ]
+
+    assert Enum.at(response.events, 0).data.text == "I’ll run the command and report its output."
+
+    fresh_args = args(context.directory, :fresh)
+    assert List.last(fresh_args) == "replay:command"
+    refute Enum.any?(fresh_args, &String.contains?(&1, ["response_text", "final_message"]))
+
+    assert {:ok, second} = GenAgent.ask(name, "follow-up prompt")
+    assert second.text == "42"
+    resume_args = args(context.directory, :resume)
+    assert Enum.take(resume_args, 2) == ["exec", "resume"]
+    refute Enum.any?(resume_args, &String.contains?(&1, ["response_text", "final_message"]))
+  end
+
   test "a quiet CLI turn reports the configured idle timeout", context do
     name = start_agent(context, idle_timeout_ms: 200, timeout: 5_000)
 
