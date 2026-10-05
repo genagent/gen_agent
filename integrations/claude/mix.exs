@@ -33,7 +33,7 @@ defmodule GenAgentClaude.MixProject do
   defp deps do
     [
       gen_agent_dep(),
-      {:claude_wrapper, "~> 0.14.5"},
+      {:claude_wrapper, "~> 0.15.2"},
       {:forcola, "~> 0.4.0", only: :test},
       {:ex_doc, "~> 0.35", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
