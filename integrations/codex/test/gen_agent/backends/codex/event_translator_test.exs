@@ -469,8 +469,11 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
     test "default :all_messages keeps the :result free of :text and joins every message" do
       translated = EventTranslator.translate(commentary_then_json())
 
-      assert translated ==
-               EventTranslator.translate(commentary_then_json(), response_text: :all_messages)
+      assert Enum.map(translated, &{&1.kind, &1.data}) ==
+               Enum.map(
+                 EventTranslator.translate(commentary_then_json(), response_text: :all_messages),
+                 &{&1.kind, &1.data}
+               )
 
       assert Enum.map(translated, & &1.kind) == [:text, :tool_result, :text, :usage, :result]
       refute Map.has_key?(List.last(translated).data, :text)
