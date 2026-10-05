@@ -364,7 +364,11 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
         }),
         stream_event("assistant", %{
           "parent_tool_use_id" => "parent-1",
-          "message" => %{"content" => [%{"type" => "text", "text" => "subagent"}]}
+          "message" => %{
+            "content" => [
+              %{"type" => "tool_use", "id" => "sub-call", "name" => "Read", "input" => %{}}
+            ]
+          }
         }),
         stream_event("assistant", %{
           "message" => %{"content" => [%{"type" => "text", "text" => "Hello world"}]}
@@ -374,8 +378,8 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
       assert [
                %Event{kind: :text, data: %{text: "Hello"}},
                %Event{
-                 kind: :text,
-                 data: %{text: "subagent", parent_tool_use_id: "parent-1"}
+                 kind: :tool_use,
+                 data: %{parent_tool_use_id: "parent-1"}
                },
                %Event{kind: :text, data: %{text: " world"}}
              ] = Enum.to_list(EventTranslator.translate_stream(inputs))
