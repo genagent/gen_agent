@@ -11,6 +11,88 @@ defmodule GenAgent.HaltDrainTest do
     %{task_sup: start_supervised!(Task.Supervisor)}
   end
 
+  for outcome <- [:response, :error], limit <- [:count, :bytes] do
+    @tag outcome: outcome, limit: limit
+    test "#{outcome} halt frees #{limit} capacity before admitting buffered prompts",
+         %{task_sup: task_sup, outcome: outcome, limit: limit} do
+      parent = self()
+      name = "halt-capacity-#{System.unique_integer([:positive])}"
+
+      script = fn _prompt ->
+        send(parent, {:turn_blocked, self()})
+
+        receive do
+          :complete ->
+            case outcome do
+              :response -> [Event.new(:result, %{text: "done"})]
+              :error -> [Event.new(:error, %{reason: :failed})]
+            end
+        end
+      end
+
+      opts = [
+        name: name,
+        backend: Mock,
+        module: TestAgent,
+        task_supervisor: task_sup,
+        max_pending_prompts: if(limit == :count, do: 1, else: 2),
+        max_pending_prompt_bytes: if(limit == :bytes, do: 16, else: 1_000),
+        init_opts: [
+          scripts: [
+            script,
+            fn prompt ->
+              send(parent, {:resumed_prompt, prompt})
+              [Event.new(:result, %{text: "followup"})]
+            end
+          ],
+          responder: fn
+            _ref, %{text: "done"}, state -> {:halt, state}
+            _ref, _response, state -> {:noreply, state}
+          end,
+          error_handler: fn
+            _ref, :failed, state -> {:halt, state}
+            _ref, _reason, state -> {:noreply, state}
+          end,
+          event_handler: fn
+            :followup, state -> {:prompt, "followup", state}
+            _event, state -> {:noreply, state}
+          end,
+          post_run: fn state ->
+            send(parent, {:halt_snapshot, state})
+            :ok
+          end
+        ]
+      ]
+
+      pid = start_supervised!({Server, opts})
+      caller = Task.async(fn -> :gen_statem.call(pid, {:ask, "go"}) end)
+      assert_receive {:turn_blocked, task_pid}
+
+      assert {:ok, rejected_ref} =
+               :gen_statem.call(pid, {:tell_with_completion, "dropped", self(), :fail})
+
+      assert :ok = :gen_statem.call(pid, {:notify_ack, :followup})
+      assert :ok = :gen_statem.call(pid, {:notify_ack, :note})
+      send(task_pid, :complete)
+
+      case outcome do
+        :response -> assert {:ok, %{text: "done"}} = Task.await(caller)
+        :error -> assert {:error, :failed} = Task.await(caller)
+      end
+
+      assert_receive {:gen_agent, :completion, ^name, ^rejected_ref, {:error, :halted}}
+      assert_receive {:halt_snapshot, snapshot}
+      assert snapshot.events == [:followup, :note]
+      assert length(snapshot.errors) == if(outcome == :error, do: 1, else: 0)
+      assert %{halted: true, queued: 1} = :gen_statem.call(pid, :status)
+      assert {:error, :halted} = :gen_statem.call(pid, {:poll, rejected_ref})
+      refute_received {:resumed_prompt, _}
+
+      :gen_statem.cast(pid, :resume)
+      assert_receive {:resumed_prompt, "followup"}
+    end
+  end
+
   for outcome <- [:response, :error],
       halt_source <- [:turn, :event, :rejected_event, :rejected_chain] do
     @tag outcome: outcome, halt_source: halt_source

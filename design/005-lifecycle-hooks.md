@@ -169,7 +169,10 @@ and `[:gen_agent, :halted]` observe the resulting state. If a notification
 halts mid-drain (including a halt from handling its rejected generated
 prompt), the remaining buffered notifications still run before completion.
 Dispatch is disabled before draining; nested halt decisions cannot finalize
-the same transition again. Later notifications can still update a halted
+the same transition again. Queued tells with `on_halt: :fail` settle before
+draining, releasing their capacity for notification-generated prompts that
+remain queued until resume. Their failure completions precede `post_run`.
+Later notifications can still update a halted
 agent, but do not alter the completion snapshot or rerun these observers.
 
 Does NOT run on crashes, `GenAgent.stop/1`, supervisor shutdown, or

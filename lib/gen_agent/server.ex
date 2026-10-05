@@ -1732,9 +1732,10 @@ defmodule GenAgent.Server do
   defp transition_to_halted(%Data{halted: true} = data), do: data
 
   defp transition_to_halted(%Data{} = data) do
-    data = drain_pending_events(%{data | halted: true})
+    # Release doomed tells before notification-generated prompts use capacity.
+    data = fail_halt_aware_queued(%{data | halted: true})
+    data = drain_pending_events(data)
     :ok = safely_post_run(data.agent_module, data.agent_state)
-    data = fail_halt_aware_queued(data)
     emit_halted(data.name, data.agent_state)
     data
   end
