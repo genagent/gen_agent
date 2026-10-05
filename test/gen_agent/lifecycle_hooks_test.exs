@@ -202,6 +202,31 @@ defmodule GenAgent.LifecycleHooksTest do
       assert status(pid).state == :idle
     end
 
+    test "a callback-returned crash tuple is rejected without exposing its value", %{
+      task_sup: task_sup
+    } do
+      parent = self()
+      secret = "review-secret-marker"
+      pre_turn = fn _prompt, _state -> {:crashed, %{token: secret}} end
+      pid = start_server(task_sup, [], pre_turn: pre_turn)
+      name = status(pid).name
+      handler_id = "invalid-pre-turn-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:gen_agent, :turn, :rejected],
+        fn _event, _measurements, meta, _config ->
+          if meta.agent == name, do: send(parent, {:rejected_reason, meta.reason_kind})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert {:error, :pre_turn_invalid} = ask(pid, "go")
+      assert_receive {:rejected_reason, :pre_turn_invalid}
+    end
+
     test "a self-chain pre_turn crash reaches handle_error and prompt telemetry", %{
       task_sup: task_sup
     } do
@@ -274,6 +299,27 @@ defmodule GenAgent.LifecycleHooksTest do
         assert status(pid).state == :idle
         assert status(pid).halted == false
       end
+    end
+
+    test "repeated generated-prompt recovery leaves the mailbox responsive", %{
+      task_sup: task_sup
+    } do
+      parent = self()
+
+      pid =
+        start_server(task_sup, [],
+          pre_turn: fn _prompt, state -> {:skip, state} end,
+          event_handler: fn _event, state -> {:prompt, "retry", state} end,
+          error_handler: fn _ref, _reason, state ->
+            send(parent, :retry_rejected)
+            {:prompt, "retry", state}
+          end
+        )
+
+      notify(pid, :start)
+      assert_receive :retry_rejected, 500
+      assert %{state: :idle} = :gen_statem.call(pid, :status, 500)
+      assert :ok = :gen_statem.stop(pid, :normal, 1_000)
     end
   end
 

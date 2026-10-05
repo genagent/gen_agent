@@ -400,7 +400,8 @@ defmodule GenAgent do
   by `handle_response/3` or `handle_event/2`, a skip, crash, or malformed
   return emits prompt-error telemetry and calls `c:handle_error/3` so the
   agent can retry or halt. Crashes use `{:pre_turn_crashed, exception_kind}`
-  on that generated-prompt path.
+  on that generated-prompt path. Immediate generated-prompt retries are
+  paced so agent calls remain responsive even if the hook keeps rejecting.
 
   Default implementation: `{:ok, prompt, state}`.
   """

@@ -396,6 +396,15 @@ defmodule GenAgent.Server do
     end
   end
 
+  # A rejected generated prompt can request another self-chain. Resume it
+  # through the mailbox instead of a :next_event so callers can still inspect
+  # or stop an agent whose pre_turn/2 keeps rejecting retries.
+  defp dispatch_event(:info, :retry_generated_prompt, :idle, %Data{} = data),
+    do: dispatch_event(:internal, :process_next, :idle, data)
+
+  defp dispatch_event(:info, :retry_generated_prompt, :processing, _data),
+    do: :keep_state_and_data
+
   # ---------------------------------------------------------------------------
   # ask -- synchronous prompt
   # ---------------------------------------------------------------------------
@@ -1166,7 +1175,7 @@ defmodule GenAgent.Server do
     data = %{data | stream_recipients: recipients}
 
     case safely_pre_turn(data.agent_module, prompt, data.agent_state) do
-      {:ok, new_prompt, new_state} when is_binary(new_prompt) ->
+      {:returned, {:ok, new_prompt, new_state}} when is_binary(new_prompt) ->
         data = %{data | agent_state: new_state}
 
         case dispatch(data, request_ref, kind, new_prompt, prompt, stream_to) do
@@ -1177,14 +1186,14 @@ defmodule GenAgent.Server do
             reject_dispatch(data, request_ref, kind, reason)
         end
 
-      {:skip, new_state} ->
+      {:returned, {:skip, new_state}} ->
         pseudo_current = %{request_ref: request_ref, kind: kind}
         data = %{data | agent_state: new_state}
         emit_turn_rejected(data.name, request_ref, kind, :pre_turn_skipped)
         {data, reply_actions} = reject_pre_turn(data, pseudo_current, :pre_turn_skipped)
-        {:keep_state, data, with_process_next(reply_actions)}
+        {:keep_state, data, after_pre_turn_rejection(data, kind, reply_actions)}
 
-      {:halt, new_state} ->
+      {:returned, {:halt, new_state}} ->
         pseudo_current = %{request_ref: request_ref, kind: kind}
         data = %{data | agent_state: new_state}
         emit_turn_rejected(data.name, request_ref, kind, :pre_turn_halted)
@@ -1197,18 +1206,29 @@ defmodule GenAgent.Server do
         reason = pre_turn_crash_reason(kind, failure_kind)
         emit_turn_rejected(data.name, request_ref, kind, reason)
         {data, reply_actions} = reject_pre_turn(data, pseudo_current, reason)
-        {:keep_state, data, with_process_next(reply_actions)}
+        {:keep_state, data, after_pre_turn_rejection(data, kind, reply_actions)}
 
-      _other ->
+      {:returned, _other} ->
         # Malformed pre_turn return -- treat as skip with a warning.
         require Logger
         Logger.error("GenAgent pre_turn/2 returned unexpected shape")
         pseudo_current = %{request_ref: request_ref, kind: kind}
         emit_turn_rejected(data.name, request_ref, kind, :pre_turn_invalid)
         {data, reply_actions} = reject_pre_turn(data, pseudo_current, :pre_turn_invalid)
-        {:keep_state, data, with_process_next(reply_actions)}
+        {:keep_state, data, after_pre_turn_rejection(data, kind, reply_actions)}
     end
   end
+
+  defp after_pre_turn_rejection(data, kind, reply_actions)
+       when kind in [:self_chain, :event] and not is_nil(data.self_chain) and not data.halted do
+    # A small delay bounds a permanently failing retry loop, and the info
+    # message gives existing callers a chance to enter the agent mailbox.
+    Process.send_after(self(), :retry_generated_prompt, 10)
+    reply_actions
+  end
+
+  defp after_pre_turn_rejection(_data, _kind, reply_actions),
+    do: with_process_next(reply_actions)
 
   defp pre_turn_crash_reason(kind, failure_kind) when kind in [:self_chain, :event],
     do: {:pre_turn_crashed, failure_kind}
@@ -1704,7 +1724,7 @@ defmodule GenAgent.Server do
   defp safely_pre_turn(module, prompt, state) do
     if function_exported?(module, :pre_turn, 2) do
       try do
-        module.pre_turn(prompt, state)
+        {:returned, module.pre_turn(prompt, state)}
       rescue
         e ->
           require Logger
@@ -1725,7 +1745,7 @@ defmodule GenAgent.Server do
           {:crashed, callback_failure_kind(reason)}
       end
     else
-      {:ok, prompt, state}
+      {:returned, {:ok, prompt, state}}
     end
   end
 

@@ -120,6 +120,8 @@ For an ask or tell, a skipped or crashing hook rejects that request.
 For a self-chain or event-generated prompt, a skip, crash, or malformed
 return emits prompt-error telemetry and calls `handle_error/3`, so an
 autonomous workflow can retry or halt rather than silently stopping.
+Immediate generated-prompt retries are paced so other agent calls can
+be handled even if the hook keeps rejecting.
 
 Use cases: rate limiting (sleep + return `{:ok, prompt, state}`), prompt
 augmentation (append context), gating (check a budget, `:halt` if
