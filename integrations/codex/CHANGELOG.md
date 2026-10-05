@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.8...gen_agent_codex-v0.5.0) (2026-10-05)
+
+
+### Features
+
+* **codex:** optionally return only the final agent message ([#394](https://github.com/genagent/gen_agent/issues/394)) ([b251a13](https://github.com/genagent/gen_agent/commit/b251a1321242edea1c895f76e0a16d38c357dc53))
+
+
+### Bug Fixes
+
+* **backends:** align CLI adapter wrapper constraints ([#396](https://github.com/genagent/gen_agent/issues/396)) ([#397](https://github.com/genagent/gen_agent/issues/397)) ([ecbbec4](https://github.com/genagent/gen_agent/commit/ecbbec479745689685a78ec0aa1b7c2e8aaad4c2))
+
 ## [0.4.8](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.7...gen_agent_codex-v0.4.8) (2026-10-03)
 
 
