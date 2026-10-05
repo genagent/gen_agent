@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.7](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.2.6...gen_agent_claude-v0.2.7) (2026-10-05)
+
+
+### Bug Fixes
+
+* **claude:** preserve parent attribution across interleaved events ([#399](https://github.com/genagent/gen_agent/issues/399)) ([8631d7b](https://github.com/genagent/gen_agent/commit/8631d7b6bde8351ab0a55686b2adc1aca5f11cf7))
+
 ## [0.2.6](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.2.5...gen_agent_claude-v0.2.6) (2026-10-05)
 
 
