@@ -24,7 +24,9 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
     * `turn.completed` -- emits a `:usage` event (if token counts are
       present) followed by a terminal `:result` event carrying the
       captured `thread_id` as `session_id` and the raw completed usage as
-      `usage_total`.
+      `usage_total`. With `response_text: :final_message` the `:result`
+      also carries the last completed `agent_message` text as `:text`
+      (see below).
     * `error` -- remembers the latest notification without ending the turn.
       If the stream ends before a turn outcome, emits a terminal `:error`.
     * `turn.failed` -- emits a terminal `:error` event, using the latest
@@ -61,6 +63,25 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
   When no delta remains, no `:usage` event is emitted. The default
   baseline is all zeros, which treats the stream as the first turn of a
   thread.
+
+  ## Response text
+
+  The `:response_text` option selects what the terminal `:result` says
+  about the turn's text. `GenAgent.Response` uses a binary `:text` on
+  the `:result` event as `Response.text`; without it, it joins the turn's
+  `:text` events.
+
+    * `:all_messages` (default) -- the `:result` carries no `:text`, so
+      `Response.text` joins every completed `agent_message` with a blank
+      line.
+    * `:final_message` -- the `:result` carries the text of the last
+      completed `agent_message` seen in this invocation as `:text`.
+      An empty last message gives `""`, and so does a turn with no
+      `agent_message`. The `:text` events are emitted either way, so
+      streaming callers still see every message.
+
+  The last message is tracked per `translate_stream/2` invocation, which
+  is one turn. `turn.failed` and error terminals never carry `:text`.
   """
 
   alias CodexWrapper.JsonLineEvent
@@ -89,6 +110,9 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
   @typedoc "Raw completed usage totals keyed by counter name; absent keys are unknown."
   @type usage_total :: %{optional(atom()) => non_neg_integer()}
 
+  @typedoc "What the terminal `:result` reports as the turn's text."
+  @type response_text :: :all_messages | :final_message
+
   @doc "Baseline for the first turn of a new thread: every counter is zero."
   @spec zero_usage_total() :: usage_total()
   def zero_usage_total, do: Map.new(@usage_fields, &{&1, 0})
@@ -104,16 +128,29 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
   @doc """
   Translate events as they arrive while retaining the thread ID and latest error notification.
 
-  Options: `:usage_baseline` -- the previous completed `t:usage_total/0`
-  (default: all zeros).
+  Options:
+
+    * `:usage_baseline` -- the previous completed `t:usage_total/0`
+      (default: all zeros).
+    * `:response_text` -- `t:response_text/0` (default: `:all_messages`).
   """
   @spec translate_stream(Enumerable.t(), keyword()) :: Enumerable.t()
   def translate_stream(events, opts \\ []) do
     baseline = Keyword.get(opts, :usage_baseline, zero_usage_total())
+    response_text = Keyword.get(opts, :response_text, :all_messages)
 
     Stream.transform(
       events,
-      fn -> %{thread_id: nil, last_error: nil, terminal?: false, baseline: baseline} end,
+      fn ->
+        %{
+          thread_id: nil,
+          last_error: nil,
+          terminal?: false,
+          baseline: baseline,
+          response_text: response_text,
+          last_message: nil
+        }
+      end,
       &translate_event/2,
       fn
         %{terminal?: false, last_error: %{reason: reason, data: data}} = state ->
@@ -149,6 +186,17 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
 
   defp translate_event(%CodexWrapper.StreamError{reason: reason}, state) do
     {[Event.new(:error, %{reason: reason})], %{state | terminal?: true}}
+  end
+
+  defp translate_event(
+         %JsonLineEvent{
+           event_type: "item.completed",
+           data: %{"item" => %{"type" => "agent_message", "text" => text} = item}
+         },
+         state
+       )
+       when is_binary(text) do
+    {translate_item(item), %{state | last_message: text}}
   end
 
   defp translate_event(event, state), do: {translate_one(event, state), state}
@@ -188,14 +236,15 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
         delta -> [Event.new(:usage, delta)]
       end
 
-    # Intentionally omit :text. Codex's terminal event carries no
-    # assembled text -- the agent's response arrives as earlier
-    # `item.completed` -> `:text` events. `GenAgent.Response.from_events`
-    # assembles :text events when the :result event has no :text key.
-    # Distinct completed messages carry a boundary marker so their text
-    # remains readable without changing streaming-delta semantics.
+    # Codex's terminal event carries no assembled text -- the agent's
+    # response arrives as earlier `item.completed` -> `:text` events.
+    # By default :text is omitted and `GenAgent.Response.from_events`
+    # assembles the :text events, each carrying a boundary marker so
+    # distinct messages remain readable. Under :final_message the last
+    # tracked agent_message is reported as :text instead.
     result_data =
       %{session_id: state.thread_id, usage_total: total}
+      |> put_response_text(state)
       |> drop_nil_values()
 
     usage_events ++ [Event.new(:result, result_data)]
@@ -255,6 +304,11 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
         into: %{},
         do: {field, value - prev}
   end
+
+  defp put_response_text(data, %{response_text: :final_message, last_message: last}),
+    do: Map.put(data, :text, last || "")
+
+  defp put_response_text(data, _state), do: data
 
   defp drop_nil_values(map) do
     map

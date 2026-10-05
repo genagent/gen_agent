@@ -69,11 +69,45 @@ defmodule GenAgent.Backends.Codex do
   first turn only. Invalid `:sandbox` and `:working_dir` values return
   `{:error, {:invalid_option, key, value}}` at session startup.
 
-  Backend-only:
+  Backend-only (never forwarded to the CLI):
 
     * `:exec_fn` -- a 2-arity function `(prompt, session) -> {:ok,
       Enumerable.t()} | {:error, term()}` that replaces the default
       `Exec`/`ExecResume` dispatch. Intended for tests.
+    * `:response_text` -- `:all_messages` (default) or `:final_message`.
+      Selects what `GenAgent.Response.text` holds for a successful turn.
+      See [Response text](#module-response-text).
+
+  ## Response text
+
+  Codex emits one `agent_message` item per assistant message, so a turn
+  that narrates before answering produces several `:text` events. By
+  default (`response_text: :all_messages`) the terminal `:result` carries
+  no text and `GenAgent.Response.text` joins every message with a blank
+  line, exactly as before.
+
+  With `response_text: :final_message`, a successful `turn.completed`
+  puts the text of the last completed `agent_message` of that turn into
+  the terminal `:result` as `:text`, so `Response.text` holds only the
+  final message. This is useful when the final message is structured
+  output (for example JSON requested via `:output_schema`) and earlier
+  commentary would break parsing. Exact semantics:
+
+    * Only `Response.text` changes. Every `agent_message` still becomes a
+      `:text` event delivered to `handle_stream_event/2` and retained in
+      `Response.events`. (Core versions that expose
+      `Response.final_message` derive it from the same terminal text.)
+    * The last message wins even when its text is empty: an empty final
+      `agent_message` yields `""`.
+    * A successful turn with no `agent_message` yields `""`.
+    * Text is tracked per turn. A resumed turn never reports a message
+      from an earlier turn.
+    * Failed turns are unchanged and still return `{:error, reason}`.
+      Usage deltas and thread checkpointing are unaffected.
+    * The option is validated at `start_session/1` and `resume_session/2`.
+      `nil` means the default. Any other value returns
+      `{:error, {:invalid_option, :response_text, value}}` before the CLI
+      is called. A resumed session keeps the mode.
 
   Codex has no equivalent of Claude's `--system-prompt`; if you need
   system-level instructions, pass them via `AGENTS.md` in the working
@@ -107,12 +141,15 @@ defmodule GenAgent.Backends.Codex do
     :output_schema
   ]
 
+  @response_text_modes [:all_messages, :final_message]
+
   defstruct [
     :config,
     :exec_opts,
     :exec_fn,
     thread_id: nil,
-    usage_total: %{}
+    usage_total: %{},
+    response_text: :all_messages
   ]
 
   @type t :: %__MODULE__{
@@ -120,18 +157,21 @@ defmodule GenAgent.Backends.Codex do
           exec_opts: keyword(),
           exec_fn: (String.t(), t() -> {:ok, Enumerable.t()} | {:error, term()}),
           thread_id: String.t() | nil,
-          usage_total: EventTranslator.usage_total()
+          usage_total: EventTranslator.usage_total(),
+          response_text: EventTranslator.response_text()
         }
 
   @impl GenAgent.Backend
   def start_session(opts) do
     {exec_fn, opts} = Keyword.pop(opts, :exec_fn, &default_exec/2)
+    {response_text, opts} = Keyword.pop(opts, :response_text)
     opts = opts |> normalize_cwd() |> drop_disabled_options()
     {config_opts, exec_opts} = Keyword.split(opts, @config_keys)
 
     with :ok <- validate_exec_opts(exec_opts),
          :ok <- validate_sandbox(exec_opts[:sandbox]),
-         :ok <- validate_working_dir(config_opts[:working_dir]) do
+         :ok <- validate_working_dir(config_opts[:working_dir]),
+         :ok <- validate_response_text(response_text) do
       config = Config.new(config_opts)
 
       {:ok,
@@ -139,7 +179,8 @@ defmodule GenAgent.Backends.Codex do
          config: config,
          exec_opts: exec_opts,
          exec_fn: exec_fn,
-         usage_total: EventTranslator.zero_usage_total()
+         usage_total: EventTranslator.zero_usage_total(),
+         response_text: response_text || :all_messages
        }}
     end
   end
@@ -163,7 +204,10 @@ defmodule GenAgent.Backends.Codex do
         stream =
           json_events
           |> Stream.each(&checkpoint_raw(&1, checkpoint))
-          |> EventTranslator.translate_stream(usage_baseline: session.usage_total)
+          |> EventTranslator.translate_stream(
+            usage_baseline: session.usage_total,
+            response_text: session.response_text
+          )
 
         {:ok, stream, session}
 
@@ -393,4 +437,9 @@ defmodule GenAgent.Backends.Codex do
 
   defp validate_working_dir(value) when is_binary(value) or is_nil(value), do: :ok
   defp validate_working_dir(value), do: {:error, {:invalid_option, :working_dir, value}}
+
+  defp validate_response_text(value) when is_nil(value) or value in @response_text_modes,
+    do: :ok
+
+  defp validate_response_text(value), do: {:error, {:invalid_option, :response_text, value}}
 end
