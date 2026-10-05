@@ -103,3 +103,7 @@ and `finish_error`.
   callback and BEFORE `drain_pending_events`, so a commit hook sees
   the turn's own state, not the state after buffered notifies are
   drained. This ordering is deliberate.
+- A clean halt drains all already-buffered notifications before `post_run`
+  and `[:gen_agent, :halted]` observe the state. If an event itself halts,
+  the remaining buffered events are applied before completion fires once.
+  Notifications received after completion can still update the halted agent.

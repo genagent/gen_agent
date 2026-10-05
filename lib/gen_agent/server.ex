@@ -1725,17 +1725,19 @@ defmodule GenAgent.Server do
     end
   end
 
-  # Centralized halt transition. Fires post_run hook with the final
-  # state, then emits the :halted telemetry event, then returns data
-  # with halted: true. All clean-halt sites funnel through here so
-  # post_run has exactly one call site.
+  # Centralized halt transition. Stop dispatch before draining, so nested
+  # halt decisions cannot fire completion hooks partway through the batch.
+  # All buffered notifications run before post_run and :halted observe the
+  # final state. All clean-halt sites funnel through this one hook call site.
   defp transition_to_halted(%Data{halted: true} = data), do: data
 
   defp transition_to_halted(%Data{} = data) do
+    # Release doomed tells before notification-generated prompts use capacity.
+    data = fail_halt_aware_queued(%{data | halted: true})
+    data = drain_pending_events(data)
     :ok = safely_post_run(data.agent_module, data.agent_state)
-    data = fail_halt_aware_queued(data)
     emit_halted(data.name, data.agent_state)
-    %{data | halted: true}
+    data
   end
 
   defp fail_halt_aware_queued(%Data{} = data) do
@@ -1869,7 +1871,6 @@ defmodule GenAgent.Server do
 
       :halt ->
         data = transition_to_halted(data)
-        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
     end
   end
@@ -1919,7 +1920,6 @@ defmodule GenAgent.Server do
 
       :halt ->
         data = transition_to_halted(data)
-        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
     end
   end

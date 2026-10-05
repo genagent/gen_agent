@@ -428,8 +428,19 @@ defmodule GenAgent do
 
   Fires when `c:handle_response/3`, `c:handle_error/3`,
   `c:handle_event/2`, or `c:pre_turn/2` returns
-  `{:halt, state}`. Runs before the agent is marked halted and before
-  the `[:gen_agent, :halted]` telemetry event is emitted.
+  `{:halt, state}`. Runs before the `[:gen_agent, :halted]` telemetry
+  event is emitted.
+
+  On turn completion, `c:post_turn/3` runs first, then notifications
+  buffered during the turn are applied in order, then this hook and
+  halted telemetry receive the resulting state. A buffered notification
+  that halts does not skip later buffered notifications or finalize
+  completion partway through the batch. No further prompt is dispatched
+  during this drain.
+
+  Notifications arriving after completion may still update a halted
+  agent's state. They do not retroactively change this completion
+  snapshot or rerun the hook.
 
   Runs once per transition to halted. Further halt decisions while the
   agent is already halted do not rerun the hook. After `resume/1`, a new
