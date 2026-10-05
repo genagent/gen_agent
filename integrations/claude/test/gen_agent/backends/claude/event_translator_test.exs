@@ -46,6 +46,24 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
                EventTranslator.translate(event)
     end
 
+    test "preserves the parent tool ID on text and tool-use blocks" do
+      event =
+        stream_event("assistant", %{
+          "parent_tool_use_id" => "parent-1",
+          "message" => %{
+            "content" => [
+              %{"type" => "text", "text" => "reading"},
+              %{"type" => "tool_use", "id" => "call-1", "name" => "Read", "input" => %{}}
+            ]
+          }
+        })
+
+      assert [
+               %Event{kind: :text, data: %{text: "reading", parent_tool_use_id: "parent-1"}},
+               %Event{kind: :tool_use, data: %{parent_tool_use_id: "parent-1"}}
+             ] = EventTranslator.translate(event)
+    end
+
     test "with no text or tool content is filtered out" do
       event = stream_event("assistant", %{"content" => [%{"type" => "image"}]})
       assert EventTranslator.translate(event) == []
@@ -57,6 +75,17 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
       event = stream_event("content_block_delta", %{"delta" => %{"text" => "chunk"}})
 
       assert [%Event{kind: :text, data: %{text: "chunk"}}] =
+               EventTranslator.translate(event)
+    end
+
+    test "preserves the parent tool ID on a text delta" do
+      event =
+        stream_event("content_block_delta", %{
+          "parent_tool_use_id" => "parent-1",
+          "delta" => %{"text" => "chunk"}
+        })
+
+      assert [%Event{kind: :text, data: %{text: "chunk", parent_tool_use_id: "parent-1"}}] =
                EventTranslator.translate(event)
     end
 
@@ -79,6 +108,21 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
       event = stream_event("tool_result", data)
 
       assert [%Event{kind: :tool_result, data: ^data}] = EventTranslator.translate(event)
+    end
+
+    test "preserves the parent tool ID on user tool-result blocks" do
+      event =
+        stream_event("user", %{
+          "parent_tool_use_id" => "parent-1",
+          "message" => %{
+            "content" => [
+              %{"type" => "tool_result", "tool_use_id" => "call-1", "content" => "ok"}
+            ]
+          }
+        })
+
+      assert [%Event{kind: :tool_result, data: %{parent_tool_use_id: "parent-1"}}] =
+               EventTranslator.translate(event)
     end
   end
 
@@ -307,6 +351,73 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
       assert Enum.at(events, 1).data["input"] == %{"path" => "README.md"}
       assert Enum.at(events, 2).data.text == " world"
       assert Enum.at(events, 3).data["tool_use_id"] == "call-1"
+    end
+
+    test "interleaved subagent messages do not reset another parent's text deduplication" do
+      inputs = [
+        stream_event("stream_event", %{
+          "event" => %{
+            "type" => "content_block_delta",
+            "index" => 0,
+            "delta" => %{"type" => "text_delta", "text" => "Hello"}
+          }
+        }),
+        stream_event("assistant", %{
+          "parent_tool_use_id" => "parent-1",
+          "message" => %{
+            "content" => [
+              %{"type" => "tool_use", "id" => "sub-call", "name" => "Read", "input" => %{}}
+            ]
+          }
+        }),
+        stream_event("assistant", %{
+          "message" => %{"content" => [%{"type" => "text", "text" => "Hello world"}]}
+        })
+      ]
+
+      assert [
+               %Event{kind: :text, data: %{text: "Hello"}},
+               %Event{
+                 kind: :tool_use,
+                 data: %{parent_tool_use_id: "parent-1"}
+               },
+               %Event{kind: :text, data: %{text: " world"}}
+             ] = Enum.to_list(EventTranslator.translate_stream(inputs))
+    end
+
+    test "deduplicates text and calls within each parent only" do
+      delta = fn parent ->
+        stream_event("stream_event", %{
+          "parent_tool_use_id" => parent,
+          "event" => %{
+            "type" => "content_block_delta",
+            "index" => 0,
+            "delta" => %{"type" => "text_delta", "text" => "Hi"}
+          }
+        })
+      end
+
+      assistant = fn parent ->
+        stream_event("assistant", %{
+          "parent_tool_use_id" => parent,
+          "message" => %{
+            "content" => [
+              %{"type" => "text", "text" => "Hi"},
+              %{"type" => "tool_use", "id" => "shared-call", "name" => "Read", "input" => %{}}
+            ]
+          }
+        })
+      end
+
+      events =
+        [delta.("parent-1"), delta.("parent-2"), assistant.("parent-1"), assistant.("parent-2")]
+        |> EventTranslator.translate_stream()
+        |> Enum.to_list()
+
+      assert Enum.map(events, & &1.kind) == [:text, :text, :tool_use, :tool_use]
+
+      assert Enum.map(events, & &1.data.parent_tool_use_id) ==
+               ["parent-1", "parent-2", "parent-1", "parent-2"]
     end
   end
 

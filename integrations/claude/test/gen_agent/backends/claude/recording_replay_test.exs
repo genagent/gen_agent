@@ -52,9 +52,8 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
 
       expected_tools = Enum.filter(blocks, &(&1["type"] in ["tool_use", "tool_result"]))
       tools = Enum.filter(events, &(&1.kind in [:tool_use, :tool_result]))
-      # Issue #119: tool payloads lose envelope parent IDs and dedupe without parent scope.
+      # These recordings contain no parent-bearing tool blocks, so their raw payloads stay intact.
       assert Enum.map(tools, & &1.data) == expected_tools
-      assert Enum.all?(tools, &(not Map.has_key?(&1.data, "parent_tool_use_id")))
 
       texts = events |> Enum.filter(&(&1.kind == :text)) |> Enum.map(& &1.data.text)
 
@@ -126,7 +125,7 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
     nested = Enum.filter(parsed, &(&1.data["parent_tool_use_id"] != nil))
     assert nested != []
     assert Enum.all?(nested, &(&1.type == "user"))
-    # Issue #119: parent-bearing user text is filtered; the Agent call and return survive.
+    # User text is filtered; the Agent call and return survive.
     assert nested |> EventTranslator.translate_stream() |> Enum.to_list() == []
     assert Enum.find(events, &(&1.kind == :tool_use)).data["name"] == "Agent"
   end

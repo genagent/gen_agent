@@ -12,6 +12,10 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
   zero or more `GenAgent.Event` values. Callers stream events through
   `translate/1` (typically via `Stream.flat_map/2`).
 
+  When an envelope has a `parent_tool_use_id`, normalized text and tool
+  events carry it as `:parent_tool_use_id` in their data. This lets callers
+  attribute interleaved subagent output to the tool invocation that started it.
+
   ## Translation rules
 
     * `"system"` -- filtered out (no GenAgent events).
@@ -50,33 +54,39 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
   def translate(%StreamEvent{type: "system"}), do: []
 
   def translate(%StreamEvent{type: "assistant", data: data}) do
-    content_events(data)
+    data |> content_events() |> with_parent(data)
   end
 
   def translate(%StreamEvent{type: "user", data: data}) do
-    data |> content_events() |> Enum.filter(&(&1.kind == :tool_result))
+    data |> content_events() |> Enum.filter(&(&1.kind == :tool_result)) |> with_parent(data)
   end
 
-  def translate(%StreamEvent{type: "stream_event"} = event) do
+  def translate(%StreamEvent{type: "stream_event", data: data} = event) do
     case StreamEvent.partial_message(event) do
-      {:block_delta, _index, {:text, text}} -> [Event.new(:text, %{text: text})]
-      _ -> []
+      {:block_delta, _index, {:text, text}} ->
+        with_parent([Event.new(:text, %{text: text})], data)
+
+      _ ->
+        []
     end
   end
 
-  def translate(%StreamEvent{type: "content_block_delta", data: %{"delta" => %{"text" => text}}})
+  def translate(%StreamEvent{
+        type: "content_block_delta",
+        data: %{"delta" => %{"text" => text}} = data
+      })
       when is_binary(text) do
-    [Event.new(:text, %{text: text})]
+    with_parent([Event.new(:text, %{text: text})], data)
   end
 
   def translate(%StreamEvent{type: "content_block_delta"}), do: []
 
   def translate(%StreamEvent{type: "tool_use", data: data}) do
-    [Event.new(:tool_use, data)]
+    with_parent([Event.new(:tool_use, data)], data)
   end
 
   def translate(%StreamEvent{type: "tool_result", data: data}) do
-    [Event.new(:tool_result, data)]
+    with_parent([Event.new(:tool_result, data)], data)
   end
 
   def translate(%StreamEvent{type: "result", data: data}), do: result_events(data)
@@ -136,28 +146,35 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
   """
   @spec translate_stream(Enumerable.t()) :: Enumerable.t()
   def translate_stream(stream) do
-    initial = %{partial_text: "", seen_calls: MapSet.new()}
+    initial = %{partial_text_by_parent: %{}, seen_calls: MapSet.new()}
 
     Stream.transform(stream, initial, fn raw, state ->
       events = translate(raw)
+      parent = parent_tool_use_id(raw.data)
+      partial_text = Map.get(state.partial_text_by_parent, parent, "")
 
       events =
-        if raw.type == "assistant" and state.partial_text != "" do
-          drop_streamed_text(events, state.partial_text)
+        if raw.type == "assistant" and partial_text != "" do
+          drop_streamed_text(events, partial_text)
         else
           events
         end
 
       {events, seen_calls} = dedupe_calls(events, state.seen_calls)
 
-      partial_text =
+      partial_text_by_parent =
         case StreamEvent.partial_message(raw) do
-          {:block_delta, _index, {:text, text}} -> state.partial_text <> text
-          _ when raw.type == "assistant" -> ""
-          _ -> state.partial_text
+          {:block_delta, _index, {:text, text}} ->
+            Map.put(state.partial_text_by_parent, parent, partial_text <> text)
+
+          _ when raw.type == "assistant" ->
+            Map.delete(state.partial_text_by_parent, parent)
+
+          _ ->
+            state.partial_text_by_parent
         end
 
-      {events, %{partial_text: partial_text, seen_calls: seen_calls}}
+      {events, %{partial_text_by_parent: partial_text_by_parent, seen_calls: seen_calls}}
     end)
   end
 
@@ -193,6 +210,19 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
 
   defp text_event(""), do: []
   defp text_event(text), do: [Event.new(:text, %{text: text})]
+
+  defp with_parent(events, data) do
+    case parent_tool_use_id(data) do
+      nil -> events
+      parent -> Enum.map(events, &%{&1 | data: Map.put(&1.data, :parent_tool_use_id, parent)})
+    end
+  end
+
+  defp parent_tool_use_id(%{"parent_tool_use_id" => parent})
+       when is_binary(parent) and parent != "",
+       do: parent
+
+  defp parent_tool_use_id(_), do: nil
 
   defp error_message(data) do
     nonempty_string(data["result"]) ||
@@ -236,7 +266,7 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
 
             String.starts_with?(text, remaining) ->
               rest = String.replace_prefix(text, remaining, "")
-              {kept ++ text_event(rest), ""}
+              {kept ++ text_suffix_event(event, rest), ""}
 
             true ->
               {kept ++ [event], ""}
@@ -249,10 +279,13 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
     kept
   end
 
+  defp text_suffix_event(_event, ""), do: []
+  defp text_suffix_event(event, text), do: [%{event | data: %{event.data | text: text}}]
+
   defp dedupe_calls(events, seen_calls) do
     Enum.reduce(events, {[], seen_calls}, fn event, {kept, seen} ->
       id = event.data["id"] || event.data["tool_use_id"]
-      key = {event.kind, id}
+      key = {event.kind, event.data[:parent_tool_use_id], id}
 
       if event.kind in [:tool_use, :tool_result] and is_binary(id) and MapSet.member?(seen, key) do
         {kept, seen}
