@@ -90,9 +90,9 @@ and `finish_error`.
   CONTINUES -- subsequent events still get their callbacks called
   so their state mutations aren't lost. This matters for audit/log
   style callbacks that shouldn't be silenced by an unrelated halt.
-- `safely_handle_event/3` wraps user callback in try/rescue so a
-  buggy `handle_event/2` doesn't crash the drain loop and lose
-  subsequent events.
+- `safely_handle_event/4` catches exceptions and rejects malformed
+  callback returns, retaining the previous state so a buggy
+  `handle_event/2` does not crash the drain loop or lose subsequent events.
 
 ## Related
 

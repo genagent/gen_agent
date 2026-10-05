@@ -278,6 +278,10 @@ defmodule GenAgent do
 
   @doc """
   A prompt->response turn completed successfully. Decide what to do next.
+
+  An exception or malformed return stops the agent. Use one of the three
+  `t:callback_return/0` shapes; in particular, a follow-up prompt must be a
+  binary.
   """
   @callback handle_response(
               request_ref :: reference(),
@@ -303,7 +307,9 @@ defmodule GenAgent do
   Returns the same value shape as `c:handle_response/3`, so the callback
   can go idle, self-chain a follow-up prompt (useful for retry), or halt
   the agent. The default implementation provided by `use GenAgent` is
-  `{:noreply, state}`.
+  `{:noreply, state}`. Exceptions and malformed returns are logged and
+  treated as `{:noreply, previous_state}` so the original turn error still
+  reaches its caller.
   """
   @callback handle_error(
               request_ref :: reference(),
@@ -313,6 +319,10 @@ defmodule GenAgent do
 
   @doc """
   An external event arrived via `notify/2`. Optional.
+
+  Exceptions and malformed returns are logged and treated as
+  `{:noreply, previous_state}`, including when the notification was buffered
+  during a turn.
   """
   @callback handle_event(event :: term(), agent_state()) :: callback_return()
 
@@ -355,7 +365,8 @@ defmodule GenAgent do
 
   Crashes are wrapped: the agent halts with
   `{:pre_run_crashed, exception}` and `c:terminate_agent/2` is called
-  with that reason.
+  with that reason. A malformed return stops the agent with
+  `:pre_run_invalid`.
 
   Default implementation: `{:ok, state}`.
   """
@@ -384,9 +395,13 @@ defmodule GenAgent do
   telemetry carries both the original and rewritten prompt plus a
   `rewritten: true` flag so the transformation is traceable.
 
-  Crashes are caught: the turn is skipped, a warning is logged, and
-  the agent returns to `:idle`. Users who want strict crash semantics
-  can re-raise from inside a different callback.
+  Crashes are caught: an external ask or tell is skipped with
+  `:pre_turn_skipped` and the agent returns to `:idle`. For prompts generated
+  by `handle_response/3` or `handle_event/2`, a skip, crash, or malformed
+  return emits prompt-error telemetry and calls `c:handle_error/3` so the
+  agent can retry or halt. Crashes use `{:pre_turn_crashed, exception_kind}`
+  on that generated-prompt path. Immediate generated-prompt retries are
+  paced so agent calls remain responsive even if the hook keeps rejecting.
 
   Default implementation: `{:ok, prompt, state}`.
   """
@@ -411,7 +426,7 @@ defmodule GenAgent do
   For pure observation, prefer telemetry handlers on
   `[:gen_agent, :prompt, :stop]`.
 
-  Crashes are caught: a warning is logged and the server continues
+  Crashes or malformed returns are logged and the server continues
   with the transition the decision callback chose. The turn is not
   unwound.
 

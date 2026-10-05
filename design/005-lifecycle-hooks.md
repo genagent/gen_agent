@@ -116,6 +116,13 @@ observe, mutate state, rewrite the prompt (for augmentation /
 templating), or veto the turn entirely with `:skip` (drops the prompt,
 returns to `:idle`) or `:halt` (terminal).
 
+For an ask or tell, a skipped or crashing hook rejects that request.
+For a self-chain or event-generated prompt, a skip, crash, or malformed
+return emits prompt-error telemetry and calls `handle_error/3`, so an
+autonomous workflow can retry or halt rather than silently stopping.
+Immediate generated-prompt retries are paced so other agent calls can
+be handled even if the hook keeps rejecting.
+
 Use cases: rate limiting (sleep + return `{:ok, prompt, state}`), prompt
 augmentation (append context), gating (check a budget, `:halt` if
 exceeded).
@@ -289,13 +296,14 @@ Server wraps each hook in try/rescue/catch. Per-hook behavior:
 | Hook        | On raise                                                                 |
 |-------------|--------------------------------------------------------------------------|
 | `pre_run`   | halt agent; `terminate_agent` called with `{:pre_run_crashed, exception}` |
-| `pre_turn`  | skip the turn, log warning, back to `:idle`                              |
-| `post_turn` | log warning, continue with the transition the decision callback chose   |
+| `pre_turn`  | reject the turn and log; generated prompts also call `handle_error/3`    |
+| `post_turn` | log and continue with the transition the decision callback chose         |
 | `post_run`  | log warning, terminate normally                                          |
 
 Rationale: `pre_run` is the only hook whose failure breaks a core
 invariant (no workspace = no sensible agent). `pre_turn` failing
-should be recoverable (fix the rate limiter, next prompt works).
+should be recoverable; generated prompts need an error callback because
+there may be no next external prompt.
 `post_turn` / `post_run` are side effects; their failure must not
 unwind a successful turn or keep a dead agent alive.
 
