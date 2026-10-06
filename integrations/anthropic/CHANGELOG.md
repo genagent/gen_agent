@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.4.1...gen_agent_anthropic-v0.4.2) (2026-10-06)
+
+
+### Bug Fixes
+
+* **deps:** test HTTP adapters with published core 0.7 ([#406](https://github.com/genagent/gen_agent/issues/406)) ([ce57268](https://github.com/genagent/gen_agent/commit/ce57268f57d6893b10d5bdf501e022953a85a8d6))
+
 ## [0.4.1](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.4.0...gen_agent_anthropic-v0.4.1) (2026-10-03)
 
 
