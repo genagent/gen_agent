@@ -56,6 +56,7 @@ defmodule GenAgent.Server do
       :max_pending_notifications,
       :max_pending_notification_bytes,
       halted: false,
+      halt_pending: false,
       draining: false,
       # Flipped to true after `c:GenAgent.pre_run/1` has run successfully.
       # No prompts are dispatched before pre_run completes -- since pre_run
@@ -756,6 +757,7 @@ defmodule GenAgent.Server do
           %{request_ref: ref} -> ref
         end,
       halted: data.halted,
+      halt_pending: data.halt_pending,
       draining: data.draining,
       agent_state: data.agent_state
     }
@@ -782,6 +784,7 @@ defmodule GenAgent.Server do
     snapshot = %{
       phase: state,
       halted: data.halted,
+      halt_pending: data.halt_pending,
       draining: data.draining,
       pending_prompts: :queue.len(data.mailbox),
       pending_notifications: :queue.len(data.pending_events),
@@ -867,12 +870,26 @@ defmodule GenAgent.Server do
   end
 
   # ---------------------------------------------------------------------------
-  # resume -- unhalt and re-trigger drain
+  # halt/resume -- pause dispatch without interrupting the active turn
   # ---------------------------------------------------------------------------
+
+  defp dispatch_event(:cast, :halt, :idle, %Data{draining: false} = data) do
+    {:keep_state, transition_to_halted(data)}
+  end
+
+  defp dispatch_event(:cast, :halt, :processing, %Data{draining: false} = data) do
+    {:keep_state, %{data | halt_pending: true}}
+  end
+
+  defp dispatch_event(:cast, :halt, _state, _data), do: :keep_state_and_data
 
   defp dispatch_event(:cast, :resume, :idle, %Data{halted: true} = data) do
     data = %{data | halted: false}
     {:keep_state, data, [{:next_event, :internal, :process_next}]}
+  end
+
+  defp dispatch_event(:cast, :resume, :processing, %Data{halt_pending: true} = data) do
+    {:keep_state, %{data | halt_pending: false}}
   end
 
   defp dispatch_event(:cast, :resume, _state, _data), do: :keep_state_and_data
@@ -2148,7 +2165,7 @@ defmodule GenAgent.Server do
 
   defp transition_to_halted(%Data{} = data) do
     # Release doomed tells before notification-generated prompts use capacity.
-    data = fail_halt_aware_queued(%{data | halted: true})
+    data = fail_halt_aware_queued(%{data | halted: true, halt_pending: false})
     data = drain_pending_events(data)
     :ok = safely_post_run(data.name, data.agent_module, data.agent_state)
     emit_halted(data.name, data.agent_state)
@@ -2302,11 +2319,16 @@ defmodule GenAgent.Server do
 
     case transition do
       :noreply ->
-        data = drain_pending_events(data)
+        data = data |> drain_pending_events() |> finish_external_halt()
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       {:prompt, next_prompt} ->
-        data = drain_pending_events(accept_self_chain(data, next_prompt))
+        data =
+          data
+          |> accept_self_chain(next_prompt)
+          |> drain_pending_events()
+          |> finish_external_halt()
+
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       :halt ->
@@ -2364,12 +2386,12 @@ defmodule GenAgent.Server do
 
     case transition do
       :noreply ->
-        data = drain_pending_events(data)
+        data = data |> drain_pending_events() |> finish_external_halt()
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       {:prompt, next_prompt} ->
         data = if owned_retry?, do: data, else: accept_self_chain(data, next_prompt)
-        data = drain_pending_events(data)
+        data = data |> drain_pending_events() |> finish_external_halt()
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       :halt ->
@@ -2377,6 +2399,11 @@ defmodule GenAgent.Server do
         {:next_state, :idle, data, with_process_next(reply_actions)}
     end
   end
+
+  defp finish_external_halt(%Data{halt_pending: true, draining: false} = data),
+    do: transition_to_halted(data)
+
+  defp finish_external_halt(%Data{} = data), do: %{data | halt_pending: false}
 
   defp record_or_enqueue_error(%Data{draining: false} = data, current, reason, {:prompt, prompt})
        when reason != :interrupted do

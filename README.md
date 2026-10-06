@@ -182,7 +182,9 @@ idle <--- handle_response --- processing (turn done)
   Useful for multi-step work that the agent drives itself.
 - **Halting** -- `handle_response/3`, `handle_error/3`, `handle_event/2`,
   or `pre_turn/2` can return `{:halt, state}` to go idle but freeze the
-  mailbox. A halted agent ignores queued prompts until `GenAgent.resume/1`
+  mailbox. `GenAgent.halt/1` requests the same pause externally, after
+  any active turn completes. A halted agent ignores queued prompts until
+  `GenAgent.resume/1`
   is called.
 - **Watchdog** -- a `:state_timeout` kills any turn that runs longer than
   the `:watchdog_ms` deadline (positive integer milliseconds or `:infinity`,
@@ -204,7 +206,7 @@ around the agent's full run:
 | `pre_run/1` | Once, after `init_agent/1`, before the first turn | Slow async setup: clone a repo, create a worktree, fetch secrets |
 | `pre_turn/2` | Before each prompt dispatch | Prompt augmentation, rate limiting, `:skip`/`:halt` as a gate |
 | `post_turn/3` | After each turn, post-decision | State-mutating side effects: commit per turn, record usage |
-| `post_run/1` | On clean `{:halt, state}` from a decision callback or `pre_turn/2` | Completion actions: open a PR, post a summary |
+| `post_run/1` | On clean `{:halt, state}` from a decision callback or `pre_turn/2`, or an external `halt/1` | Completion actions: open a PR, post a summary |
 
 All four are optional with default no-op implementations. The guiding
 principle is **telemetry first, callbacks for state mutation** --
@@ -257,6 +259,7 @@ See the [Backends guide](guides/backends.md) for backend implementation rules an
 | `interrupt/1` | Cancel an in-flight turn. |
 | `interrupt_request/3` | Acknowledge cancellation only if the active request ref matches. |
 | `cancel_request/3` | Remove a queued tell by its exact request ref. |
+| `halt/1` | Pause dispatch after the active turn, without stopping the agent. |
 | `resume/1` | Unhalt an agent and drain its mailbox. |
 | `status/2` | Read the agent's current state. |
 | `runtime_snapshot/2` | Read bounded runtime metadata and pending-input counts. |
@@ -272,7 +275,7 @@ must be started explicitly, and its previous state is not restored.
 Callbacks can use `GenAgent.current_name()` in both the agent process and
 the prompt task; no duplicate `agent_name` option is needed.
 
-`runtime_snapshot/2` reports the coordinator's current phase, halted and draining
+`runtime_snapshot/2` reports the coordinator's current phase, halted, pending-halt and draining
 flag, queued prompt and buffered notification counts, pending self-chain,
 and active request ref, origin and elapsed/watchdog time. It contains no
 prompt, callback state, backend session or event payload. It is a
