@@ -587,7 +587,8 @@ defmodule GenAgent do
   (default `5_000`), or `:infinity`. A callback still running when this
   timeout expires is killed and termination callbacks cannot run. Choose a
   value longer than any bounded callback or cleanup operation; `:infinity`
-  can block the owning supervisor indefinitely.
+  can block the owning supervisor indefinitely. An explicit `nil` uses the
+  default.
 
   Invalid values for the watchdog and the capture and pending limits make
   `start_agent/2` return `{:error, {:init_failed, :error, ArgumentError}}`.
