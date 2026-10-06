@@ -304,10 +304,51 @@ jobs:
       - name: Build docs
         run: mix docs --warnings-as-errors
 
+  publish-toolchain:
+    name: ${{ matrix.package }} / Elixir 1.19 / OTP 27
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - integrations/claude
+          - integrations/codex
+          - integrations/anthropic
+          - integrations/openai
+          - extensions/ensemble
+    defaults:
+      run:
+        working-directory: ${{ matrix.package }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.19"
+          otp-version: "27"
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Audit dependencies
+        run: mix hex.audit
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Run tests
+        run: mix test
+
+      - name: Build docs
+        run: mix docs --warnings-as-errors
+
+      - name: Build Hex archive
+        run: mix hex.build
+
   packaging:
     name: Hex archives
     runs-on: ubuntu-latest
-    needs: [test, docs, packages]
+    needs: [test, docs, packages, publish-toolchain]
     steps:
       - uses: actions/checkout@v7
 
