@@ -7,6 +7,10 @@ shipped strategies in
 and callback-level reference implementations you can adapt in your own
 application.
 
+The copyable callback modules are compiled in the core test suite, and
+guide-level tests exercise their behavior with local stub backends. They
+do not require a Claude or Codex account to run.
+
 An Ensemble session owns its sub-agents under one strategy. Add
 `{:gen_agent_ensemble, "~> 0.1.4"}` to your dependencies and start a
 session with `GenAgentEnsemble.start_link(name: ..., strategy: ...,
