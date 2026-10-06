@@ -82,11 +82,34 @@ defmodule GenAgent.ServerTest do
   defp interrupt(pid), do: :gen_statem.cast(pid, :interrupt)
   defp resume(pid), do: :gen_statem.cast(pid, :resume)
 
+  defp wait_for_queue(pid, expected, attempts \\ 50)
+  defp wait_for_queue(_pid, _expected, 0), do: flunk("request was not queued")
+
+  defp wait_for_queue(pid, expected, attempts) do
+    if status(pid).queued == expected do
+      :ok
+    else
+      Process.sleep(10)
+      wait_for_queue(pid, expected, attempts - 1)
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Startup
   # ---------------------------------------------------------------------------
 
   describe "startup" do
+    test "rejects a duplicate registered name without replacing the first agent" do
+      name = {:duplicate, make_ref()}
+      opts = [name: name, backend: Mock]
+      {:ok, pid} = GenAgent.start_agent(TestAgent, opts)
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+      assert {:error, {:already_started, ^pid}} = GenAgent.start_agent(TestAgent, opts)
+      assert GenAgent.whereis(name) == pid
+      assert Process.alive?(pid)
+    end
+
     test "attributes init_agent errors and malformed returns to the agent module" do
       for {return, expected} <- [
             {{:error, :refused}, :refused},
@@ -155,23 +178,21 @@ defmodule GenAgent.ServerTest do
 
     test "queues a second ask while one is in-flight and replies to both",
          %{task_sup: task_sup} do
-      slow_first = fn _prompt ->
-        Stream.resource(
-          fn -> :start end,
-          fn
-            :start -> {[Event.new(:result, %{text: "first"})], :done}
-            :done -> {:halt, :done}
-          end,
-          fn _ -> :ok end
-        )
-      end
-
-      pid = start_server(task_sup, [slow_first, result_events("second")])
+      pid =
+        start_server(task_sup, [
+          Mock.gate(:first, result_events("first")),
+          result_events("second")
+        ])
 
       task1 = Task.async(fn -> ask(pid, "a") end)
-      # Give task1 a chance to enter :processing.
-      Process.sleep(20)
+      assert_receive {:mock_blocked, :first, turn_pid}
       task2 = Task.async(fn -> ask(pid, "b") end)
+
+      wait_for_queue(pid, 1)
+      assert status(pid).state == :processing
+      assert Task.yield(task2, 0) == nil
+
+      send(turn_pid, {:mock_release, :first})
 
       assert {:ok, r1} = Task.await(task1)
       assert {:ok, r2} = Task.await(task2)
@@ -321,6 +342,29 @@ defmodule GenAgent.ServerTest do
   # ---------------------------------------------------------------------------
 
   describe "halt + resume" do
+    test "an ask submitted while halted waits until resume", %{task_sup: task_sup} do
+      responder = fn
+        _ref, %{text: "halt"}, state -> {:halt, state}
+        _ref, _response, state -> {:noreply, state}
+      end
+
+      pid =
+        start_server(task_sup, [result_events("halt"), result_events("after")],
+          responder: responder
+        )
+
+      assert {:ok, %{text: "halt"}} = ask(pid, "first")
+      assert status(pid).halted
+
+      queued = Task.async(fn -> ask(pid, "second") end)
+      wait_for_queue(pid, 1)
+      assert Task.yield(queued, 0) == nil
+
+      resume(pid)
+      assert {:ok, %{text: "after"}} = Task.await(queued)
+      refute status(pid).halted
+    end
+
     test "halt freezes the mailbox until resume", %{task_sup: task_sup} do
       responder = fn
         _ref, %{text: "halt me"}, state -> {:halt, state}
@@ -613,26 +657,19 @@ defmodule GenAgent.ServerTest do
   # ---------------------------------------------------------------------------
 
   describe "watchdog" do
-    test "fires after the configured timeout and delivers :timeout",
+    test "kills the active task and delivers :timeout",
          %{task_sup: task_sup} do
-      slow = fn _ ->
-        Stream.resource(
-          fn -> :s end,
-          fn
-            :s ->
-              Process.sleep(1_000)
-              {[Event.new(:result, %{text: "never"})], :d}
-
-            :d ->
-              {:halt, :d}
-          end,
-          fn _ -> :ok end
+      pid =
+        start_server(task_sup, [Mock.gate(:watchdog, result_events("never"))], [],
+          watchdog_ms: 500
         )
-      end
 
-      pid = start_server(task_sup, [slow], [], watchdog_ms: 50)
+      caller = Task.async(fn -> ask(pid, "go") end)
+      assert_receive {:mock_blocked, :watchdog, turn_pid}
+      monitor = Process.monitor(turn_pid)
 
-      assert {:error, :timeout} = ask(pid, "go")
+      assert {:error, :timeout} = Task.await(caller)
+      assert_receive {:DOWN, ^monitor, :process, ^turn_pid, :killed}
       assert status(pid).state == :idle
     end
   end

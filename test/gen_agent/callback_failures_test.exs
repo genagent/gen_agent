@@ -81,6 +81,26 @@ defmodule GenAgent.CallbackFailuresTest do
     assert log =~ "handle_event/2 returned unexpected shape"
   end
 
+  test "handle_event exceptions are logged and leave the prior state intact", %{
+    task_sup: task_sup
+  } do
+    {pid, name} =
+      start_server(task_sup, [],
+        init_opts: [event_handler: fn _event, _state -> raise("secret event") end]
+      )
+
+    log =
+      capture_log(fn ->
+        :gen_statem.cast(pid, {:notify, :note})
+        assert %{agent_state: %{events: []}} = status(pid)
+      end)
+
+    assert Process.alive?(pid)
+    assert log =~ "#{name}"
+    assert log =~ "handle_event/2 raised"
+    refute log =~ "secret event"
+  end
+
   test "malformed handle_event return during drain does not lose an ask reply", %{
     task_sup: task_sup
   } do
@@ -220,6 +240,23 @@ defmodule GenAgent.CallbackFailuresTest do
     assert log =~ "gen_agent="
     assert log =~ "gen_agent_module="
     refute log =~ "secret callback state"
+  end
+
+  test "post_run exceptions do not block the halt transition", %{task_sup: task_sup} do
+    {pid, name} =
+      start_server(task_sup, [[Event.new(:result, %{text: "done"})]],
+        init_opts: [
+          responder: fn _ref, _response, state -> {:halt, state} end,
+          post_run: fn _state -> raise("secret post run") end
+        ]
+      )
+
+    log = capture_log(fn -> assert {:ok, %{text: "done"}} = ask(pid) end)
+
+    assert status(pid).halted
+    assert log =~ name
+    assert log =~ "post_run/1 raised"
+    refute log =~ "secret post run"
   end
 
   test "termination callback failures are logged with redacted stack frames", %{
