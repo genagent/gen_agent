@@ -247,6 +247,7 @@ See the [Backends guide](guides/backends.md) for backend implementation rules an
 | Function | What it does |
 |---|---|
 | `start_agent/2` | Start an agent under the supervision tree. |
+| `current_name/0` | Read the registered name from an agent callback. |
 | `ask/3` | Synchronous prompt. Blocks until the turn finishes. |
 | `tell/3` | Async prompt. Returns a ref for `poll/3`. |
 | `tell_with_completion/4` | Async prompt with a request-scoped completion message. |
@@ -268,6 +269,8 @@ See the [Backends guide](guides/backends.md) for backend implementation rules an
 Names resolve through a `Registry`, so callers address agents by name
 (any term). Agents use `restart: :temporary`: a crashed or stopped agent
 must be started explicitly, and its previous state is not restored.
+Callbacks can use `GenAgent.current_name()` in both the agent process and
+the prompt task; no duplicate `agent_name` option is needed.
 
 `runtime_snapshot/2` reports the coordinator's current phase, halted and draining
 flag, queued prompt and buffered notification counts, pending self-chain,

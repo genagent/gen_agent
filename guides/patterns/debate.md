@@ -99,7 +99,7 @@ defmodule Debate.Agent do
   @impl true
   def init_agent(opts) do
     state = %State{
-      name: Keyword.fetch!(opts, :agent_name),
+      name: GenAgent.current_name(),
       opponent: Keyword.fetch!(opts, :opponent),
       role: Keyword.fetch!(opts, :role),
       topic: Keyword.fetch!(opts, :topic),
@@ -208,10 +208,10 @@ defmodule Debate do
     ]
 
     {:ok, _} = GenAgent.start_agent(Agent,
-      [name: name_a, agent_name: name_a, opponent: name_b, role: role_a] ++ shared)
+      [name: name_a, opponent: name_b, role: role_a] ++ shared)
 
     {:ok, _} = GenAgent.start_agent(Agent,
-      [name: name_b, agent_name: name_b, opponent: name_a, role: role_b] ++ shared)
+      [name: name_b, opponent: name_a, role: role_b] ++ shared)
 
     # Kick off agent A with the opening statement.
     {:ok, _ref} = GenAgent.tell(name_a,

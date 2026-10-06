@@ -108,7 +108,7 @@ defmodule Fanout.Coordinator do
     state = %State{
       topic: Keyword.fetch!(opts, :topic),
       max_workers: Keyword.get(opts, :max_workers, 3),
-      coordinator_name: Keyword.fetch!(opts, :coordinator_name),
+      coordinator_name: GenAgent.current_name(),
       worker_backend: Keyword.fetch!(opts, :worker_backend),
       worker_opts: Keyword.get(opts, :worker_opts, []),
       collect_timeout: Keyword.get(opts, :collect_timeout, 5_000),
@@ -287,7 +287,7 @@ defmodule Fanout.Worker do
   @impl true
   def init_agent(opts) do
     state = %State{
-      name: Keyword.fetch!(opts, :worker_name),
+      name: GenAgent.current_name(),
       coordinator: Keyword.fetch!(opts, :coordinator),
       run: Keyword.fetch!(opts, :run)
     }
@@ -352,7 +352,6 @@ defmodule Fanout.Watcher do
           Keyword.merge(c.worker_opts,
             name: name,
             backend: c.worker_backend,
-            worker_name: name,
             coordinator: c.coordinator_name,
             run: c.run
           )
@@ -489,8 +488,7 @@ name = "coord-#{System.unique_integer([:positive])}"
   worker_backend: MyBackend,
   collect_timeout: 5_000,
   topic: "why do octopuses have three hearts?",
-  max_workers: 3,
-  coordinator_name: name
+  max_workers: 3
 )
 
 # Kick off the planning turn.
