@@ -536,9 +536,30 @@ These commands check the root package. Run `scripts/quality.sh` to validate
 all six packages; see the [contributor guide](https://github.com/genagent/gen_agent/blob/main/CONTRIBUTING.md)
 for setup and release conventions.
 
-The test suite uses an in-process `GenAgent.Backends.Mock` (in
-`test/support/`) that lets you script backend responses without any
-external process. See `test/gen_agent/server_test.exs` for examples.
+`GenAgent.Backends.Mock` ships with the core package so applications can
+test their own agent callbacks without a provider account or CLI. Return
+`scripts:` from `init_agent/1`, one script per turn:
+
+```elixir
+def init_agent(opts) do
+  events = [GenAgent.Event.new(:result, %{text: "done"})]
+  {:ok, [scripts: [events]], %{observer: Keyword.fetch!(opts, :observer)}}
+end
+
+{:ok, _pid} = GenAgent.start_agent(MyAgent,
+  name: "test-worker",
+  backend: GenAgent.Backends.Mock,
+  observer: self()
+)
+
+assert {:ok, response} = GenAgent.ask("test-worker", "work")
+assert response.text == "done"
+assert GenAgent.Backends.Mock.history("test-worker") == ["work"]
+```
+
+Use `GenAgent.Backends.Mock.gate/2` when a test needs to inspect an active
+turn or queue before releasing it. See the module documentation for the
+release message and supported script shapes.
 
 ## License
 
