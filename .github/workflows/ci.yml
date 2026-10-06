@@ -343,7 +343,11 @@ jobs:
         run: mix docs --warnings-as-errors
 
       - name: Build Hex archive
-        run: mix hex.build
+        env:
+          GEN_AGENT_HEX: "1"
+        run: |
+          mix deps.get
+          mix hex.build
 
   packaging:
     name: Hex archives
