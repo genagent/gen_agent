@@ -7,6 +7,7 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
   """
 
   use ExUnit.Case, async: true
+  @compile {:no_warn_undefined, GenAgent}
 
   @moduletag capture_log: true
 
@@ -110,7 +111,7 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
                       [%{content: "two"}, %{content: "reply to two"}, %{content: "three"}]}
 
       if function_exported?(GenAgent, :reset_session, 1) do
-        assert :ok = apply(GenAgent, :reset_session, [name])
+        assert :ok = GenAgent.reset_session(name)
         assert {:ok, _} = GenAgent.ask(name, "four")
         assert_receive {:request_messages, [%{content: "four"}]}
         assert length(GenAgent.status(name).agent_state.responses) == 4
