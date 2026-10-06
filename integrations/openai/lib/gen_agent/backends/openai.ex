@@ -271,6 +271,12 @@ defmodule GenAgent.Backends.OpenAI do
 
   def update_session(%__MODULE__{} = session, _data), do: session
 
+  if {:reset_session, 1} in GenAgent.Backend.behaviour_info(:callbacks),
+    do: @impl(GenAgent.Backend)
+
+  def reset_session(%__MODULE__{} = session),
+    do: {:ok, %{session | previous_response_id: nil}}
+
   @impl GenAgent.Backend
   def terminate_session(%__MODULE__{}), do: :ok
 

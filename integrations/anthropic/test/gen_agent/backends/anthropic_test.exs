@@ -168,6 +168,9 @@ defmodule GenAgent.Backends.AnthropicTest do
 
       assert {:error, {:invalid_option, :cache, "yes"}} =
                Anthropic.start_session(cache: "yes")
+
+      assert {:error, {:invalid_option, :max_history_turns, -1}} =
+               Anthropic.start_session(max_history_turns: -1)
     end
 
     test "warns for legacy names and rejects conflicting prompt values" do

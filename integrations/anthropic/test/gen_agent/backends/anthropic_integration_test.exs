@@ -20,7 +20,7 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
     @impl true
     def init_agent(opts) do
       backend_opts =
-        Keyword.take(opts, [:api_key, :model, :max_tokens, :system, :http_fn])
+        Keyword.take(opts, [:api_key, :model, :max_tokens, :system, :max_history_turns, :http_fn])
 
       {:ok, backend_opts, %State{test_pid: opts[:test_pid]}}
     end
@@ -87,6 +87,34 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
   end
 
   describe "round trip through GenAgent.ask/2" do
+    test "bounds completed history and resets it in place" do
+      observer = self()
+
+      http_fn = fn request ->
+        send(observer, {:request_messages, request.body.messages})
+        prompt = List.last(request.body.messages).content
+        {:ok, api_response("reply to #{prompt}")}
+      end
+
+      name = start_anthropic_agent(http_fn, max_history_turns: 1)
+      assert {:ok, _} = GenAgent.ask(name, "one")
+      assert {:ok, _} = GenAgent.ask(name, "two")
+      assert {:ok, _} = GenAgent.ask(name, "three")
+
+      assert_receive {:request_messages, [%{content: "one"}]}
+
+      assert_receive {:request_messages,
+                      [%{content: "one"}, %{content: "reply to one"}, %{content: "two"}]}
+
+      assert_receive {:request_messages,
+                      [%{content: "two"}, %{content: "reply to two"}, %{content: "three"}]}
+
+      assert :ok = GenAgent.reset_session(name)
+      assert {:ok, _} = GenAgent.ask(name, "four")
+      assert_receive {:request_messages, [%{content: "four"}]}
+      assert length(GenAgent.status(name).agent_state.responses) == 4
+    end
+
     test "assembles a Response from the faked API call" do
       http_fn = fn _req -> {:ok, api_response("hello from the API")} end
 

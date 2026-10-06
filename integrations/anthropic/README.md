@@ -100,6 +100,13 @@ only whitespace, the unanswered user message is removed. Refusals and
 incomplete responses also leave prior history intact, so a later turn does
 not resend a failed prompt.
 
+Set `:max_history_turns` to a nonnegative integer to retain only that many
+completed user/assistant pairs for the next request. The default,
+`:infinity`, keeps the full history; `0` makes each turn independent. You can
+also call `GenAgent.reset_session(name)` between turns to clear the history
+without restarting the agent or discarding its application state. Reset
+returns `{:error, :busy}` during an active turn.
+
 `end_turn` and `stop_sequence` are successful stops. Their terminal event
 data includes `:stop_reason` and, when the API provides it,
 `:stop_details`; callers can read them through `response.terminal.data`.
@@ -127,6 +134,8 @@ because this text-only backend cannot complete a paused or tool-use turn.
   cost without a later hit. `Response.usage` includes
   `:cache_creation_input_tokens` and `:cache_read_input_tokens` when the API
   reports them; total input is their sum plus `:input_tokens`.
+- `:max_history_turns` -- completed user/assistant pairs retained between
+  turns. Defaults to `:infinity`; `0` retains none.
 - `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
   to `60_000`. The 60-second default can be short for long reasoning turns.
 - `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults
