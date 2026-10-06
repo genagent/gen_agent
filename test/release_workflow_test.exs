@@ -90,6 +90,29 @@ defmodule GenAgent.ReleaseWorkflowTest do
     end
   end
 
+  test "Release Please only follows successful CI for current main" do
+    release = File.read!(Path.join(@root, ".github/workflows/release.yml"))
+    [trigger, _jobs] = String.split(release, "jobs:\n", parts: 2)
+    verify = job_block(release, "verify-ci")
+    release_please = job_block(release, "release-please")
+
+    assert trigger =~ "workflow_run:"
+    assert trigger =~ "workflows: [CI]"
+    assert trigger =~ "types: [completed]"
+    assert trigger =~ "branches: [main]"
+    refute trigger =~ "  push:"
+    refute trigger =~ "workflow_dispatch:"
+
+    assert verify =~ "github.event.workflow_run.event == 'push'"
+    assert verify =~ "github.event.workflow_run.conclusion == 'success'"
+    assert verify =~ "github.event.workflow_run.head_repository.full_name == github.repository"
+    assert verify =~ "github.event.workflow_run.head_sha"
+    assert verify =~ "git/ref/heads/main"
+    assert verify =~ ~s(if [[ "$current_sha" == "$PASSED_SHA" ]])
+    assert release_please =~ "needs: verify-ci"
+    assert release_please =~ "needs.verify-ci.outputs.current == 'true'"
+  end
+
   defp index!(text, needle) do
     {index, _length} = :binary.match(text, needle)
     index
