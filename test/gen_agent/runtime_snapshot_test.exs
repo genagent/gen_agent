@@ -108,7 +108,7 @@ defmodule GenAgent.RuntimeSnapshotTest do
 
     if snapshot.current_request do
       assert Map.keys(snapshot.current_request) |> Enum.sort() ==
-               [:elapsed_ms, :origin, :ref, :watchdog_ms]
+               [:attempt, :elapsed_ms, :origin, :ref, :watchdog_ms]
     end
   end
 

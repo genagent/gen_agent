@@ -275,6 +275,11 @@ defmodule GenAgent.Server do
       {_ref, {:ask, from}, _prompt} -> :gen_statem.reply(from, outcome)
       _other -> :ok
     end)
+
+    case data.self_chain do
+      {:retry, _prompt, {:ask, from}, _ref, _attempt} -> :gen_statem.reply(from, outcome)
+      _other -> :ok
+    end
   end
 
   @impl :gen_statem
@@ -415,6 +420,15 @@ defmodule GenAgent.Server do
 
   defp dispatch_event(:internal, :process_next, :idle, %Data{halted: true}) do
     :keep_state_and_data
+  end
+
+  defp dispatch_event(
+         :internal,
+         :process_next,
+         :idle,
+         %Data{self_chain: {:retry, prompt, kind, ref, attempt}} = data
+       ) do
+    try_dispatch(%{data | self_chain: nil}, ref, kind, prompt, attempt)
   end
 
   defp dispatch_event(:internal, :process_next, :idle, %Data{self_chain: prompt} = data)
@@ -665,7 +679,7 @@ defmodule GenAgent.Server do
         match?(%{request_ref: ^ref}, data.current_request) ->
           {:ok, :pending}
 
-        in_mailbox?(data.mailbox, ref) ->
+        match?({:retry, _, _, ^ref, _}, data.self_chain) or in_mailbox?(data.mailbox, ref) ->
           {:ok, :pending}
 
         true ->
@@ -758,6 +772,7 @@ defmodule GenAgent.Server do
           %{
             ref: current.request_ref,
             origin: request_origin(current.kind),
+            attempt: current.attempt,
             elapsed_ms: max(System.monotonic_time(:millisecond) - current.started_at, 0),
             watchdog_ms: data.watchdog_ms
           }
@@ -1094,6 +1109,17 @@ defmodule GenAgent.Server do
         {data, Enum.reverse(reply, replies)}
       end)
 
+    {data, queued_replies} =
+      case data.self_chain do
+        {:retry, _prompt, kind, ref, attempt} ->
+          emit_turn_rejected(data.name, ref, kind, :draining, attempt)
+          {data, reply} = record_error(data, %{request_ref: ref, kind: kind}, :draining)
+          {data, Enum.reverse(reply, replies)}
+
+        _other ->
+          {data, replies}
+      end
+
     Enum.each(Map.keys(data.ask_monitors), &Process.demonitor(&1, [:flush]))
 
     {%{
@@ -1106,7 +1132,7 @@ defmodule GenAgent.Server do
          pending_notification_bytes: 0,
          self_chain: nil,
          stream_recipients: %{}
-     }, Enum.reverse(replies)}
+     }, Enum.reverse(queued_replies)}
   end
 
   defp registered_here?(name) do
@@ -1126,7 +1152,15 @@ defmodule GenAgent.Server do
       finish_error(%{data | agent_state: new_agent_state}, current, current.checkpoint_error)
     else
       new_session = restore_checkpoint(data.backend, new_session, current)
-      emit_prompt_stop(data.name, current.request_ref, response.duration_ms, new_agent_state)
+
+      emit_prompt_stop(
+        data.name,
+        current.request_ref,
+        response.duration_ms,
+        new_agent_state,
+        current.attempt
+      )
+
       emit_turn_stop(data.name, current)
       finish_turn(data, current, response, new_session, new_agent_state)
     end
@@ -1154,6 +1188,11 @@ defmodule GenAgent.Server do
     end
   end
 
+  defp cancel_queued_tell(%Data{self_chain: {:retry, _, kind, ref, attempt}} = data, from, ref)
+       when kind == :tell or elem(kind, 0) == :tell do
+    deliver_queued_tell_cancel(%{data | self_chain: nil}, from, ref, kind, attempt)
+  end
+
   defp cancel_queued_tell(data, from, ref) do
     case find_queued_entry(data.mailbox, ref) do
       {^ref, :tell, prompt} ->
@@ -1177,6 +1216,10 @@ defmodule GenAgent.Server do
 
   defp finish_queued_tell_cancel(data, from, ref, kind, prompt) do
     data = remove_queued_entry(data, ref, prompt)
+    deliver_queued_tell_cancel(data, from, ref, kind)
+  end
+
+  defp deliver_queued_tell_cancel(data, from, ref, kind, attempt \\ 1) do
     data = %{data | stream_recipients: Map.delete(data.stream_recipients, ref)}
     data = store_tell_result(data, ref, {:error, :cancelled})
 
@@ -1184,7 +1227,7 @@ defmodule GenAgent.Server do
       send(recipient, {:gen_agent, :completion, data.name, ref, {:error, :cancelled}})
     end
 
-    emit_turn_cancelled(data.name, ref, kind, :caller_cancelled)
+    emit_turn_cancelled(data.name, ref, kind, :caller_cancelled, attempt)
     {:keep_state, data, [{:reply, from, {:ok, :cancelled}}]}
   end
 
@@ -1299,12 +1342,18 @@ defmodule GenAgent.Server do
 
   # Self-chaining has one reserved slot so a callback can make progress even
   # when callers have filled the FIFO. It still obeys the prompt byte cap.
+  defp self_chain_prompt({:retry, prompt, _, _, _}), do: prompt
+  defp self_chain_prompt(prompt), do: prompt
+
   defp enqueue_self_chain(data, prompt) do
-    incoming_bytes = :erlang.external_size(prompt)
+    incoming_bytes = :erlang.external_size(self_chain_prompt(prompt))
     pending_count = if(is_nil(data.self_chain), do: 0, else: 1)
 
     pending_bytes =
-      if(is_nil(data.self_chain), do: 0, else: :erlang.external_size(data.self_chain))
+      if(is_nil(data.self_chain),
+        do: 0,
+        else: :erlang.external_size(self_chain_prompt(data.self_chain))
+      )
 
     case overload_reason(
            :self_chain,
@@ -1429,7 +1478,7 @@ defmodule GenAgent.Server do
   #   {:halt, state}       -- same as skip, plus transition_to_halted.
   #
   # Returns a gen_statem handle_event result tuple.
-  defp try_dispatch(%Data{} = data, request_ref, kind, prompt) do
+  defp try_dispatch(%Data{} = data, request_ref, kind, prompt, attempt \\ 1) do
     # Take the stream recipient out of the map here so every outcome below
     # (dispatch, skip, halt, rejection) leaves nothing behind.
     {stream_to, recipients} = Map.pop(data.stream_recipients, request_ref)
@@ -1439,25 +1488,25 @@ defmodule GenAgent.Server do
       {:returned, {:ok, new_prompt, new_state}} when is_binary(new_prompt) ->
         data = %{data | agent_state: new_state}
 
-        case dispatch(data, request_ref, kind, new_prompt, prompt, stream_to) do
+        case dispatch(data, request_ref, kind, new_prompt, prompt, stream_to, attempt) do
           {:ok, data} ->
             {:next_state, :processing, data}
 
           {:error, reason} ->
-            reject_dispatch(data, request_ref, kind, reason)
+            reject_dispatch(data, request_ref, kind, reason, attempt)
         end
 
       {:returned, {:skip, new_state}} ->
         pseudo_current = %{request_ref: request_ref, kind: kind}
         data = %{data | agent_state: new_state}
-        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_skipped)
+        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_skipped, attempt)
         {data, reply_actions} = reject_pre_turn(data, pseudo_current, :pre_turn_skipped)
         {:keep_state, data, after_pre_turn_rejection(data, kind, reply_actions)}
 
       {:returned, {:halt, new_state}} ->
         pseudo_current = %{request_ref: request_ref, kind: kind}
         data = %{data | agent_state: new_state}
-        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_halted)
+        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_halted, attempt)
         {data, reply_actions} = record_error(data, pseudo_current, :pre_turn_halted)
         data = transition_to_halted(data)
         {:keep_state, data, with_process_next(reply_actions)}
@@ -1465,18 +1514,17 @@ defmodule GenAgent.Server do
       {:crashed, failure_kind} ->
         pseudo_current = %{request_ref: request_ref, kind: kind}
         reason = pre_turn_crash_reason(kind, failure_kind)
-        emit_turn_rejected(data.name, request_ref, kind, reason)
+        emit_turn_rejected(data.name, request_ref, kind, reason, attempt)
         {data, reply_actions} = reject_pre_turn(data, pseudo_current, reason)
         {:keep_state, data, after_pre_turn_rejection(data, kind, reply_actions)}
 
       {:returned, _other} ->
-        # Malformed pre_turn return -- treat as skip with a warning.
         Logger.warning(
           "GenAgent #{inspect(data.name)} #{inspect(data.agent_module)}.pre_turn/2 returned unexpected shape"
         )
 
         pseudo_current = %{request_ref: request_ref, kind: kind}
-        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_invalid)
+        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_invalid, attempt)
         {data, reply_actions} = reject_pre_turn(data, pseudo_current, :pre_turn_invalid)
         {:keep_state, data, after_pre_turn_rejection(data, kind, reply_actions)}
     end
@@ -1484,8 +1532,6 @@ defmodule GenAgent.Server do
 
   defp after_pre_turn_rejection(data, kind, reply_actions)
        when kind in [:self_chain, :event] and not is_nil(data.self_chain) and not data.halted do
-    # A small delay bounds a permanently failing retry loop, and the info
-    # message gives existing callers a chance to enter the agent mailbox.
     Process.send_after(self(), :retry_generated_prompt, 10)
     reply_actions
   end
@@ -1496,8 +1542,6 @@ defmodule GenAgent.Server do
   defp pre_turn_crash_reason(kind, failure_kind) when kind in [:self_chain, :event],
     do: {:pre_turn_crashed, failure_kind}
 
-  # Preserve the existing external caller response while distinguishing an
-  # autonomous prompt failure for handle_error/3 and telemetry consumers.
   defp pre_turn_crash_reason(_kind, _failure_kind), do: :pre_turn_skipped
 
   defp reject_pre_turn(data, %{kind: kind, request_ref: ref}, reason)
@@ -1507,7 +1551,7 @@ defmodule GenAgent.Server do
   defp reject_pre_turn(data, pseudo_current, reason),
     do: record_error(data, pseudo_current, reason)
 
-  defp dispatch(%Data{} = data, request_ref, kind, prompt, original_prompt, stream_to) do
+  defp dispatch(%Data{} = data, request_ref, kind, prompt, original_prompt, stream_to, attempt) do
     backend = data.backend
     backend_session = data.backend_session
     module = data.agent_module
@@ -1548,11 +1592,12 @@ defmodule GenAgent.Server do
     case task do
       {:ok, task} ->
         started_at = System.monotonic_time(:millisecond)
-        emit_prompt_start(data.name, request_ref, prompt, original_prompt, agent_state)
-        emit_turn_start(data.name, request_ref, kind)
+        emit_prompt_start(data.name, request_ref, prompt, original_prompt, agent_state, attempt)
+        emit_turn_start(data.name, request_ref, kind, attempt)
 
         current = %{
           request_ref: request_ref,
+          attempt: attempt,
           task_ref: task.ref,
           task_pid: task.pid,
           kind: kind,
@@ -1571,9 +1616,9 @@ defmodule GenAgent.Server do
     end
   end
 
-  defp reject_dispatch(%Data{} = data, request_ref, kind, reason) do
-    emit_turn_rejected(data.name, request_ref, kind, reason)
-    emit_prompt_error(data.name, request_ref, reason, data.agent_state)
+  defp reject_dispatch(%Data{} = data, request_ref, kind, reason, attempt) do
+    emit_turn_rejected(data.name, request_ref, kind, reason, attempt)
+    emit_prompt_error(data.name, request_ref, reason, data.agent_state, nil, attempt)
 
     # A retry cannot start until the caller restores the task supervisor.
     # Discard an immediate retry from handle_error/3 to avoid an internal loop.
@@ -2110,6 +2155,17 @@ defmodule GenAgent.Server do
   end
 
   defp fail_halt_aware_queued(%Data{} = data) do
+    data =
+      case data.self_chain do
+        {:retry, _, {:tell, _, :fail} = kind, ref, attempt} ->
+          emit_turn_rejected(data.name, ref, kind, :halted, attempt)
+          {data, []} = record_error(data, %{kind: kind, request_ref: ref}, :halted)
+          %{data | self_chain: nil, stream_recipients: Map.delete(data.stream_recipients, ref)}
+
+        _ ->
+          data
+      end
+
     {remaining, data} =
       Enum.reduce(:queue.to_list(data.mailbox), {[], data}, fn
         {ref, {:tell, recipient, :fail} = kind, prompt}, {remaining, data} ->
@@ -2267,7 +2323,16 @@ defmodule GenAgent.Server do
 
   defp finish_error(data, current, reason) do
     duration_ms = max(System.monotonic_time(:millisecond) - current.started_at, 0)
-    emit_prompt_error(data.name, current.request_ref, reason, data.agent_state, duration_ms)
+
+    emit_prompt_error(
+      data.name,
+      current.request_ref,
+      reason,
+      data.agent_state,
+      duration_ms,
+      current.attempt
+    )
+
     emit_turn_error(data.name, current, reason, duration_ms)
 
     decision =
@@ -2290,10 +2355,11 @@ defmodule GenAgent.Server do
         decision_state
       )
 
-    {data, reply_actions} = record_error(data, current, reason)
-
     data = retire_task(data, current)
     data = %{data | agent_state: hooked_state, current_request: nil}
+
+    {data, reply_actions, owned_retry?} =
+      record_or_enqueue_error(data, current, reason, transition)
 
     case transition do
       :noreply ->
@@ -2301,13 +2367,44 @@ defmodule GenAgent.Server do
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       {:prompt, next_prompt} ->
-        data = drain_pending_events(accept_self_chain(data, next_prompt))
+        data = if owned_retry?, do: data, else: accept_self_chain(data, next_prompt)
+        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       :halt ->
         data = transition_to_halted(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
     end
+  end
+
+  defp record_or_enqueue_error(%Data{draining: false} = data, current, reason, {:prompt, prompt})
+       when reason != :interrupted do
+    if request_origin(current.kind) in [:ask, :tell] do
+      retry = {:retry, prompt, current.kind, current.request_ref, current.attempt + 1}
+
+      case enqueue_self_chain(data, retry) do
+        {:ok, queued} ->
+          {retain_retry_stream_recipient(queued, current), [], true}
+
+        {:error, overload} ->
+          {data, actions} = record_error(data, current, reason)
+          {reject_generated_prompt(data, make_ref(), overload), actions, true}
+      end
+    else
+      {data, actions} = record_error(data, current, reason)
+      {data, actions, false}
+    end
+  end
+
+  defp record_or_enqueue_error(data, current, reason, _transition) do
+    {data, actions} = record_error(data, current, reason)
+    {data, actions, false}
+  end
+
+  defp retain_retry_stream_recipient(data, %{stream_to: nil}), do: data
+
+  defp retain_retry_stream_recipient(data, %{stream_to: stream_to, request_ref: ref}) do
+    %{data | stream_recipients: Map.put(data.stream_recipients, ref, stream_to)}
   end
 
   defp safely_handle_error(name, module, ref, reason, state) do
@@ -2466,12 +2563,13 @@ defmodule GenAgent.Server do
   # Telemetry
   # ---------------------------------------------------------------------------
 
-  defp emit_prompt_start(name, ref, prompt, original_prompt, agent_state) do
+  defp emit_prompt_start(name, ref, prompt, original_prompt, agent_state, attempt) do
     rewritten = not is_nil(original_prompt) and original_prompt != prompt
 
     :telemetry.execute([:gen_agent, :prompt, :start], %{system_time: System.system_time()}, %{
       agent: name,
       ref: ref,
+      attempt: attempt,
       prompt: prompt,
       original_prompt: original_prompt || prompt,
       rewritten: rewritten,
@@ -2479,15 +2577,16 @@ defmodule GenAgent.Server do
     })
   end
 
-  defp emit_prompt_stop(name, ref, duration_ms, agent_state) do
+  defp emit_prompt_stop(name, ref, duration_ms, agent_state, attempt) do
     :telemetry.execute([:gen_agent, :prompt, :stop], %{duration: duration_ms}, %{
       agent: name,
       ref: ref,
+      attempt: attempt,
       agent_state: agent_state
     })
   end
 
-  defp emit_prompt_error(name, ref, reason, agent_state, duration_ms \\ nil) do
+  defp emit_prompt_error(name, ref, reason, agent_state, duration_ms \\ nil, attempt \\ 1) do
     measurements = %{system_time: System.system_time()}
 
     measurements =
@@ -2496,15 +2595,17 @@ defmodule GenAgent.Server do
     :telemetry.execute([:gen_agent, :prompt, :error], measurements, %{
       agent: name,
       ref: ref,
+      attempt: attempt,
       reason: reason,
       agent_state: agent_state
     })
   end
 
-  defp emit_turn_start(name, ref, kind) do
+  defp emit_turn_start(name, ref, kind, attempt) do
     :telemetry.execute([:gen_agent, :turn, :start], %{system_time: System.system_time()}, %{
       agent: name,
       ref: ref,
+      attempt: attempt,
       origin: request_origin(kind)
     })
   end
@@ -2515,6 +2616,7 @@ defmodule GenAgent.Server do
     :telemetry.execute([:gen_agent, :turn, :stop], %{duration_ms: duration_ms}, %{
       agent: name,
       ref: current.request_ref,
+      attempt: current.attempt,
       origin: request_origin(current.kind)
     })
   end
@@ -2523,24 +2625,27 @@ defmodule GenAgent.Server do
     :telemetry.execute([:gen_agent, :turn, :error], %{duration_ms: duration_ms}, %{
       agent: name,
       ref: current.request_ref,
+      attempt: current.attempt,
       origin: request_origin(current.kind),
       reason_kind: turn_error_kind(reason)
     })
   end
 
-  defp emit_turn_rejected(name, ref, kind, reason_kind) do
+  defp emit_turn_rejected(name, ref, kind, reason_kind, attempt \\ 1) do
     :telemetry.execute([:gen_agent, :turn, :rejected], %{system_time: System.system_time()}, %{
       agent: name,
       ref: ref,
+      attempt: attempt,
       origin: request_origin(kind),
       reason_kind: reason_kind
     })
   end
 
-  defp emit_turn_cancelled(name, ref, kind, reason_kind) do
+  defp emit_turn_cancelled(name, ref, kind, reason_kind, attempt \\ 1) do
     :telemetry.execute([:gen_agent, :turn, :cancelled], %{system_time: System.system_time()}, %{
       agent: name,
       ref: ref,
+      attempt: attempt,
       origin: request_origin(kind),
       reason_kind: reason_kind
     })

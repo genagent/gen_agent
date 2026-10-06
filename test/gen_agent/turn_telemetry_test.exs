@@ -141,7 +141,7 @@ defmodule GenAgent.TurnTelemetryTest do
 
     assert_receive {:telemetry, [:gen_agent, :turn, :start], %{system_time: time}, start}, 500
     assert is_integer(time)
-    assert start == %{agent: name, ref: start.ref, origin: :ask}
+    assert start == %{agent: name, attempt: 1, ref: start.ref, origin: :ask}
     assert is_reference(start.ref)
 
     assert_receive {:telemetry, [:gen_agent, :turn, :stop], %{duration_ms: duration}, stop}, 500
@@ -169,6 +169,7 @@ defmodule GenAgent.TurnTelemetryTest do
 
     assert meta == %{
              agent: name,
+             attempt: 1,
              ref: ref,
              origin: :ask,
              reason_kind: :backend_or_callback_error
@@ -190,7 +191,7 @@ defmodule GenAgent.TurnTelemetryTest do
                    500
 
     assert duration >= 40
-    assert meta == %{agent: name, ref: ref, origin: :ask, reason_kind: :timeout}
+    assert meta == %{agent: name, attempt: 1, ref: ref, origin: :ask, reason_kind: :timeout}
   end
 
   test "task crashes report a bounded reason kind", %{name: name, task_sup: task_sup} do
@@ -202,7 +203,7 @@ defmodule GenAgent.TurnTelemetryTest do
                    500
 
     assert duration >= 0
-    assert meta == %{agent: name, ref: ref, origin: :ask, reason_kind: :task_crashed}
+    assert meta == %{agent: name, attempt: 1, ref: ref, origin: :ask, reason_kind: :task_crashed}
   end
 
   test "interrupts settle a started turn with an error", %{name: name, task_sup: task_sup} do
@@ -226,7 +227,7 @@ defmodule GenAgent.TurnTelemetryTest do
                    500
 
     assert duration >= 0
-    assert meta == %{agent: name, ref: ref, origin: :ask, reason_kind: :interrupted}
+    assert meta == %{agent: name, attempt: 1, ref: ref, origin: :ask, reason_kind: :interrupted}
   end
 
   test "queued prompt overload is rejected without starting that ref",
@@ -250,6 +251,7 @@ defmodule GenAgent.TurnTelemetryTest do
 
     assert rejected == %{
              agent: name,
+             attempt: 1,
              ref: rejected.ref,
              origin: :ask,
              reason_kind: :overloaded
@@ -278,6 +280,7 @@ defmodule GenAgent.TurnTelemetryTest do
 
     assert meta == %{
              agent: name,
+             attempt: 1,
              ref: meta.ref,
              origin: :ask,
              reason_kind: :pre_turn_skipped

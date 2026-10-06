@@ -82,6 +82,447 @@ defmodule GenAgent.ServerTest do
   defp interrupt(pid), do: :gen_statem.cast(pid, :interrupt)
   defp resume(pid), do: :gen_statem.cast(pid, :resume)
 
+  # These scripts block only the backend task; calls to the server are barriers.
+  defp retry_gate(owner, label, events) do
+    fn prompt ->
+      send(owner, {:retry_gate, label, self(), prompt})
+
+      receive do
+        :release -> events
+      end
+    end
+  end
+
+  defp observe_retry_telemetry(pid) do
+    id = make_ref()
+
+    events =
+      for family <- [:turn, :prompt],
+          phase <- [:start, :stop, :error, :cancelled],
+          do: [:gen_agent, family, phase]
+
+    :ok =
+      :telemetry.attach_many(
+        id,
+        events,
+        fn event, _, meta, owner ->
+          if self() == pid, do: send(owner, {:retry_telemetry, event, meta})
+        end,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(id) end)
+  end
+
+  describe "caller-owned retries" do
+    test "stream recipients receive events from every attempt before final completion", %{
+      task_sup: sup
+    } do
+      pid =
+        start_server(
+          sup,
+          [
+            [Event.new(:text, %{text: "first"}), Event.new(:error, %{reason: :again})],
+            [Event.new(:text, %{text: "second"}), Event.new(:result, %{text: "done"})]
+          ],
+          error_handler: fn _, _, s -> {:prompt, "retry", s} end
+        )
+
+      {:ok, ref} = :gen_statem.call(pid, {:tell_with_completion, "go", self(), :queue, self()})
+
+      assert_receive {:gen_agent, :event, "test", ^ref,
+                      %Event{kind: :text, data: %{text: "first"}}}
+
+      assert_receive {:gen_agent, :event, "test", ^ref, %Event{kind: :error}}
+
+      assert_receive {:gen_agent, :event, "test", ^ref,
+                      %Event{kind: :text, data: %{text: "second"}}}
+
+      assert_receive {:gen_agent, :event, "test", ^ref, %Event{kind: :result}}
+      assert_receive {:gen_agent, :completion, "test", ^ref, {:ok, %{text: "done"}}}
+      refute_receive {:gen_agent, :completion, "test", ^ref, _}
+    end
+
+    test "draining a halted pending retry settles its original caller", %{task_sup: sup} do
+      for mode <- [:ask, :tell] do
+        observer = self()
+
+        pid =
+          start_server(sup, [retry_gate(self(), :first, [Event.new(:error, %{reason: :again})])],
+            error_handler: fn _, _, s -> {:prompt, "retry", s} end,
+            event_handler: fn :halt, s ->
+              send(observer, :halted)
+              {:halt, s}
+            end
+          )
+
+        caller = if mode == :ask, do: Task.async(fn -> ask(pid, "go") end)
+
+        ref =
+          if mode == :tell do
+            {:ok, ref} = :gen_statem.call(pid, {:tell_with_completion, "go", self(), :queue})
+            ref
+          end
+
+        assert_receive {:retry_gate, :first, task, _}
+        notify(pid, :halt)
+        send(task, :release)
+        assert_receive :halted
+        assert status(pid).halted
+        assert :gen_statem.call(pid, :runtime_snapshot).self_chain_pending
+        assert :ok = :gen_statem.call(pid, :drain)
+
+        if caller do
+          assert {:error, :draining} = Task.await(caller)
+        else
+          assert_receive {:gen_agent, :completion, "test", ^ref, {:error, :draining}}
+        end
+
+        refute_receive {:retry_gate, _, _, _}
+      end
+    end
+
+    test "orderly stop replies to an ask waiting in a halted retry", %{task_sup: sup} do
+      observer = self()
+
+      pid =
+        start_server(sup, [retry_gate(self(), :first, [Event.new(:error, %{reason: :again})])],
+          error_handler: fn _, _, s -> {:prompt, "retry", s} end,
+          event_handler: fn :halt, s ->
+            send(observer, :halted)
+            {:halt, s}
+          end
+        )
+
+      caller = Task.async(fn -> ask(pid, "go") end)
+      assert_receive {:retry_gate, :first, task, _}
+      notify(pid, :halt)
+      send(task, :release)
+      assert_receive :halted
+      assert status(pid).halted
+      assert :gen_statem.call(pid, :runtime_snapshot).self_chain_pending
+
+      assert :ok = :gen_statem.stop(pid, :normal, 1_000)
+      assert {:error, {:agent_terminated, :normal}} = Task.await(caller)
+    end
+
+    test "tell stays pending and completion is delivered exactly once", %{task_sup: sup} do
+      for completion? <- [false, true] do
+        pid =
+          start_server(sup, [{:error, :first}, retry_gate(self(), :retry, result_events("done"))],
+            error_handler: fn _, _, s -> {:prompt, "retry", s} end
+          )
+
+        observe_retry_telemetry(pid)
+
+        {:ok, ref} =
+          if completion?,
+            do: :gen_statem.call(pid, {:tell_with_completion, "go", self(), :queue}),
+            else: tell(pid, "go")
+
+        assert_receive {:retry_gate, :retry, task, "retry"}
+        assert {:ok, :pending} = poll(pid, ref)
+        assert status(pid).current_request == ref
+
+        assert %{current_request: %{ref: ^ref, attempt: 2, origin: :tell}} =
+                 :gen_statem.call(pid, :runtime_snapshot)
+
+        refute_receive {:gen_agent, :completion, _, ^ref, _}
+        send(task, :release)
+        assert_receive {:retry_telemetry, [:gen_agent, :turn, :stop], %{ref: ^ref, attempt: 2}}
+        assert {:ok, :completed, %{text: "done"}} = poll(pid, ref)
+
+        if completion?,
+          do: assert_receive({:gen_agent, :completion, "test", ^ref, {:ok, %{text: "done"}}})
+
+        refute_receive {:gen_agent, :completion, _, ^ref, _}
+      end
+    end
+
+    test "repeated attempts keep ref and origin, post_turn runs for every failure", %{
+      task_sup: sup
+    } do
+      pid =
+        start_server(sup, [{:error, :one}, {:error, :two}, result_events("done")],
+          notify_pid: self(),
+          error_handler: fn _, _, s -> {:prompt, "retry", s} end
+        )
+
+      observe_retry_telemetry(pid)
+      assert {:ok, %{text: "done"}} = ask(pid, "go")
+      assert_receive {:test_agent, :handle_error, {ref, :one}}
+      assert_receive {:test_agent, :handle_error, {^ref, :two}}
+
+      for {attempt, terminal} <- [{1, :error}, {2, :error}, {3, :stop}],
+          family <- [:turn, :prompt] do
+        assert_receive {:retry_telemetry, [:gen_agent, ^family, :start],
+                        %{ref: ^ref, attempt: ^attempt}}
+
+        assert_receive {:retry_telemetry, [:gen_agent, ^family, ^terminal],
+                        %{ref: ^ref, attempt: ^attempt}}
+      end
+
+      for reason <- [:one, :two] do
+        assert_receive {:test_agent, :post_turn, {{:error, ^reason}, ^ref}}
+      end
+
+      assert Enum.all?(status(pid).agent_state.responses, fn {r, _} -> r == ref end)
+    end
+
+    test "exhaustion or halt delivers the last error", %{task_sup: sup} do
+      for decision <- [:noreply, :halt] do
+        pid =
+          start_server(sup, [{:error, :one}, {:error, :last}],
+            error_handler: fn _, _, s ->
+              if length(s.errors) == 1, do: {:prompt, "retry", s}, else: {decision, s}
+            end
+          )
+
+        assert {:error, :last} = ask(pid, "go")
+        assert status(pid).halted == (decision == :halt)
+      end
+    end
+
+    test "retry takes priority over queued asks and preserves FIFO", %{task_sup: sup} do
+      pid =
+        start_server(
+          sup,
+          [
+            retry_gate(self(), :first, [Event.new(:error, %{reason: :again})]),
+            retry_gate(self(), :retry, result_events("retried")),
+            result_events("second"),
+            result_events("third")
+          ],
+          error_handler: fn _, _, s -> {:prompt, "retry", s} end
+        )
+
+      first = Task.async(fn -> ask(pid, "first") end)
+      assert_receive {:retry_gate, :first, task, _}
+      # Explicit call messages from one process guarantee mailbox admission order.
+      second = make_ref()
+      third = make_ref()
+      send(pid, {:"$gen_call", {self(), second}, {:ask, "second"}})
+      send(pid, {:"$gen_call", {self(), third}, {:ask, "third"}})
+      assert status(pid).queued == 2
+      send(task, :release)
+      assert_receive {:retry_gate, :retry, retry, _}
+      assert status(pid).queued == 2
+      send(retry, :release)
+      assert {:ok, %{text: "retried"}} = Task.await(first)
+      assert_receive {^second, {:ok, %{text: "second"}}}
+      assert_receive {^third, {:ok, %{text: "third"}}}
+    end
+
+    test "interrupt ends ownership and recovery is independent", %{task_sup: sup} do
+      pid =
+        start_server(
+          sup,
+          [{:error, :again}, retry_gate(self(), :retry, []), result_events("followup")],
+          error_handler: fn _, _, s -> {:prompt, "retry", s} end
+        )
+
+      observe_retry_telemetry(pid)
+      {:ok, ref} = :gen_statem.call(pid, {:tell_with_completion, "go", self(), :queue})
+      assert_receive {:retry_gate, :retry, _, _}
+      assert {:ok, :accepted} = :gen_statem.call(pid, {:interrupt_request, ref})
+      assert_receive {:gen_agent, :completion, "test", ^ref, {:error, :interrupted}}
+
+      assert_receive {:retry_telemetry, [:gen_agent, :turn, :stop],
+                      %{ref: followup, origin: :self_chain, attempt: 1}}
+
+      refute followup == ref
+      assert {:error, :interrupted} = poll(pid, ref)
+      refute_receive {:gen_agent, :completion, _, ^ref, _}
+    end
+
+    test "watchdog and task crash can retry", %{task_sup: sup} do
+      for failure <- [:timeout, :crash] do
+        script = fn _ ->
+          if failure == :crash, do: Process.exit(self(), :kill)
+
+          receive do
+            :never -> []
+          end
+        end
+
+        pid =
+          start_server(
+            sup,
+            [script, result_events("recovered")],
+            [notify_pid: self(), error_handler: fn _, _, s -> {:prompt, "retry", s} end],
+            watchdog_ms: 50
+          )
+
+        assert {:ok, %{text: "recovered"}} = ask(pid, "go")
+        assert_receive {:test_agent, :handle_error, {_, reason}}
+
+        if failure == :timeout,
+          do: assert(reason == :timeout),
+          else: assert(match?({:task_crashed, _}, reason))
+      end
+    end
+
+    test "halted pending retries resume, fail, or cancel according to ownership", %{task_sup: sup} do
+      for mode <- [:ask, :tell, :queue, :fail, :cancel] do
+        pid =
+          start_server(
+            sup,
+            [
+              retry_gate(self(), :first, [Event.new(:error, %{reason: :again})]),
+              result_events("resumed")
+            ],
+            error_handler: fn _, _, s -> {:prompt, "retry", s} end,
+            event_handler: fn :halt, s -> {:halt, s} end
+          )
+
+        observe_retry_telemetry(pid)
+        caller = if mode == :ask, do: Task.async(fn -> ask(pid, "go") end)
+
+        ref =
+          case mode do
+            :ask ->
+              nil
+
+            :tell ->
+              {:ok, ref} = tell(pid, "go")
+              ref
+
+            _ ->
+              {:ok, ref} =
+                :gen_statem.call(
+                  pid,
+                  {:tell_with_completion, "go", self(),
+                   if(mode == :fail, do: :fail, else: :queue)}
+                )
+
+              ref
+          end
+
+        assert_receive {:retry_gate, :first, task, _}
+        notify(pid, :halt)
+        assert :gen_statem.call(pid, :runtime_snapshot).pending_notifications == 1
+        send(task, :release)
+        assert_receive {:retry_telemetry, [:gen_agent, :turn, :error], _}
+        assert status(pid).halted
+
+        cond do
+          mode == :fail ->
+            assert {:error, :halted} = poll(pid, ref)
+            assert_receive {:gen_agent, :completion, "test", ^ref, {:error, :halted}}
+
+          mode == :cancel ->
+            assert {:ok, :pending} = poll(pid, ref)
+            assert {:ok, :cancelled} = :gen_statem.call(pid, {:cancel_request, ref})
+            assert_receive {:gen_agent, :completion, "test", ^ref, {:error, :cancelled}}
+
+            assert_receive {:retry_telemetry, [:gen_agent, :turn, :cancelled],
+                            %{ref: ^ref, attempt: 2}}
+
+            assert {:ok, :cancelled} = :gen_statem.call(pid, {:cancel_request, ref})
+            refute_receive {:gen_agent, :completion, _, ^ref, _}
+            resume(pid)
+            refute :gen_statem.call(pid, :runtime_snapshot).self_chain_pending
+
+          true ->
+            if ref, do: assert({:ok, :pending} == poll(pid, ref))
+            resume(pid)
+            assert_receive {:retry_telemetry, [:gen_agent, :turn, :stop], %{attempt: 2}}
+
+            if caller,
+              do: assert({:ok, %{text: "resumed"}} = Task.await(caller)),
+              else: assert({:ok, :completed, %{text: "resumed"}} = poll(pid, ref))
+        end
+      end
+    end
+
+    test "retry pre_turn decisions deliver errors to the original caller", %{task_sup: sup} do
+      for {decision, reason} <- [
+            {:skip, :pre_turn_skipped},
+            {:halt, :pre_turn_halted},
+            {:invalid, :pre_turn_invalid}
+          ] do
+        pid =
+          start_server(sup, [{:error, :again}],
+            error_handler: fn _, _, s -> {:prompt, "retry", s} end,
+            pre_turn: fn p, s -> if p == "retry", do: {decision, s}, else: {:ok, p, s} end
+          )
+
+        assert {:error, ^reason} = ask(pid, "go")
+      end
+    end
+
+    test "oversized retry delivers original error and overload recovery is unowned", %{
+      task_sup: sup
+    } do
+      pid =
+        start_server(sup, [{:error, :original}, result_events("recovery")],
+          notify_pid: self(),
+          error_handler: fn
+            _, :original, s -> {:prompt, String.duplicate("x", 100), s}
+            _, {:overloaded, _}, s -> {:prompt, "recover", s}
+          end
+        )
+
+      :sys.replace_state(pid, fn {phase, data} ->
+        {phase, %{data | max_pending_prompt_bytes: 50}}
+      end)
+
+      observe_retry_telemetry(pid)
+      assert {:error, :original} = ask(pid, "go")
+      assert_receive {:test_agent, :handle_error, {ref, :original}}
+      assert_receive {:test_agent, :handle_error, {other, {:overloaded, %{queue: :self_chain}}}}
+      refute ref == other
+      assert_receive {:retry_telemetry, [:gen_agent, :turn, :stop], %{origin: :self_chain}}
+    end
+
+    test "successful response follow-ups remain independent", %{task_sup: sup} do
+      pid =
+        start_server(
+          sup,
+          [result_events("first"), retry_gate(self(), :followup, result_events("second"))],
+          responder: fn _, _, s ->
+            if length(s.responses) == 1, do: {:prompt, "followup", s}, else: {:noreply, s}
+          end
+        )
+
+      observe_retry_telemetry(pid)
+      assert {:ok, %{text: "first"}} = ask(pid, "go")
+      assert_receive {:retry_gate, :followup, task, _}
+
+      assert_receive {:retry_telemetry, [:gen_agent, :turn, :start],
+                      %{origin: :ask, ref: original}}
+
+      assert_receive {:retry_telemetry, [:gen_agent, :turn, :start],
+                      %{origin: :self_chain, ref: other, attempt: 1}}
+
+      refute original == other
+      send(task, :release)
+    end
+
+    test "event turn errors still produce an independent follow-up", %{task_sup: sup} do
+      pid =
+        start_server(sup, [{:error, :event_failed}, result_events("recovered")],
+          event_handler: fn _, s -> {:prompt, "event prompt", s} end,
+          error_handler: fn _, _, s -> {:prompt, "recovery prompt", s} end
+        )
+
+      observe_retry_telemetry(pid)
+      notify(pid, :go)
+
+      assert_receive {:retry_telemetry, [:gen_agent, :turn, :error],
+                      %{ref: event_ref, origin: :event, attempt: 1}}
+
+      assert_receive {:retry_telemetry, [:gen_agent, :turn, :stop],
+                      %{ref: followup_ref, origin: :self_chain, attempt: 1}}
+
+      refute event_ref == followup_ref
+      assert [{^event_ref, :event_failed}] = status(pid).agent_state.errors
+
+      assert [{^followup_ref, %GenAgent.Response{text: "recovered"}}] =
+               status(pid).agent_state.responses
+    end
+  end
+
   defp wait_for_queue(pid, expected, attempts \\ 50)
   defp wait_for_queue(_pid, _expected, 0), do: flunk("request was not queued")
 
@@ -778,7 +1219,7 @@ defmodule GenAgent.ServerTest do
       assert [{_ref, :interrupted}] = status(pid).agent_state.errors
     end
 
-    test "{:prompt, ...} return retries via self-chain", %{task_sup: task_sup} do
+    test "{:prompt, ...} return retries under the original caller", %{task_sup: task_sup} do
       error_handler = fn _ref, :rate_limited, state ->
         {:prompt, "retry after rate limit", state}
       end
@@ -795,11 +1236,7 @@ defmodule GenAgent.ServerTest do
           error_handler: error_handler
         )
 
-      # First turn errors, handle_error triggers retry via self-chain.
-      assert {:error, :rate_limited} = ask(pid, "go")
-
-      # Wait for the self-chained retry to land.
-      Process.sleep(50)
+      assert {:ok, %{text: "succeeded on retry"}} = ask(pid, "go")
 
       s = status(pid)
       assert s.state == :idle

@@ -6,6 +6,12 @@ and `handle_event/2` returns `{:prompt, retry_text, state}` when the
 timer fires. The retry decision lives on agent state: attempt count,
 accumulated errors, and a configurable cap.
 
+This timer-based variant settles the original ask or tell with its first
+error; the later attempt is a new event-origin turn. Read the final result
+from agent state or use a completion channel of your own. If the caller needs
+one final result under its original request reference, use the immediate
+caller-owned variant below.
+
 ## When to reach for this
 
 You expect transient failures (rate limits, network blips,
@@ -208,6 +214,32 @@ do this: the agent is idle during the backoff, so the interrupt is
 ignored and the timer still starts another attempt. `:cancel_retry`
 halts with `phase: :cancelled` and cancels the timer. A timer message
 already in flight is ignored because its token no longer matches.
+
+## Caller-owned retries
+
+When a caller must receive only the final outcome, return
+`{:prompt, retry_prompt, state}` directly from `handle_error/3`. For ask and
+tell requests, GenAgent keeps the original ref across attempts: `ask/3`
+waits, `poll/3` stays pending, and a completion recipient receives one
+message after success or exhaustion. Keep a retry cap in state.
+
+```elixir
+def handle_error(_ref, reason, %State{} = state) do
+  attempts = state.attempts + 1
+  state = %{state | attempts: attempts, errors: state.errors ++ [reason]}
+
+  if attempts < state.max_attempts do
+    {:prompt, "Retry the task: #{state.task}", state}
+  else
+    {:halt, %{state | phase: :failed}}
+  end
+end
+```
+
+This variant dispatches the next attempt promptly, without backoff. Do not
+sleep in the callback: sleeping blocks status, stop, and other callers.
+Use the timer-based variant above when spacing attempts matters more than
+retaining the original request's result.
 
 ## Testing without burning tokens
 

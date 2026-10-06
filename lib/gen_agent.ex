@@ -326,11 +326,21 @@ defmodule GenAgent do
     * The in-flight request was interrupted by `interrupt/1` (`:interrupted`).
 
   Returns the same value shape as `c:handle_response/3`, so the callback
-  can go idle, self-chain a follow-up prompt (useful for retry), or halt
-  the agent. The default implementation provided by `use GenAgent` is
-  `{:noreply, state}`. Exceptions and malformed returns are logged and
-  treated as `{:noreply, previous_state}` so the original turn error still
-  reaches its caller.
+  can go idle, retry with `{:prompt, prompt, state}`, or halt the agent.
+  For ask and tell turns, a retry retains the original request reference and
+  caller: ask waits, poll stays pending, and completion is sent exactly once,
+  with the final outcome. Each failed attempt calls this callback and
+  `c:post_turn/3` again. There is no built-in retry cap; keep a budget in state.
+  The watchdog applies separately to each attempt.
+
+  Interruption ends the caller's request with `:interrupted`; a prompt returned
+  here becomes an independent follow-up. Errors on event and self-chain turns
+  also produce independent follow-ups, as does `c:handle_response/3`.
+  A retry rejected by the prompt byte cap delivers the original error.
+  Pending retries follow queued-work halt and cancellation rules.
+  The default implementation provided by `use GenAgent` is `{:noreply, state}`.
+  Exceptions and malformed returns are logged and treated as
+  `{:noreply, previous_state}` so the original turn error still reaches its caller.
   """
   @callback handle_error(
               request_ref :: reference(),
@@ -755,8 +765,9 @@ defmodule GenAgent do
   @doc """
   Send a synchronous prompt to an agent.
 
-  Blocks until the turn completes and returns `{:ok, response}` or
-  `{:error, reason}`. If the agent is currently processing another
+  Blocks until the logical request completes and returns `{:ok, response}`
+  or `{:error, reason}`. A `handle_error/3` retry keeps the caller waiting
+  and returns only the final attempt's outcome. If the agent is processing another
   prompt, the caller is queued transparently and unblocks when its
   queued turn finishes.
 
@@ -821,8 +832,10 @@ defmodule GenAgent do
   without running turn lifecycle callbacks. `pre_turn/2` skip, halt and
   invalid results deliver their corresponding error without starting a
   turn. Successful and failed turns deliver after their decision and
-  `post_turn/3` callbacks. An interrupt, watchdog timeout or backend
-  failure delivers an error. A crashing `handle_response/3` callback stops
+  `post_turn/3` callbacks. Interruptions deliver an error immediately.
+  A watchdog timeout or backend failure may be retried by `handle_error/3`;
+  the recipient receives only the final success or error under the original
+  ref. A crashing `handle_response/3` callback stops
   the agent before completion; monitor the agent when its death matters.
 
   Delivery is a single BEAM message sent at most once per accepted request.
@@ -852,6 +865,9 @@ defmodule GenAgent do
   independent of `event_retention`: compact mode relays events that the
   retained history omits, and lossless mode does not relay the event it
   rejects for exceeding the capture limits.
+  Caller-owned retries relay each attempt's events under the same request
+  ref, so an intermediate `:error` event can precede later successful events
+  and the single final completion message.
 
   Delivery has no backpressure and is best effort. A dead `stream_to`
   process is ignored. An interrupt or watchdog timeout can drop events
@@ -899,7 +915,8 @@ defmodule GenAgent do
 
   Returns:
 
-    * `{:ok, :pending}` if the request is queued or in-flight.
+    * `{:ok, :pending}` if the request is queued, in-flight, or between
+      caller-owned retry attempts.
     * `{:ok, :completed, response}` if the turn finished successfully.
     * `{:error, reason}` if the turn failed, including `{:error, :cancelled}`
       for a cancelled queued request.
@@ -1073,6 +1090,7 @@ defmodule GenAgent do
             | %{
                 ref: request_ref(),
                 origin: :ask | :tell | :event | :self_chain,
+                attempt: pos_integer(),
                 elapsed_ms: non_neg_integer(),
                 watchdog_ms: non_neg_integer() | :infinity
               }
@@ -1089,7 +1107,8 @@ defmodule GenAgent do
   the agent exits.
   `current_request` is `nil` when idle and otherwise contains the
   volatile request ref, its origin (`:event` and `:self_chain` are
-  callback-origin turns), elapsed monotonic milliseconds since dispatch,
+  callback-origin turns), 1-based attempt number, elapsed monotonic
+  milliseconds since dispatch,
   and the configured watchdog duration. It excludes prompts, caller
   identities, callback state, backend sessions, events, and queued
   payloads. Elapsed time is an observation, not an exact countdown to
