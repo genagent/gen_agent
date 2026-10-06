@@ -46,7 +46,9 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
   """
 
   alias ClaudeWrapper.StreamEvent
+  alias GenAgent.Backend.Error
   alias GenAgent.Event
+  @compile {:no_warn_undefined, Error}
 
   @doc """
   Translate a single `StreamEvent` into zero or more `GenAgent.Event` values.
@@ -106,7 +108,7 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
 
   def translate(%StreamEvent{type: "error", data: data}) do
     reason = data["error"] || data["message"] || :unknown
-    [Event.new(:error, %{reason: reason, data: data})]
+    [Event.new(:error, %{reason: backend_error(reason), data: data})]
   end
 
   def translate(%StreamEvent{}), do: []
@@ -150,7 +152,13 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
       usage: extract_usage(data)
     }
 
-    Event.new(:error, %{reason: drop_nil_values(reason), data: data})
+    Event.new(:error, %{reason: backend_error(drop_nil_values(reason)), data: data})
+  end
+
+  defp backend_error(reason) do
+    if Code.ensure_loaded?(Error),
+      do: Error.normalize(:claude, reason),
+      else: reason
   end
 
   @doc """

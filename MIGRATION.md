@@ -1,5 +1,21 @@
 # Upgrading GenAgent
 
+## Unreleased: common backend errors
+
+The Claude, Codex, Anthropic HTTP, and OpenAI HTTP adapters now pass
+`%GenAgent.Backend.Error{}` to `GenAgent.ask/3`, `poll/3`, and
+`handle_error/3` for backend failures when paired with a core version that
+provides the struct. Match on `kind`, `retryable?`, `status`, or
+`retry_after` instead of a provider-specific tuple, string, or map. The
+original reason remains in `raw`. `retry_after` is the unparsed HTTP header
+value, either seconds or an HTTP date; no automatic retry is performed.
+Core-generated errors such as `:no_terminal_event` keep their existing shape.
+
+Adapters still return their previous error values when paired with an older
+published core that does not provide `GenAgent.Backend.Error`. Applications
+supporting both core generations should handle both shapes until they raise
+their minimum core requirement.
+
 ## Unreleased: caller-owned error retries
 
 `handle_error/3` returning `{:prompt, prompt, state}` now retries an ask or tell

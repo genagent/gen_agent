@@ -3,6 +3,7 @@ defmodule GenAgent.Backends.AnthropicTest do
 
   alias GenAgent.Backends.Anthropic
   alias GenAgent.Event
+  alias GenAgent.Test.BackendErrorAssertions, as: Errors
 
   defp ok_response(text, opts \\ []) do
     fn _req ->
@@ -416,7 +417,7 @@ defmodule GenAgent.Backends.AnthropicTest do
         {:ok, events, returned_session} = Anthropic.prompt(session, "unanswered")
 
         assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
-        assert data.reason == expected_reason
+        Errors.assert_error(data.reason, :anthropic, expected_reason)
         assert data.stop_reason == stop_reason
         assert data.stop_details == %{"type" => "refusal"}
         assert data.text == "partial"
@@ -448,7 +449,8 @@ defmodule GenAgent.Backends.AnthropicTest do
 
       {:ok, session} = Anthropic.start_session(api_key: "sk-test", http_fn: failing)
 
-      assert {:error, {:http_error, 429, _}} = Anthropic.prompt(session, "hi")
+      assert {:error, reason} = Anthropic.prompt(session, "hi")
+      Errors.assert_error(reason, :anthropic, {:http_error, 429, %{"type" => "rate_limit"}})
     end
 
     test "wraps a raising http_fn" do
@@ -456,7 +458,8 @@ defmodule GenAgent.Backends.AnthropicTest do
 
       {:ok, session} = Anthropic.start_session(api_key: "sk-test", http_fn: raising)
 
-      assert {:error, {:http_fn_raised, _}} = Anthropic.prompt(session, "hi")
+      assert {:error, reason} = Anthropic.prompt(session, "hi")
+      Errors.assert_error(reason, :anthropic, {:http_fn_raised, "boom"})
     end
   end
 

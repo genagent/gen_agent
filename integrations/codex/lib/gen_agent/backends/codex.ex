@@ -121,7 +121,9 @@ defmodule GenAgent.Backends.Codex do
   require Logger
 
   alias CodexWrapper.{Config, Exec, ExecResume}
+  alias GenAgent.Backend.Error
   alias GenAgent.Backends.Codex.EventTranslator
+  @compile {:no_warn_undefined, Error}
 
   @config_keys [:binary, :working_dir, :env, :timeout, :idle_timeout_ms]
   @unsupported_resume_keys [:cd, :add_dirs, :search, :ephemeral]
@@ -213,10 +215,16 @@ defmodule GenAgent.Backends.Codex do
         {:ok, stream, session}
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, backend_error(reason)}
     end
   rescue
-    e -> {:error, {:exec_fn_raised, Exception.message(e)}}
+    e -> {:error, backend_error({:exec_fn_raised, Exception.message(e)})}
+  end
+
+  defp backend_error(reason) do
+    if Code.ensure_loaded?(Error),
+      do: Error.normalize(:codex, reason),
+      else: reason
   end
 
   @impl GenAgent.Backend

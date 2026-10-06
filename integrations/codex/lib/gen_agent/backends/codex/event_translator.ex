@@ -87,7 +87,9 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
   """
 
   alias CodexWrapper.JsonLineEvent
+  alias GenAgent.Backend.Error
   alias GenAgent.Event
+  @compile {:no_warn_undefined, Error}
 
   @usage_fields [
     :input_tokens,
@@ -161,7 +163,7 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
       &translate_event/2,
       fn
         %{terminal?: false, last_error: %{reason: reason, data: data}} = state ->
-          {[Event.new(:error, %{reason: reason, data: data})], state}
+          {[Event.new(:error, %{reason: backend_error(reason), data: data})], state}
 
         state ->
           {[], state}
@@ -188,7 +190,9 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
   defp translate_event(%JsonLineEvent{event_type: "turn.failed", data: data}, state) do
     fallback = if state.last_error, do: state.last_error.reason, else: :unknown
     reason = failure_reason(data, fallback)
-    {[Event.new(:error, %{reason: reason, data: data})], %{state | terminal?: true}}
+
+    {[Event.new(:error, %{reason: backend_error(reason), data: data})],
+     %{state | terminal?: true}}
   end
 
   defp translate_event(%JsonLineEvent{event_type: "turn.completed"} = event, state) do
@@ -196,7 +200,7 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
   end
 
   defp translate_event(%CodexWrapper.StreamError{reason: reason}, state) do
-    {[Event.new(:error, %{reason: reason})], %{state | terminal?: true}}
+    {[Event.new(:error, %{reason: backend_error(reason)})], %{state | terminal?: true}}
   end
 
   defp translate_event(
@@ -306,6 +310,12 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
        do: data["message"] || fallback
 
   defp failure_reason(data, fallback), do: data["error"] || data["message"] || fallback
+
+  defp backend_error(reason) do
+    if Code.ensure_loaded?(Error),
+      do: Error.normalize(:codex, reason),
+      else: reason
+  end
 
   # Raw completed total: only well-formed non-negative integer counters.
   defp extract_total(%{"usage" => %{} = usage}) do

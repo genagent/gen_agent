@@ -106,7 +106,7 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
       name = start_codex_agent(fn _, _ -> {:ok, events} end)
 
       if recording == "failure" do
-        reason = Transcripts.failure()
+        reason = Transcripts.expected_error(Transcripts.failure())
         assert {:error, ^reason} = GenAgent.ask(name, recording)
       else
         assert {:ok, response} = GenAgent.ask(name, recording)
@@ -375,9 +375,11 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
 
       name = start_codex_agent(exec_fn, response_text: :final_message)
 
-      assert {:error, "provider failed"} = GenAgent.ask(name, "fail")
+      assert {:error, reason} = GenAgent.ask(name, "fail")
+      assert reason == Transcripts.expected_error("provider failed")
       assert_receive {:exec_call, "fail", nil}
-      assert {:error, "network down"} = GenAgent.ask(name, "dangling")
+      assert {:error, reason} = GenAgent.ask(name, "dangling")
+      assert reason == Transcripts.expected_error("network down")
       assert_receive {:exec_call, "dangling", "t-failed"}
       assert {:error, :no_terminal_event} = GenAgent.ask(name, "truncated")
       assert {:ok, %{text: ""}} = GenAgent.ask(name, "recover")
@@ -479,7 +481,8 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
       end
 
       name = start_codex_agent(exec_fn)
-      assert {:error, "provider failed"} = GenAgent.ask(name, "fail")
+      assert {:error, reason} = GenAgent.ask(name, "fail")
+      assert reason == Transcripts.expected_error("provider failed")
       assert_receive {:exec_call, "fail", nil}
       assert {:ok, _} = GenAgent.ask(name, "next")
       assert_receive {:exec_call, "next", "failed-thread"}
@@ -547,7 +550,8 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
 
       name = start_codex_agent(exec_fn)
 
-      assert {:error, :codex_missing} = GenAgent.ask(name, "hello")
+      assert {:error, reason} = GenAgent.ask(name, "hello")
+      assert reason == Transcripts.expected_error(:codex_missing)
     end
 
     test "delivers a terminal :error event as the error reason" do
@@ -557,7 +561,8 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
 
       name = start_codex_agent(exec_fn)
 
-      assert {:error, "sandbox violation"} = GenAgent.ask(name, "ouch")
+      assert {:error, reason} = GenAgent.ask(name, "ouch")
+      assert reason == Transcripts.expected_error("sandbox violation")
     end
 
     test "a lazy stream continues past an error notification and records a completed thread" do
@@ -617,7 +622,8 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
 
       name = start_codex_agent(exec_fn)
 
-      assert {:error, %{"message" => "connection lost"}} = GenAgent.ask(name, "go")
+      assert {:error, reason} = GenAgent.ask(name, "go")
+      assert reason == Transcripts.expected_error(%{"message" => "connection lost"})
       assert_receive {:pulled, "thread.started"}
       assert_receive {:pulled, "error"}
       assert_receive {:pulled, "turn.failed"}

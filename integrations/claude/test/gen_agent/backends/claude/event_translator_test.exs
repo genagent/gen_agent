@@ -268,8 +268,8 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
                  EventTranslator.translate(stream_event("result", data))
 
         assert reason.message == "something broke; again"
-        assert reason.errors == ["something broke", "again"]
-        assert reason.num_turns == 2
+        assert GenAgent.ClaudeErrors.raw(reason).errors == ["something broke", "again"]
+        assert GenAgent.ClaudeErrors.raw(reason).num_turns == 2
       end
     end
 
@@ -286,8 +286,10 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
 
       refute Map.has_key?(reason, :errors)
 
-      assert [%Event{data: %{reason: %{message: :unknown}}}] =
+      assert [%Event{data: %{reason: reason}}] =
                EventTranslator.translate(stream_event("result", %{"is_error" => true}))
+
+      assert GenAgent.ClaudeErrors.raw(reason).message == :unknown
     end
 
     test "falls back to cost_usd when total_cost_usd is absent" do
@@ -302,20 +304,25 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
     test "extracts reason from data[\"error\"]" do
       event = stream_event("error", %{"error" => "auth failed", "code" => 401})
 
-      assert [%Event{kind: :error, data: %{reason: "auth failed"}}] =
+      assert [%Event{kind: :error, data: %{reason: reason}}] =
                EventTranslator.translate(event)
+
+      assert reason == GenAgent.ClaudeErrors.expected("auth failed")
     end
 
     test "falls back to data[\"message\"]" do
       event = stream_event("error", %{"message" => "network unreachable"})
 
-      assert [%Event{kind: :error, data: %{reason: "network unreachable"}}] =
+      assert [%Event{kind: :error, data: %{reason: reason}}] =
                EventTranslator.translate(event)
+
+      assert reason == GenAgent.ClaudeErrors.expected("network unreachable")
     end
 
     test "uses :unknown when neither field is present" do
       event = stream_event("error", %{})
-      assert [%Event{kind: :error, data: %{reason: :unknown}}] = EventTranslator.translate(event)
+      assert [%Event{kind: :error, data: %{reason: reason}}] = EventTranslator.translate(event)
+      assert reason == GenAgent.ClaudeErrors.expected(:unknown)
     end
   end
 
@@ -470,10 +477,10 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
              %Event{kind: :error, data: %{reason: reason}}
            ] = EventTranslator.translate(event)
 
-    assert reason.subtype == "error_max_turns"
+    assert GenAgent.ClaudeErrors.raw(reason).subtype == "error_max_turns"
     assert reason.message == "Turn limit reached"
-    assert reason.session_id == "s-2"
-    assert reason.cost_usd == 0.02
+    assert GenAgent.ClaudeErrors.raw(reason).session_id == "s-2"
+    assert GenAgent.ClaudeErrors.raw(reason).cost_usd == 0.02
   end
 
   test "failure subtype remains an error even if is_error is absent" do

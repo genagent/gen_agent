@@ -269,7 +269,8 @@ defmodule GenAgent.Backends.ClaudeTest do
 
       {:ok, session} = Claude.start_session(stream_fn: raising)
 
-      assert {:error, {:stream_fn_raised, _}} = Claude.prompt(session, "anything")
+      assert {:error, reason} = Claude.prompt(session, "anything")
+      assert GenAgent.ClaudeErrors.raw(reason) == {:stream_fn_raised, "boom"}
     end
   end
 

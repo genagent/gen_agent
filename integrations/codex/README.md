@@ -282,6 +282,13 @@ Codex CLI's NDJSON output is translated into `GenAgent.Event` values by
 | `error` | retained, not emitted; becomes a terminal `:error` only if the stream ends without `turn.completed` or `turn.failed` |
 | anything else | filtered |
 
+With a core version that provides `GenAgent.Backend.Error`, terminal CLI
+failures and `exec_fn` failures return that struct through `ask/3`, `poll/3`,
+and `handle_error/3`. Its `:kind` is `:provider_error` for unclassified CLI
+failures; `:raw` retains the original Codex string, map, or wrapper error.
+Older core versions keep the original reason directly. CLI text alone is
+not treated as reliable retry metadata, so `:retryable?` defaults to false.
+
 Unlike Claude, Codex emits `thread_id` in the **first** event of a turn,
 not the terminal one. The streaming translator retains it and injects
 it into the `:result` event emitted at the end. The backend also

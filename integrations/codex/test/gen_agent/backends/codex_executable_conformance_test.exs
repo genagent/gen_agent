@@ -13,7 +13,9 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
       second_prompt: "follow-up prompt",
       error_prompt: "replay:failure",
       hold_prompt: "hold",
-      assert_error: fn reason -> assert reason == Transcripts.failure() end,
+      assert_error: fn reason ->
+        assert reason == Transcripts.expected_error(Transcripts.failure())
+      end,
       assert_threaded: fn first, _second ->
         resume_args = args(context.directory, :resume)
         assert Enum.take(resume_args, 2) == ["exec", "resume"]
@@ -188,15 +190,17 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
   test "a quiet CLI turn reports the configured idle timeout", context do
     name = start_agent(context, idle_timeout_ms: 200, timeout: 5_000)
 
-    assert {:error, {:idle_timeout, 200}} = GenAgent.ask(name, "hold")
-    assert_receive {:failed, _ref, {:idle_timeout, 200}}
+    reason = Transcripts.expected_error({:idle_timeout, 200})
+    assert {:error, ^reason} = GenAgent.ask(name, "hold")
+    assert_receive {:failed, _ref, ^reason}
   end
 
   test "the whole-turn deadline is distinct from the idle timeout", context do
     name = start_agent(context, idle_timeout_ms: nil, timeout: 200)
 
-    assert {:error, {:timeout, 200}} = GenAgent.ask(name, "hold")
-    assert_receive {:failed, _ref, {:timeout, 200}}
+    reason = Transcripts.expected_error({:timeout, 200})
+    assert {:error, ^reason} = GenAgent.ask(name, "hold")
+    assert_receive {:failed, _ref, ^reason}
   end
 
   test "a completed turn keeps its buffered terminal event after slow consumption", context do
@@ -233,8 +237,9 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
 
     name = start_agent(context, env: [{"GEN_AGENT_OUTPUT", output_path}])
 
-    assert {:error, {:line_too_long, 1_048_576}} = GenAgent.ask(name, "oversized")
-    assert_receive {:failed, _ref, {:line_too_long, 1_048_576}}
+    reason = Transcripts.expected_error({:line_too_long, 1_048_576})
+    assert {:error, ^reason} = GenAgent.ask(name, "oversized")
+    assert_receive {:failed, _ref, ^reason}
   end
 
   for recording <- Transcripts.names() do
@@ -245,7 +250,7 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
       name = start_agent(context)
 
       if recording == "failure" do
-        reason = Transcripts.failure()
+        reason = Transcripts.expected_error(Transcripts.failure())
         assert {:error, ^reason} = GenAgent.ask(name, "replay:#{recording}")
         assert GenAgent.status(name).agent_state.errors == [reason]
         assert_receive {:stream_event, :tool_result, _}

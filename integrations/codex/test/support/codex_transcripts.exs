@@ -1,6 +1,8 @@
 defmodule GenAgent.CodexTranscripts do
   @moduledoc false
   import ExUnit.Assertions
+  alias GenAgent.Backend.Error
+  @compile {:no_warn_undefined, Error}
 
   @directory Path.expand("../fixtures/codex/0.157.1", __DIR__)
 
@@ -32,7 +34,7 @@ defmodule GenAgent.CodexTranscripts do
   def expected("failure") do
     data = List.last(load("failure")).data
     item = Enum.at(load("failure"), 1).data["item"]
-    [{:tool_result, item}, {:error, %{reason: data["error"], data: data}}]
+    [{:tool_result, item}, {:error, %{reason: expected_error(data["error"]), data: data}}]
   end
 
   def expected(name) do
@@ -55,6 +57,12 @@ defmodule GenAgent.CodexTranscripts do
 
     messages(name) ++
       [{:usage, usage}, {:result, %{session_id: thread_id(name), usage_total: usage}}]
+  end
+
+  def expected_error(raw) do
+    if Code.ensure_loaded?(Error),
+      do: Error.normalize(:codex, raw),
+      else: raw
   end
 
   defp messages("command") do

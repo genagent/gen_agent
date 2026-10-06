@@ -2,6 +2,7 @@ defmodule GenAgent.Backends.OpenAIHTTPTest do
   use ExUnit.Case, async: false
 
   alias GenAgent.Backends.OpenAI
+  alias GenAgent.Test.BackendErrorAssertions, as: Errors
 
   defmodule Adapter do
     @moduledoc false
@@ -66,7 +67,9 @@ defmodule GenAgent.Backends.OpenAIHTTPTest do
         )
       )
 
-      assert {:error, {:http_error, ^status, _body}} = OpenAI.prompt(session, "private prompt")
+      assert {:error, reason} = OpenAI.prompt(session, "private prompt")
+      Errors.assert_http_response(reason, :openai, status, "redirect")
+
       assert_receive {:req_request, request}
       assert URI.to_string(request.url) == "https://api.openai.com/v1/responses"
       assert Req.Request.get_header(request, "authorization") == ["Bearer test-key"]
@@ -91,7 +94,8 @@ defmodule GenAgent.Backends.OpenAIHTTPTest do
         connect_timeout: 2_345
       )
 
-    assert {:error, {:http_error, 429, ^error_body}} = OpenAI.prompt(session, "ping")
+    assert {:error, reason} = OpenAI.prompt(session, "ping")
+    Errors.assert_http_response(reason, :openai, 429, error_body)
     assert_receive {:req_request, request}
     assert request.options[:receive_timeout] == 12_345
     assert request.options[:connect_options] == [timeout: 2_345]
@@ -102,9 +106,47 @@ defmodule GenAgent.Backends.OpenAIHTTPTest do
     Process.put({Adapter, :reply}, error)
 
     {:ok, session} = OpenAI.start_session(api_key: "test-key")
-    assert {:error, ^error} = OpenAI.prompt(session, "ping")
+
+    assert {:error, reason} = OpenAI.prompt(session, "ping")
+    Errors.assert_error(reason, :openai, error)
+
     assert_receive {:req_request, _request}
     refute_receive {:req_request, _request}
+  end
+
+  test "retains retry-after and response headers on a rate limit" do
+    Process.put(
+      {Adapter, :reply},
+      Req.Response.new(
+        status: 429,
+        headers: %{"retry-after" => ["5"], "content-type" => ["application/json"]},
+        body: Jason.encode!(%{"error" => %{"message" => "slow down"}})
+      )
+    )
+
+    {:ok, session} = OpenAI.start_session(api_key: "test-key")
+
+    assert {:error, reason} = OpenAI.prompt(session, "ping")
+    Errors.assert_http_response(reason, :openai, 429, %{"error" => %{"message" => "slow down"}})
+
+    if Code.ensure_loaded?(GenAgent.Backend.Error) do
+      assert %{kind: :rate_limited, retryable?: true, retry_after: "5", message: "slow down"} =
+               reason
+
+      assert reason.raw.headers["retry-after"] == ["5"]
+    end
+  end
+
+  test "a successful HTTP status with an invalid body is a parsing error" do
+    Process.put(
+      {Adapter, :reply},
+      Req.Response.new(status: 200, headers: %{"content-type" => ["text/html"]}, body: "oops")
+    )
+
+    {:ok, session} = OpenAI.start_session(api_key: "test-key")
+
+    assert {:error, reason} = OpenAI.prompt(session, "ping")
+    Errors.assert_invalid_response(reason, :openai, "oops")
   end
 
   defp reply_json(status, body) do

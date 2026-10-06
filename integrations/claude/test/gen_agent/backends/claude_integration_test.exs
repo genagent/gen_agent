@@ -158,7 +158,8 @@ defmodule GenAgent.Backends.ClaudeIntegrationTest do
       end
 
       name = start_claude_agent(stream_fn)
-      assert {:error, %{subtype: "error_max_turns"}} = GenAgent.ask(name, "fail")
+      assert {:error, reason} = GenAgent.ask(name, "fail")
+      assert %{subtype: "error_max_turns"} = GenAgent.ClaudeErrors.raw(reason)
       assert_receive {:claude_call, "fail", nil}
       assert {:ok, response} = GenAgent.ask(name, "next")
       assert_receive {:claude_call, "next", "failed-session"}
@@ -289,7 +290,8 @@ defmodule GenAgent.Backends.ClaudeIntegrationTest do
 
       name = start_claude_agent(stream_fn)
 
-      assert {:error, "rate limited"} = GenAgent.ask(name, "boom")
+      assert {:error, reason} = GenAgent.ask(name, "boom")
+      assert reason == GenAgent.ClaudeErrors.expected("rate limited")
     end
 
     test "empty or absent result text falls back to assistant text after ExitPlanMode" do
@@ -397,8 +399,11 @@ defmodule GenAgent.Backends.ClaudeIntegrationTest do
 
       name = start_claude_agent(fn _prompt, _opts -> [failure] end)
 
-      assert {:error, %{message: "something broke", errors: ["something broke"], num_turns: 2}} =
-               GenAgent.ask(name, "q")
+      assert {:error, reason} = GenAgent.ask(name, "q")
+      assert reason.message == "something broke"
+
+      assert %{errors: ["something broke"], num_turns: 2} =
+               GenAgent.ClaudeErrors.raw(reason)
 
       assert [%{message: "something broke"}] = GenAgent.status(name).agent_state.errors
     end
@@ -415,8 +420,10 @@ defmodule GenAgent.Backends.ClaudeIntegrationTest do
 
       name = start_claude_agent(fn _prompt, _opts -> [failure] end)
 
-      assert {:error, %{subtype: "error_max_turns", session_id: "s-failed"}} =
-               GenAgent.ask(name, "first")
+      assert {:error, reason} = GenAgent.ask(name, "first")
+
+      assert %{subtype: "error_max_turns", session_id: "s-failed"} =
+               GenAgent.ClaudeErrors.raw(reason)
 
       {:ok, ref} = GenAgent.tell(name, "second")
 
@@ -432,7 +439,8 @@ defmodule GenAgent.Backends.ClaudeIntegrationTest do
           end
         end)
 
-      assert {:error, %{subtype: "error_max_turns"}} = result
+      assert {:error, reason} = result
+      assert %{subtype: "error_max_turns"} = GenAgent.ClaudeErrors.raw(reason)
 
       state = GenAgent.status(name).agent_state
       assert length(state.errors) == 2

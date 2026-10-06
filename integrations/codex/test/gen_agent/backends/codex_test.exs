@@ -301,14 +301,16 @@ defmodule GenAgent.Backends.CodexTest do
       failing = fn _prompt, _session -> {:error, :codex_missing} end
       {:ok, session} = Codex.start_session(exec_fn: failing)
 
-      assert {:error, :codex_missing} = Codex.prompt(session, "anything")
+      assert {:error, reason} = Codex.prompt(session, "anything")
+      assert reason == GenAgent.CodexTranscripts.expected_error(:codex_missing)
     end
 
     test "wraps a raising exec_fn" do
       raising = fn _prompt, _session -> raise "kaboom" end
       {:ok, session} = Codex.start_session(exec_fn: raising)
 
-      assert {:error, {:exec_fn_raised, _}} = Codex.prompt(session, "go")
+      assert {:error, reason} = Codex.prompt(session, "go")
+      assert reason == GenAgent.CodexTranscripts.expected_error({:exec_fn_raised, "kaboom"})
     end
   end
 

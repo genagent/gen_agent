@@ -364,6 +364,10 @@ Failed results reach `handle_error/3` and return `{:error, reason}` from
 `ask/3` or `poll/3`. They are not retried automatically. Tool calls
 are emitted from completed assistant blocks so full input is retained;
 partial tool-input JSON is not emitted on its own.
+With a core version that provides `GenAgent.Backend.Error`, `reason` is
+that struct. Its `:kind` is `:provider_error` for CLI failures and `:raw`
+retains the original Claude reason; older core versions keep the original
+reason directly.
 
 ### Event data
 
@@ -398,7 +402,7 @@ so one turn's events mix both key types.
   output of a plan-mode turn that ends in `ExitPlanMode` with an empty result
   has not been recorded.
 - `:error` from a failed `"result"` -- `%{reason: reason, data: raw}`,
-  where `raw` is the string-keyed result event and `reason` is
+  where `raw` is the string-keyed result event and `reason.raw` is
   `%{provider: :claude, subtype: String.t(), message: term, errors: [term], num_turns: integer, session_id: String.t(), cost_usd: number, usage: map}`
   with absent fields omitted. `:message` is the first of: a nonempty
   `"result"` string, the nonempty `"errors"` list joined with `"; "`, a
@@ -406,7 +410,7 @@ so one turn's events mix both key types.
   recorded CLI 2.1.284 max-turns failure carries only `"errors"`, so its
   `:message` is that text. Other failure subtypes have not been recorded.
 - `:error` from an `"error"` event -- `%{reason: reason, data: raw}`, where
-  `reason` is the event's `"error"` or `"message"` field, or `:unknown`.
+  `reason.raw` is the event's `"error"` or `"message"` field, or `:unknown`.
   When the CLI exits without a terminal result (idle deadline, non-zero
   exit, or spawn failure), `reason` is `"stream_truncated"`.
 

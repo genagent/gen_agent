@@ -74,7 +74,9 @@ defmodule GenAgent.Backends.Anthropic do
 
   require Logger
 
+  alias GenAgent.Backend.Error
   alias GenAgent.Event
+  @compile {:no_warn_undefined, Error}
 
   @endpoint "https://api.anthropic.com/v1/messages"
   @anthropic_version "2023-06-01"
@@ -223,18 +225,41 @@ defmodule GenAgent.Backends.Anthropic do
 
     case session.http_fn.(request) do
       {:ok, body} ->
-        events = response_to_events(body, session.client_session_id)
-
-        next_session =
-          if List.last(events).kind == :error, do: session, else: pending_session
-
-        {:ok, events, next_session}
+        handle_http_body(body, session, pending_session)
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, backend_error(reason)}
     end
   rescue
-    e -> {:error, {:http_fn_raised, Exception.message(e)}}
+    e -> {:error, backend_error({:http_fn_raised, Exception.message(e)})}
+  end
+
+  defp handle_http_body(body, session, pending_session) do
+    with {:ok, events} <- parse_response(body, session.client_session_id) do
+      next_session = if List.last(events).kind == :error, do: session, else: pending_session
+      {:ok, events, next_session}
+    end
+  end
+
+  defp parse_response(body, client_session_id) when is_map(body) do
+    {:ok, response_to_events(body, client_session_id)}
+  rescue
+    e -> {:error, invalid_response(body, Exception.message(e))}
+  end
+
+  defp parse_response(body, _client_session_id),
+    do: {:error, invalid_response(body, "Expected a map response body")}
+
+  defp invalid_response(body, message) do
+    if Code.ensure_loaded?(Error),
+      do: Error.new(:anthropic, :invalid_response, body, message: message),
+      else: {:invalid_response, body}
+  end
+
+  defp backend_error(reason) do
+    if Code.ensure_loaded?(Error),
+      do: Error.normalize(:anthropic, reason),
+      else: reason
   end
 
   @impl GenAgent.Backend
@@ -325,7 +350,7 @@ defmodule GenAgent.Backends.Anthropic do
     terminal_event =
       case stop_error(stop_reason, body["stop_details"]) do
         nil -> Event.new(:result, result_data)
-        reason -> Event.new(:error, Map.put(result_data, :reason, reason))
+        reason -> Event.new(:error, Map.put(result_data, :reason, backend_error(reason)))
       end
 
     usage_events ++ [terminal_event]
@@ -375,9 +400,18 @@ defmodule GenAgent.Backends.Anthropic do
       |> maybe_put_opt(:connect_options, connect_options(request[:connect_timeout]))
 
     case Req.post(url, req_opts) do
-      {:ok, %Req.Response{status: 200, body: body}} -> {:ok, body}
-      {:ok, %Req.Response{status: status, body: body}} -> {:error, {:http_error, status, body}}
-      {:error, reason} -> {:error, reason}
+      {:ok, %Req.Response{status: 200, body: body}} ->
+        {:ok, body}
+
+      {:ok, %Req.Response{status: status, body: body, headers: headers} = response} ->
+        if Code.ensure_loaded?(Error) do
+          {:error, Error.http(:anthropic, status, body, headers, response)}
+        else
+          {:error, {:http_error, status, body}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

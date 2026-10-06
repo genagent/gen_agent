@@ -243,6 +243,12 @@ or interruption does not discard it. `update_session/2` and
 `resume_session/2` and `reset_session/1` remain optional. See
 `GenAgent.Backend` for details.
 
+The four bundled adapters normalize turn failures as
+`GenAgent.Backend.Error` when this core version is present. Its `:kind`,
+`:retryable?`, `:status`, and `:retry_after` fields support shared retry
+policies; `:raw` retains the provider's original reason. A retry is always
+the application's decision.
+
 See the [Backends guide](guides/backends.md) for backend implementation rules and a capability and option comparison.
 
 ## Public API

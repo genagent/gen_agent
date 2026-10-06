@@ -15,6 +15,7 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
   @compile {:no_warn_undefined, GenAgent}
 
   alias GenAgent.Backends.OpenAI
+  alias GenAgent.Test.BackendErrorAssertions, as: Errors
 
   @moduletag capture_log: true
 
@@ -203,7 +204,8 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
       http_fn = fn _req -> {:error, {:http_error, 401, %{"error" => "invalid api key"}}} end
       name = start_openai_agent(http_fn)
 
-      assert {:error, {:http_error, 401, _}} = GenAgent.ask(name, "hi")
+      assert {:error, reason} = GenAgent.ask(name, "hi")
+      Errors.assert_error(reason, :openai, {:http_error, 401, %{"error" => "invalid api key"}})
     end
 
     test "a lost response chain clears the backend ID but retains agent state" do
@@ -232,7 +234,11 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
       assert {:ok, first} = GenAgent.ask(name, "one")
       assert first.text == "first"
 
-      assert {:error, {:conversation_lost, body}} = GenAgent.ask(name, "two")
+      assert {:error, reason} = GenAgent.ask(name, "two")
+      raw = if Code.ensure_loaded?(GenAgent.Backend.Error), do: reason.raw, else: reason
+      assert {:conversation_lost, body} = raw
+      Errors.assert_error(reason, :openai, raw)
+
       assert body["error"]["code"] == "previous_response_not_found"
 
       assert {:ok, fresh} = GenAgent.ask(name, "three")
@@ -330,7 +336,10 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
     name = start_openai_agent(http_fn)
 
     assert {:ok, %{text: "first"}} = GenAgent.ask(name, "first")
-    assert {:error, ^expected_reason} = GenAgent.ask(name, "rejected")
+
+    assert {:error, reason} = GenAgent.ask(name, "rejected")
+    Errors.assert_error(reason, :openai, expected_reason)
+
     assert {:ok, %{text: "third"}} = GenAgent.ask(name, "third")
 
     assert_receive {^ref, first_request}

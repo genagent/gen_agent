@@ -86,19 +86,21 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
     assert raw["errors"] == ["Reached maximum number of turns (1)"]
     refute Map.has_key?(raw, "result")
 
+    expected_reason = %{
+      provider: :claude,
+      subtype: "error_max_turns",
+      message: "Reached maximum number of turns (1)",
+      errors: raw["errors"],
+      num_turns: raw["num_turns"],
+      session_id: raw["session_id"],
+      cost_usd: raw["total_cost_usd"],
+      usage: usage
+    }
+
     assert data == %{
              data: raw,
              model: model,
-             reason: %{
-               provider: :claude,
-               subtype: "error_max_turns",
-               message: "Reached maximum number of turns (1)",
-               errors: raw["errors"],
-               num_turns: raw["num_turns"],
-               session_id: raw["session_id"],
-               cost_usd: raw["total_cost_usd"],
-               usage: usage
-             }
+             reason: GenAgent.ClaudeErrors.expected(expected_reason)
            }
   end
 
