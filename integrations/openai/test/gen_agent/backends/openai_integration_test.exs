@@ -30,6 +30,7 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
           :model,
           :instructions,
           :max_output_tokens,
+          :truncation,
           :reasoning_effort,
           :http_fn
         ])
@@ -171,6 +172,51 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
       name = start_openai_agent(http_fn)
 
       assert {:error, {:http_error, 401, _}} = GenAgent.ask(name, "hi")
+    end
+
+    test "a lost response chain clears the backend ID but retains agent state" do
+      test_pid = self()
+
+      http_fn = fn request ->
+        send(test_pid, {:request_body, request.body})
+
+        case request.body do
+          %{previous_response_id: "resp_001"} ->
+            {:error, {:http_error, 400, %{"error" => %{"code" => "previous_response_not_found"}}}}
+
+          %{previous_response_id: "resp_002"} ->
+            {:ok, api_response("continued", id: "resp_003")}
+
+          %{input: [%{content: "one"}]} ->
+            {:ok, api_response("first", id: "resp_001")}
+
+          _ ->
+            {:ok, api_response("fresh", id: "resp_002")}
+        end
+      end
+
+      name = start_openai_agent(http_fn, truncation: "auto")
+
+      assert {:ok, first} = GenAgent.ask(name, "one")
+      assert first.text == "first"
+
+      assert {:error, {:conversation_lost, body}} = GenAgent.ask(name, "two")
+      assert body["error"]["code"] == "previous_response_not_found"
+
+      assert {:ok, fresh} = GenAgent.ask(name, "three")
+      assert fresh.text == "fresh"
+      assert {:ok, continued} = GenAgent.ask(name, "four")
+      assert continued.text == "continued"
+
+      assert_receive {:request_body, %{input: [%{content: "one"}], truncation: "auto"} = one}
+      refute Map.has_key?(one, :previous_response_id)
+      assert_receive {:request_body, %{previous_response_id: "resp_001"}}
+      assert_receive {:request_body, %{input: [%{content: "three"}]} = three}
+      refute Map.has_key?(three, :previous_response_id)
+      assert_receive {:request_body, %{previous_response_id: "resp_002"}}
+
+      assert Enum.map(GenAgent.status(name).agent_state.responses, & &1.text) ==
+               ["first", "fresh", "continued"]
     end
 
     test "failed responses leave the previous successful response id intact" do

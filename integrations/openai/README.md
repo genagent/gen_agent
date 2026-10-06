@@ -119,6 +119,17 @@ updated via `update_session/2` when each terminal `:result` event
 lands. `store: true` is sent on every request (the default) so
 responses remain referenceable.
 
+If the API rejects an established chain because the previous response is
+unavailable or the context window is exceeded, the failed turn returns
+`{:error, {:conversation_lost, body}}`. The backend clears the saved
+`previous_response_id`, so the next prompt starts a fresh conversation
+without losing the agent process or its application state. It does not
+retry the failed prompt automatically. Set `truncation: "auto"` to let the
+API drop older items before the context window fills; the default is the
+API's `"disabled"` behavior. Other HTTP errors retain the chain. The backend
+always sends `store: true` and does not support local transcript replay for
+organizations where response storage is disabled.
+
 ## Instructions do not persist across turns
 
 OpenAI's docs are explicit: instructions from a prior turn do
@@ -145,6 +156,9 @@ every turn after the first.
   does not validate it; accepted values depend on the model.
 - `:max_output_tokens` -- cap on output tokens per turn. Defaults
   to `nil` (model default). `:max_tokens` remains a deprecated alias.
+- `:truncation` -- `"auto"` or `"disabled"`. Omitted by default; the API
+  then uses `"disabled"`. `"auto"` drops older conversation items to fit
+  the context window.
 - `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
   to `60_000`. The 60-second default can be short for long reasoning turns.
 - `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults

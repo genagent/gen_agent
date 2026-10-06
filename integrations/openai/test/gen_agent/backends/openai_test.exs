@@ -179,12 +179,14 @@ defmodule GenAgent.Backends.OpenAITest do
           instructions: "Be terse.",
           model: "gpt-5-mini",
           max_output_tokens: 256,
+          truncation: "auto",
           reasoning_effort: :medium
         )
 
       assert session.instructions == "Be terse."
       assert session.model == "gpt-5-mini"
       assert session.max_output_tokens == 256
+      assert session.truncation == "auto"
       assert session.reasoning_effort == :medium
     end
 
@@ -208,6 +210,9 @@ defmodule GenAgent.Backends.OpenAITest do
 
       assert {:error, {:invalid_options, %{model: "wrong"}}} =
                OpenAI.start_session(%{model: "wrong"})
+
+      assert {:error, {:invalid_option, :truncation, "automatic"}} =
+               OpenAI.start_session(truncation: "automatic")
     end
 
     test "warns for legacy names and rejects conflicting prompt values" do
@@ -356,6 +361,27 @@ defmodule GenAgent.Backends.OpenAITest do
       assert request.body.store == true
     end
 
+    test "passes truncation through only when configured" do
+      for truncation <- ["auto", "disabled"] do
+        ref = make_ref()
+
+        {:ok, session} =
+          OpenAI.start_session(
+            truncation: truncation,
+            http_fn: recording_fn(ref, ok_response("ok"))
+          )
+
+        assert {:ok, _, _} = OpenAI.prompt(session, "hi")
+        assert_receive {^ref, %{body: %{truncation: ^truncation}}}
+      end
+
+      ref = make_ref()
+      {:ok, session} = OpenAI.start_session(http_fn: recording_fn(ref, ok_response("ok")))
+      assert {:ok, _, _} = OpenAI.prompt(session, "hi")
+      assert_receive {^ref, %{body: body}}
+      refute Map.has_key?(body, :truncation)
+    end
+
     test "includes reasoning effort when set" do
       ref = make_ref()
 
@@ -408,6 +434,36 @@ defmodule GenAgent.Backends.OpenAITest do
   end
 
   describe "prompt/2 response parsing" do
+    test "resets only recognized chain errors on a stored conversation" do
+      for code <- [
+            "previous_response_not_found",
+            "context_length_exceeded",
+            "context_window_exceeded"
+          ] do
+        body = %{"error" => %{"code" => code}}
+        http_fn = fn _request -> {:error, {:http_error, 400, body}} end
+        {:ok, fresh} = OpenAI.start_session(http_fn: http_fn)
+        session = OpenAI.update_session(fresh, %{response_id: "resp_old"})
+
+        assert {:ok, [%Event{kind: :error, data: %{reason: {:conversation_lost, ^body}}}], reset} =
+                 OpenAI.prompt(session, "next")
+
+        assert reset.previous_response_id == nil
+        assert reset.client_session_id == session.client_session_id
+        assert {:error, {:http_error, 400, ^body}} = OpenAI.prompt(fresh, "first")
+      end
+
+      for {status, code} <- [{400, "invalid_request_error"}, {429, "context_length_exceeded"}] do
+        body = %{"error" => %{"code" => code}}
+        http_fn = fn _request -> {:error, {:http_error, status, body}} end
+        {:ok, fresh} = OpenAI.start_session(http_fn: http_fn)
+        session = OpenAI.update_session(fresh, %{response_id: "resp_old"})
+
+        assert {:error, {:http_error, ^status, ^body}} = OpenAI.prompt(session, "next")
+        assert session.previous_response_id == "resp_old"
+      end
+    end
+
     test "extracts text from the message item in output[]" do
       {:ok, session} =
         OpenAI.start_session(
