@@ -154,6 +154,7 @@ every turn after the first.
   `reasoning.effort` on reasoning models (for example `:low`,
   `:medium`, `:high`), or `nil` for the model default. The backend
   does not validate it; accepted values depend on the model.
+
 - `:max_output_tokens` -- cap on output tokens per turn. Defaults
   to `nil` (model default). `:max_tokens` remains a deprecated alias.
 - `:truncation` -- `"auto"` or `"disabled"`. Omitted by default; the API
@@ -171,6 +172,10 @@ every turn after the first.
 See `GenAgent.Backends.OpenAI` for the full module docs.
 Unknown keys fail session startup with `{:unknown_option, key}`; conflicting
 values supplied through aliases fail with `{:conflicting_options, keys}`.
+
+When the API includes `usage.input_tokens_details.cached_tokens`, the
+normalized `Response.usage.cached_input_tokens` reports that subset of
+`input_tokens`. It is not added to the total a second time.
 
 ## Why no tool use?
 

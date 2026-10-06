@@ -57,6 +57,8 @@ defmodule GenAgent.Backends.OpenAI do
   the message item -- but surfaces `reasoning_tokens` (from
   `usage.output_tokens_details.reasoning_tokens`) in the `:usage`
   event when present, so patterns can reason about cost.
+  When present, `usage.input_tokens_details.cached_tokens` is also
+  included as `:cached_input_tokens`; it is a subset of `:input_tokens`.
 
   Set `:reasoning_effort` to request a specific effort level, for
   example `:low`, `:medium`, or `:high`; leave it `nil` for the model
@@ -413,9 +415,10 @@ defmodule GenAgent.Backends.OpenAI do
     output = usage["output_tokens"]
     total = usage["total_tokens"]
     reasoning = get_in(usage, ["output_tokens_details", "reasoning_tokens"])
+    cached = get_in(usage, ["input_tokens_details", "cached_tokens"])
 
-    case {input, output, total, reasoning} do
-      {nil, nil, nil, nil} ->
+    case {input, output, total, reasoning, cached} do
+      {nil, nil, nil, nil, nil} ->
         nil
 
       _ ->
@@ -423,7 +426,8 @@ defmodule GenAgent.Backends.OpenAI do
           input_tokens: input,
           output_tokens: output,
           total_tokens: total,
-          reasoning_tokens: reasoning
+          reasoning_tokens: reasoning,
+          cached_input_tokens: cached
         }
         |> drop_nil_values()
     end

@@ -121,6 +121,12 @@ because this text-only backend cannot complete a paused or tool-use turn.
   `:max_tokens` remains a deprecated alias.
 - `:system_prompt` -- system prompt (string). `:system` and
   `:instructions` remain deprecated aliases.
+- `:cache` -- opt in to automatic 5-minute prompt caching. When `true`,
+  each request includes `cache_control: %{type: "ephemeral"}`. Defaults to
+  `false` because single turns and idle conversations can incur cache-write
+  cost without a later hit. `Response.usage` includes
+  `:cache_creation_input_tokens` and `:cache_read_input_tokens` when the API
+  reports them; total input is their sum plus `:input_tokens`.
 - `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
   to `60_000`. The 60-second default can be short for long reasoning turns.
 - `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults

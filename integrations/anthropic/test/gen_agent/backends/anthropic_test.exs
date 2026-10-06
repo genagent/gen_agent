@@ -127,6 +127,7 @@ defmodule GenAgent.Backends.AnthropicTest do
       {:ok, session} = Anthropic.start_session(http_fn: ok_response("hi"))
       assert session.model == "claude-sonnet-4-5"
       assert session.max_tokens == 1024
+      assert session.cache == false
     end
 
     test "accepts :system prompt and overrides" do
@@ -164,6 +165,9 @@ defmodule GenAgent.Backends.AnthropicTest do
 
       assert {:error, {:invalid_options, %{model: "wrong"}}} =
                Anthropic.start_session(%{model: "wrong"})
+
+      assert {:error, {:invalid_option, :cache, "yes"}} =
+               Anthropic.start_session(cache: "yes")
     end
 
     test "warns for legacy names and rejects conflicting prompt values" do
@@ -206,6 +210,22 @@ defmodule GenAgent.Backends.AnthropicTest do
   end
 
   describe "prompt/2" do
+    test "automatic caching is opt-in and applied at the request top level" do
+      for {enabled, expected} <- [{true, %{type: "ephemeral"}}, {false, nil}] do
+        ref = make_ref()
+
+        {:ok, session} =
+          Anthropic.start_session(
+            cache: enabled,
+            http_fn: recording_fn(ref, ok_response("ok"))
+          )
+
+        assert {:ok, _, _} = Anthropic.prompt(session, "hello")
+        assert_receive {^ref, %{body: body}}
+        assert Map.get(body, :cache_control) == expected
+      end
+    end
+
     test "appends the user message to session before the call" do
       ref = make_ref()
 
@@ -340,6 +360,32 @@ defmodule GenAgent.Backends.AnthropicTest do
       assert data.text == "pong"
       assert data.stop_reason == "end_turn"
       assert is_binary(data.session_id)
+    end
+
+    test "preserves cache creation and read token counts in usage" do
+      http_fn = fn _request ->
+        {:ok, response} = ok_response("ok").(nil)
+
+        {:ok,
+         put_in(response["usage"], %{
+           "input_tokens" => 10,
+           "output_tokens" => 5,
+           "cache_creation_input_tokens" => 3,
+           "cache_read_input_tokens" => 7
+         })}
+      end
+
+      {:ok, session} = Anthropic.start_session(http_fn: http_fn, cache: true)
+
+      assert {:ok, [%Event{kind: :usage, data: usage}, %Event{kind: :result}], _} =
+               Anthropic.prompt(session, "hello")
+
+      assert usage == %{
+               input_tokens: 10,
+               output_tokens: 5,
+               cache_creation_input_tokens: 3,
+               cache_read_input_tokens: 7
+             }
     end
 
     test "only completed text stops produce results; rejected stops retain details and usage" do
