@@ -77,11 +77,24 @@ defmodule GenAgent.CodexTranscripts do
 
   defp messages(name), do: [{:text, %{text: text(name), message_boundary: true}}]
 
-  def assert_events(events, name, expected_usage \\ nil) do
+  def assert_events(events, name, expected_usage \\ nil, expected_model \\ nil) do
     expected =
       case expected_usage do
         nil -> expected(name)
         usage -> List.keyreplace(expected(name), :usage, 0, {:usage, usage})
+      end
+
+    expected =
+      if expected_model do
+        Enum.map(expected, fn
+          {:result, data} ->
+            {:result, Map.merge(data, %{model: expected_model, model_source: :requested})}
+
+          event ->
+            event
+        end)
+      else
+        expected
       end
 
     assert Enum.map(events, &{&1.kind, &1.data}) == expected

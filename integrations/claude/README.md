@@ -346,7 +346,7 @@ values by `GenAgent.Backends.Claude.EventTranslator`:
 
 | Claude event | GenAgent event |
 |---|---|
-| `"system"` | filtered |
+| `"system"` init | `:session` with model, permission mode, and tool names; later system events are filtered |
 | `"assistant"` | `:text` and `:tool_use` from ordered content blocks |
 | `"user"` | `:tool_result` from tool-result content blocks |
 | `"stream_event"` with text delta | immediate `:text`; completed assistant text is deduplicated |
@@ -373,6 +373,7 @@ partial tool-input JSON is not emitted on its own.
 so one turn's events mix both key types.
 
 - `:text` -- `%{text: String.t()}`.
+- `:session` -- `%{model: String.t(), permission_mode: String.t(), tools: [String.t()]}` from the CLI's init event. Missing fields are omitted; unrelated raw fields are not forwarded.
 - `:tool_use` -- the raw block, for example
   `%{"type" => "tool_use", "id" => "toolu_...", "name" => "Read", "input" => %{"file_path" => "lib/foo.ex"}}`.
   `"input"` is the tool's argument map. Other fields the CLI includes, such
@@ -383,7 +384,8 @@ so one turn's events mix both key types.
   present only when the CLI includes it.
 - `:usage` -- `%{input_tokens: integer, output_tokens: integer}`. A count
   the CLI omits is omitted. Cache token counts are not included.
-- `:result` -- `%{text: String.t(), session_id: String.t(), cost_usd: number, duration_ms: integer, num_turns: integer, is_error: false, raw: map}`.
+- `:result` -- `%{text: String.t(), session_id: String.t(), model: String.t(), cost_usd: number, duration_ms: integer, num_turns: integer, is_error: false, raw: map}`.
+  The reported init model is also available as `Response.model`, even with compact event retention.
   Fields the CLI omits are omitted, except `:is_error`. `:raw` is the string-keyed result event, so
   `structured_output` (with `:json_schema`), `stop_reason`,
   `permission_denials`, `duration_api_ms` and extended usage are read from
@@ -415,10 +417,8 @@ The translator emits nothing for:
 - partial tool-input JSON (`input_json_delta`) and other non-text stream
   deltas, message start and stop events, and content block start and stop
   events
-- `"system"` events, including the `init` event (model, tools, MCP server
-  status, and similar session metadata) and later subtypes such as
-  `status`, `thinking_tokens`, and task progress. The backend still reads
-  `session_id` from them for checkpointing.
+- later `"system"` subtypes such as `status`, `thinking_tokens`, and task
+  progress. The backend still reads `session_id` from them for checkpointing.
 - `"rate_limit_event"` and any other unrecognized event type
 
 ## Testing

@@ -107,7 +107,7 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
     assert {:ok, first} = GenAgent.ask(name, "first prompt")
     assert first.text == "ok"
     assert first.session_id == Transcripts.thread_id("resume-initial")
-    Transcripts.assert_events(first.events, "resume-initial")
+    Transcripts.assert_events(first.events, "resume-initial", nil, "fixture-model")
 
     fresh_args = args(context.directory, :fresh)
     assert hd(fresh_args) == "exec"
@@ -124,13 +124,18 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
     assert {:ok, second} = GenAgent.ask(name, "follow-up prompt")
     assert second.text == "42"
 
-    Transcripts.assert_events(second.events, "resume-followup", %{
-      input_tokens: 14_982,
-      cached_input_tokens: 12_160,
-      cache_write_input_tokens: 0,
-      output_tokens: 5,
-      reasoning_output_tokens: 0
-    })
+    Transcripts.assert_events(
+      second.events,
+      "resume-followup",
+      %{
+        input_tokens: 14_982,
+        cached_input_tokens: 12_160,
+        cache_write_input_tokens: 0,
+        output_tokens: 5,
+        reasoning_output_tokens: 0
+      },
+      "fixture-model"
+    )
 
     assert second.session_id == first.session_id
 

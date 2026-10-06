@@ -8,12 +8,13 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
   @external_resource Path.join(@directory, "manifest.json")
   @manifest @directory |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
   @kinds %{
-    "text" => [:text, :usage, :result],
-    "tool-partial" => [:tool_use, :tool_result] ++ List.duplicate(:text, 6) ++ [:usage, :result],
-    "subagent" => [:text, :tool_use, :tool_result, :text, :usage, :result],
-    "plan" => [:tool_use, :tool_result, :text, :usage, :result],
-    "error-max-turns" => [:tool_use, :tool_result, :usage, :error],
-    "json-schema" => [:tool_use, :tool_result, :usage, :result]
+    "text" => [:session, :text, :usage, :result],
+    "tool-partial" =>
+      [:session, :tool_use, :tool_result] ++ List.duplicate(:text, 6) ++ [:usage, :result],
+    "subagent" => [:session, :text, :tool_use, :tool_result, :text, :usage, :result],
+    "plan" => [:session, :tool_use, :tool_result, :text, :usage, :result],
+    "error-max-turns" => [:session, :tool_use, :tool_result, :usage, :error],
+    "json-schema" => [:session, :tool_use, :tool_result, :usage, :result]
   }
 
   for {scenario, metadata} <- @manifest["scenarios"] do
@@ -37,6 +38,7 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
       assert result.data["session_id"] == init.data["session_id"]
       events = parsed |> EventTranslator.translate_stream() |> Enum.to_list()
       assert Enum.map(events, & &1.kind) == @kinds[context.scenario]
+      assert hd(events).data.model == init.data["model"]
 
       rate_limits = Enum.filter(parsed, &(&1.type == "rate_limit_event"))
       assert rate_limits != []
@@ -76,16 +78,17 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
       assert Enum.at(events, -2).data == usage
       assert is_integer(result.data["usage"]["cache_read_input_tokens"])
       assert is_integer(result.data["usage"]["cache_creation_input_tokens"])
-      assert_terminal(List.last(events), result.data, usage)
+      assert_terminal(List.last(events), result.data, usage, init.data["model"])
     end
   end
 
-  defp assert_terminal(%{kind: :error, data: data}, raw, usage) do
+  defp assert_terminal(%{kind: :error, data: data}, raw, usage, model) do
     assert raw["errors"] == ["Reached maximum number of turns (1)"]
     refute Map.has_key?(raw, "result")
 
     assert data == %{
              data: raw,
+             model: model,
              reason: %{
                provider: :claude,
                subtype: "error_max_turns",
@@ -99,7 +102,7 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
            }
   end
 
-  defp assert_terminal(%{kind: :result, data: data}, raw, _usage) do
+  defp assert_terminal(%{kind: :result, data: data}, raw, _usage, model) do
     expected = %{
       session_id: raw["session_id"],
       cost_usd: raw["total_cost_usd"],
@@ -108,6 +111,8 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
       is_error: false,
       raw: raw
     }
+
+    expected = Map.put(expected, :model, model)
 
     expected =
       if raw["result"] in [nil, ""], do: expected, else: Map.put(expected, :text, raw["result"])

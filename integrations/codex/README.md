@@ -292,6 +292,15 @@ item categories are filtered. A stream that ends with no turn outcome
 and no retained `error` event returns `:no_terminal_event`; the wrapper
 stream API does not report the subprocess exit code.
 
+The terminal result carries `:model` and `Response.model` when known. If
+Codex JSONL reports a model on `thread.started`, `turn.started`, or
+`turn.completed`, that value wins and `:model_source` is `:reported`.
+Current recorded Codex exec JSONL does not contain a model; when `:model`
+was explicitly passed to the backend, the terminal uses it with
+`:model_source` set to `:requested`. That is the requested model, not proof
+of the model the CLI actually selected. Without either value, `Response.model`
+is `nil` and both terminal fields are omitted.
+
 ## Usage
 
 Codex reports `turn.completed.usage` as the thread's running total, so a
