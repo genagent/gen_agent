@@ -82,9 +82,15 @@ defmodule GenAgent.Server do
   # ---------------------------------------------------------------------------
 
   def child_spec(opts) do
+    shutdown = Keyword.get(opts, :shutdown, 5_000)
+
+    unless shutdown == :infinity or (is_integer(shutdown) and shutdown >= 0) do
+      raise ArgumentError, ":shutdown must be a non-negative integer or :infinity"
+    end
+
     %{
       id: Keyword.fetch!(opts, :name),
-      start: {__MODULE__, :start_link, [opts]},
+      start: {__MODULE__, :start_link, [Keyword.delete(opts, :shutdown)]},
       # :temporary means the DynamicSupervisor does not auto-restart a dead
       # agent. This is the safer default for a framework where agents carry
       # conversation state (backend session id, message history, summary)
@@ -92,7 +98,7 @@ defmodule GenAgent.Server do
       # silently lose everything. Users who kill or crash an agent should
       # explicitly call `start_agent/2` again to get a fresh one.
       restart: :temporary,
-      shutdown: 5_000,
+      shutdown: shutdown,
       type: :worker
     }
   end

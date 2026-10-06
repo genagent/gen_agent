@@ -345,6 +345,11 @@ not run after failed initialization or backend startup, or on an
 untrappable kill/VM exit. Setup cleans up its own partial directory.
 Keep successful workspaces for inspection and remove them when done;
 production systems also need orphan cleanup outside the agent.
+Setup and cleanup callbacks block the agent process. Configure
+`shutdown:` above their bounded worst-case duration when starting the
+agent; the default is 5 seconds, after which `stop/1` kills a still
+blocked agent without running its termination callbacks. Avoid
+`:infinity` unless an indefinitely blocked supervisor is acceptable.
 
 This POSIX example requires Git 2.32+ for `GIT_CONFIG_GLOBAL`. It ignores
 global/system configuration, disables signing and hooks, and uses an

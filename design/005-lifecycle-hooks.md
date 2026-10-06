@@ -26,7 +26,7 @@ From a Centralino-style app (agents that drive real work in real repos):
    interrupted.
 4. **Observability**: log every turn's token usage and duration to an
    external system, without polluting `handle_response`.
-5. **Rate limiting**: before each turn, sleep if a budget was exceeded.
+5. **Rate limiting**: delay a turn until a budget becomes available.
 
 Observation (4) is already served by telemetry events. (1)(2)(3)(5) are
 not.
@@ -123,9 +123,15 @@ autonomous workflow can retry or halt rather than silently stopping.
 Immediate generated-prompt retries are paced so other agent calls can
 be handled even if the hook keeps rejecting.
 
-Use cases: rate limiting (sleep + return `{:ok, prompt, state}`), prompt
-augmentation (append context), gating (check a budget, `:halt` if
-exceeded).
+Use cases: prompt augmentation (append context) and gating (check a
+budget, `:halt` if exceeded).
+
+Do not sleep in this callback to implement backoff: it blocks all
+synchronous calls and can cause supervisor shutdown to skip cleanup.
+Schedule a timer, return to idle, and dispatch the prompt from
+`handle_event/2` when the timer fires, as in the Retry guide. The
+turn watchdog does not cover time spent in this or other agent-process
+callbacks.
 
 ### `post_turn/3`
 

@@ -455,8 +455,9 @@ stop or crash. Do not stop workers inside `terminate_agent/2`: the shared
 DynamicSupervisor can be waiting for that callback to return. Unique names
 per run permit immediate reuse of the coordinator name during cleanup.
 Stopping the coordinator during worker startup can stall for the shared
-DynamicSupervisor's 5-second shutdown timeout: the coordinator waits for
-the watcher, which may be waiting for that supervisor to start a worker.
+DynamicSupervisor's default 5-second shutdown timeout: the coordinator
+waits for the watcher, which may be waiting for that supervisor to start
+a worker.
 The watcher exits after cleanup. This small unlinked helper is not durable:
 a watcher crash or VM loss needs an application-owned supervision design.
 

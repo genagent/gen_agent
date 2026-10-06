@@ -381,15 +381,16 @@ defmodule GenAgent do
   augmentation or templating), skip the turn with `:skip`, or halt the
   agent entirely with `:halt`.
 
-  Use cases: prompt templating (inject context), rate limiting (sleep
-  on a budget), gating (halt if an external signal says stop).
+  Use cases: prompt templating (inject context) and gating (halt if an
+  external signal says stop). For rate limiting, use a timer and a
+  `handle_event/2` callback to start work later, as in the Retry guide.
 
   The hook runs synchronously in the agent process before the prompt task
   is started. While it runs, synchronous calls to the agent (`status/2`,
   `poll/3`, `tell/3`, `runtime_snapshot/2`, and so on) wait, with a
-  default timeout of `:infinity`. A sleep for rate limiting therefore
-  delays those calls on every dispatch. `notify/2` and `whereis/1` do not
-  wait.
+  default timeout of `:infinity`. Sleeping here therefore delays those
+  calls on every dispatch and may prevent orderly shutdown before the
+  child spec's `:shutdown` timeout. `notify/2` and `whereis/1` do not wait.
 
   When the prompt is rewritten, `[:gen_agent, :prompt, :start]`
   telemetry carries both the original and rewritten prompt plus a
@@ -582,12 +583,20 @@ defmodule GenAgent do
   results kept for `poll/2` (default `100`). It must be a non-negative
   integer; the oldest results are evicted first and zero retains none.
 
-  Invalid values for these options and the capture and pending limits make
+  `:shutdown` is the supervisor's graceful shutdown timeout in milliseconds
+  (default `5_000`), or `:infinity`. A callback still running when this
+  timeout expires is killed and termination callbacks cannot run. Choose a
+  value longer than any bounded callback or cleanup operation; `:infinity`
+  can block the owning supervisor indefinitely. An explicit `nil` uses the
+  default.
+
+  Invalid values for the watchdog and the capture and pending limits make
   `start_agent/2` return `{:error, {:init_failed, :error, ArgumentError}}`.
+  An invalid `:shutdown` raises `ArgumentError` while building the child spec.
   A missing `:name` or `:backend` raises `KeyError` in the caller.
   An explicit `nil` for a limit is treated as unset and uses the default.
 
-  The reserved keys `:name`, `:backend`, `:watchdog_ms`,
+  The reserved keys `:name`, `:backend`, `:watchdog_ms`, `:shutdown`,
   `:max_tell_results`, `:max_events_per_turn`,
   `:max_event_bytes_per_turn`, `:event_retention`, `:max_pending_prompts`,
   `:max_pending_prompt_bytes`, `:max_pending_notifications`, and
@@ -644,6 +653,7 @@ defmodule GenAgent do
         :name,
         :backend,
         :watchdog_ms,
+        :shutdown,
         :max_tell_results,
         :max_events_per_turn,
         :max_event_bytes_per_turn,
@@ -663,6 +673,7 @@ defmodule GenAgent do
         init_opts: init_opts,
         register: via(name)
       ]
+      |> maybe_put(:shutdown, Keyword.get(server_opts, :shutdown))
       |> maybe_put(:watchdog_ms, Keyword.get(server_opts, :watchdog_ms))
       |> maybe_put(:max_tell_results, Keyword.get(server_opts, :max_tell_results))
       |> maybe_put(:max_events_per_turn, Keyword.get(server_opts, :max_events_per_turn))
@@ -718,9 +729,12 @@ defmodule GenAgent do
   @doc """
   Send an asynchronous prompt to an agent.
 
-  Returns `{:ok, ref}` immediately. Use `poll/2` to check on the
-  result. The same queueing semantics as `ask/2` apply. When a pending
-  queue limit is reached, returns `{:error, {:overloaded, info}}` without
+  Returns `{:ok, ref}` when the agent accepts the prompt. A `pre_turn/2`
+  callback runs before acceptance for an idle agent, so this call waits for
+  that callback even though it does not wait for the backend result. Use
+  `poll/2` to check on the result. The same queueing semantics as `ask/2`
+  apply. When a pending queue limit is reached, returns
+  `{:error, {:overloaded, info}}` without
   an accepted ref.
   Returns `{:error, :not_found}` if the agent name is not registered.
   """
@@ -1029,13 +1043,20 @@ defmodule GenAgent do
   @doc """
   Stop an agent.
 
-  Terminates the agent process cleanly via its owning `DynamicSupervisor`.
+  Terminates the agent process via its owning `DynamicSupervisor`.
   Pass the supervisor as the second argument for an agent started with
   `child_spec/2`; the default is `GenAgent.AgentSupervisor`.
   Active and queued `ask/3` callers receive an `:agent_terminated` error
   when the agent processes the orderly shutdown. Accepted
   `tell_with_completion/4` requests do not receive a synthetic completion;
   recipients should monitor the agent to detect that uncertainty.
+  A callback runs inside the agent process and can delay shutdown. If it
+  exceeds the child spec's `:shutdown` timeout (default `5_000` ms), the
+  supervisor kills the agent and `terminate_agent/2` and backend
+  `terminate_session/1` cannot run. Configure `:shutdown` when starting an
+  agent whose callbacks or cleanup can take longer. A blocked callback can
+  also delay unrelated operations on the same `DynamicSupervisor` during
+  `stop/2`.
   Returns `:ok` or `{:error, :not_found}`.
   """
   @spec stop(name(), GenServer.server()) :: :ok | {:error, :not_found}
