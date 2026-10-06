@@ -186,6 +186,12 @@ defmodule GenAgent do
   or remote request has stopped. The backend and its transport own external
   cancellation and resource cleanup.
 
+  Callback failure logs include the agent name and callback module. Logger
+  metadata also carries `:gen_agent` and `:gen_agent_module` for filtering;
+  applications can opt to include those keys in their Logger formatter.
+  Stack frames include module, function, file, and line but omit argument
+  values and exception messages, which may contain prompt or state data.
+
   ## Public API
 
     * `start_agent/2` -- start an agent under the supervision tree.

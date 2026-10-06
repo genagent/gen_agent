@@ -200,6 +200,28 @@ defmodule GenAgent.CallbackFailuresTest do
     assert log =~ "post_turn/3 returned unexpected shape"
   end
 
+  test "a post_turn failure identifies the agent and callback without exposing state", %{
+    task_sup: task_sup
+  } do
+    {pid, name} =
+      start_server(task_sup, [[Event.new(:result, %{text: "ok"})]],
+        init_opts: [post_turn: fn _outcome, _ref, _state -> raise("secret callback state") end]
+      )
+
+    log =
+      capture_log([format: "[$level] $message | $metadata\n", metadata: :all], fn ->
+        assert {:ok, %{text: "ok"}} = ask(pid)
+      end)
+
+    assert log =~ "[warning]"
+    assert log =~ name
+    assert log =~ "GenAgent.Support.TestAgent.post_turn/3 raised"
+    assert log =~ "callback_failures_test.exs"
+    assert log =~ "gen_agent="
+    assert log =~ "gen_agent_module="
+    refute log =~ "secret callback state"
+  end
+
   test "termination callback failures are logged with redacted stack frames", %{
     task_sup: task_sup
   } do
