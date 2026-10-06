@@ -7,10 +7,10 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
 
   ## Event mapping
 
-    * `thread.started` -- captured for `thread_id`, no GenAgent event
-      emitted directly. The captured id is threaded into the final
-      `:result` event as `session_id`.
-    * `turn.started` -- filtered.
+    * `thread.started` -- captured for `thread_id` and model if present;
+      no GenAgent event emitted directly. The captured id is threaded
+      into the final `:result` event as `session_id`.
+    * `turn.started` -- captures model if present; otherwise filtered.
     * `item.completed` with `item.type == "agent_message"` -- emits a
       `:text` event with the item's text content and a message boundary.
     * `item.started` for an action emits a small `:tool_use` marker with
@@ -24,7 +24,9 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
     * `turn.completed` -- emits a `:usage` event (if token counts are
       present) followed by a terminal `:result` event carrying the
       captured `thread_id` as `session_id` and the raw completed usage as
-      `usage_total`. With `response_text: :final_message` the `:result`
+      `usage_total`. The model is reported when present in JSONL, otherwise
+      falls back to an explicitly requested model with `model_source:
+      :requested`. With `response_text: :final_message` the `:result`
       also carries the last completed `agent_message` text as `:text`
       (see below).
     * `error` -- remembers the latest notification without ending the turn.
@@ -133,11 +135,14 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
     * `:usage_baseline` -- the previous completed `t:usage_total/0`
       (default: all zeros).
     * `:response_text` -- `t:response_text/0` (default: `:all_messages`).
+    * `:requested_model` -- model passed to the CLI; used only when JSONL
+      does not report a model.
   """
   @spec translate_stream(Enumerable.t(), keyword()) :: Enumerable.t()
   def translate_stream(events, opts \\ []) do
     baseline = Keyword.get(opts, :usage_baseline, zero_usage_total())
     response_text = Keyword.get(opts, :response_text, :all_messages)
+    requested_model = Keyword.get(opts, :requested_model)
 
     Stream.transform(
       events,
@@ -148,7 +153,9 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
           terminal?: false,
           baseline: baseline,
           response_text: response_text,
-          last_message: nil
+          last_message: nil,
+          model: nil,
+          requested_model: requested_model
         }
       end,
       &translate_event/2,
@@ -164,10 +171,14 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
   end
 
   defp translate_event(
-         %JsonLineEvent{event_type: "thread.started", data: %{"thread_id" => id}},
+         %JsonLineEvent{event_type: "thread.started", data: %{"thread_id" => id} = data},
          state
        ) do
-    {[], %{state | thread_id: id}}
+    {[], %{state | thread_id: id, model: reported_model(data) || state.model}}
+  end
+
+  defp translate_event(%JsonLineEvent{event_type: "turn.started", data: data}, state) do
+    {[], %{state | model: reported_model(data) || state.model}}
   end
 
   defp translate_event(%JsonLineEvent{event_type: "error", data: data}, state) do
@@ -243,7 +254,17 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
     # distinct messages remain readable. Under :final_message the last
     # tracked agent_message is reported as :text instead.
     result_data =
-      %{session_id: state.thread_id, usage_total: total}
+      %{
+        session_id: state.thread_id,
+        usage_total: total,
+        model: reported_model(data) || state.model || state.requested_model,
+        model_source:
+          cond do
+            reported_model(data) || state.model -> :reported
+            state.requested_model -> :requested
+            true -> nil
+          end
+      }
       |> put_response_text(state)
       |> drop_nil_values()
 
@@ -309,6 +330,9 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
     do: Map.put(data, :text, last || "")
 
   defp put_response_text(data, _state), do: data
+
+  defp reported_model(%{"model" => model}) when is_binary(model) and model != "", do: model
+  defp reported_model(_), do: nil
 
   defp drop_nil_values(map) do
     map

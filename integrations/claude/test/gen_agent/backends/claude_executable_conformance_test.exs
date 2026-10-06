@@ -89,10 +89,10 @@ defmodule GenAgent.Backends.ClaudeExecutableConformanceTest do
     assert first.usage == %{input_tokens: 3, output_tokens: 2}
 
     assert Enum.map(first.events, & &1.kind) ==
-             [:text, :text, :tool_use, :tool_result, :usage, :result]
+             [:session, :text, :text, :tool_use, :tool_result, :usage, :result]
 
-    assert Enum.at(first.events, 2).data["id"] == "call-1"
-    assert Enum.at(first.events, 3).data["tool_use_id"] == "call-1"
+    assert Enum.at(first.events, 3).data["id"] == "call-1"
+    assert Enum.at(first.events, 4).data["tool_use_id"] == "call-1"
 
     fresh_args = args(context.directory, :fresh)
     assert "--print" in fresh_args

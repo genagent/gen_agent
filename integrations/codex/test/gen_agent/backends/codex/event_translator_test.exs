@@ -19,6 +19,32 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
     end
   end
 
+  test "recorded CLI output falls back to requested model when JSONL omits it" do
+    events = Transcripts.load("success")
+    assert Enum.all?(events, &(not Map.has_key?(&1.data, "model")))
+
+    translated = EventTranslator.translate(events, requested_model: "gpt-6.1-sol")
+
+    assert %Event{kind: :result, data: %{model: "gpt-6.1-sol", model_source: :requested}} =
+             List.last(translated)
+
+    unknown = EventTranslator.translate(events)
+    refute Map.has_key?(List.last(unknown).data, :model)
+  end
+
+  test "reported model takes precedence over a requested fallback" do
+    translated =
+      EventTranslator.translate(
+        [
+          event("thread.started", %{"thread_id" => "t-1", "model" => "actual-model"}),
+          event("turn.completed", %{})
+        ],
+        requested_model: "requested-model"
+      )
+
+    assert %Event{data: %{model: "actual-model", model_source: :reported}} = List.last(translated)
+  end
+
   test "recorded command lifecycle emits a small start marker and one full completion" do
     events = Transcripts.load("command")
     started = Enum.at(events, 3)

@@ -22,6 +22,7 @@ defmodule GenAgent.Response do
     * `:duration_ms` -- wall-clock time from prompt dispatch to terminal event.
     * `:metadata` -- additive application or orchestration results, defaulting to `%{}`.
     * `:session_id` -- the backend's session identifier, if any.
+    * `:model` -- the model reported on the terminal event, if known.
   """
 
   alias GenAgent.Event
@@ -36,7 +37,8 @@ defmodule GenAgent.Response do
           usage: map() | nil,
           duration_ms: non_neg_integer(),
           metadata: map(),
-          session_id: String.t() | nil
+          session_id: String.t() | nil,
+          model: String.t() | nil
         }
 
   defstruct prompt: nil,
@@ -48,7 +50,8 @@ defmodule GenAgent.Response do
             usage: nil,
             duration_ms: 0,
             metadata: %{},
-            session_id: nil
+            session_id: nil,
+            model: nil
 
   @doc """
   Build a `Response` from a completed turn's event list and wall-clock duration.
@@ -97,7 +100,8 @@ defmodule GenAgent.Response do
       event_coverage: Keyword.fetch!(opts, :event_coverage),
       usage: usage,
       duration_ms: Keyword.get(opts, :duration_ms, 0),
-      session_id: Keyword.get(opts, :session_id)
+      session_id: Keyword.get(opts, :session_id),
+      model: if(terminal, do: Map.get(terminal.data, :model))
     }
   end
 

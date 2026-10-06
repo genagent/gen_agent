@@ -13,6 +13,25 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
     test "are filtered out" do
       assert EventTranslator.translate(stream_event("system", %{"info" => "init"})) == []
     end
+
+    test "init exposes model and session capabilities without forwarding the raw envelope" do
+      init =
+        stream_event("system", %{
+          "subtype" => "init",
+          "model" => "claude-sonnet-4-5",
+          "permissionMode" => "default",
+          "tools" => ["Read", "Bash"],
+          "cwd" => "/private/project"
+        })
+
+      assert [%Event{kind: :session, data: data}] = EventTranslator.translate(init)
+
+      assert data == %{
+               model: "claude-sonnet-4-5",
+               permission_mode: "default",
+               tools: ["Read", "Bash"]
+             }
+    end
   end
 
   describe "translate/1 -- assistant events" do
@@ -308,6 +327,25 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
   end
 
   describe "translate_stream/1" do
+    test "recorded CLI init model reaches terminal response" do
+      fixture = Path.expand("../../../fixtures/claude/2.1.284/json-schema.jsonl", __DIR__)
+
+      events =
+        fixture
+        |> File.stream!()
+        |> Stream.map(fn line ->
+          {:ok, event} = StreamEvent.parse(line)
+          event
+        end)
+        |> EventTranslator.translate_stream()
+        |> Enum.to_list()
+
+      assert [%Event{kind: :session, data: %{model: "claude-haiku-4-5-20251001"}} | _] = events
+
+      assert %Event{kind: :result, data: %{model: "claude-haiku-4-5-20251001"}} =
+               List.last(events)
+    end
+
     test "flattens a mixed stream into a GenAgent.Event stream" do
       inputs = [
         stream_event("system", %{}),

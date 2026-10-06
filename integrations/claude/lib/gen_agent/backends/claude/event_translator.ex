@@ -5,12 +5,12 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
   The Claude CLI's `stream-json` output surfaces a variety of event types
   ("system", "assistant", "content_block_delta", "tool_use", "tool_result",
   "result", "error", etc). The GenAgent state machine only cares about a
-  small normalized set (`:text`, `:tool_use`, `:tool_result`, `:usage`,
+  small normalized set (`:session`, `:text`, `:tool_use`, `:tool_result`, `:usage`,
   `:result`, `:error`).
 
-  This module is a pure function of a single `StreamEvent` to a list of
-  zero or more `GenAgent.Event` values. Callers stream events through
-  `translate/1` (typically via `Stream.flat_map/2`).
+  `translate/1` maps a single raw event. `translate_stream/1` additionally
+  carries the model reported by session init through to the terminal event
+  and deduplicates streamed text and tool calls.
 
   When an envelope has a `parent_tool_use_id`, normalized text and tool
   events carry it as `:parent_tool_use_id` in their data. This lets callers
@@ -18,7 +18,8 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
 
   ## Translation rules
 
-    * `"system"` -- filtered out (no GenAgent events).
+    * `"system"` init -- emits `:session` with model, permission mode, and tools.
+      Other system subtypes are filtered out.
     * `"assistant"` -- ordered text and tool-use content blocks become
       `:text` and `:tool_use` events. Adjacent text blocks are joined.
     * `"user"` -- tool-result content blocks become `:tool_result` events.
@@ -51,6 +52,18 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
   Translate a single `StreamEvent` into zero or more `GenAgent.Event` values.
   """
   @spec translate(StreamEvent.t()) :: [Event.t()]
+  def translate(%StreamEvent{type: "system", data: %{"subtype" => "init"} = data}) do
+    session =
+      %{
+        model: nonempty_string(data["model"]),
+        permission_mode: data["permissionMode"],
+        tools: data["tools"]
+      }
+      |> drop_nil_values()
+
+    [Event.new(:session, session)]
+  end
+
   def translate(%StreamEvent{type: "system"}), do: []
 
   def translate(%StreamEvent{type: "assistant", data: data}) do
@@ -146,10 +159,12 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
   """
   @spec translate_stream(Enumerable.t()) :: Enumerable.t()
   def translate_stream(stream) do
-    initial = %{partial_text_by_parent: %{}, seen_calls: MapSet.new()}
+    initial = %{partial_text_by_parent: %{}, seen_calls: MapSet.new(), model: nil}
 
     Stream.transform(stream, initial, fn raw, state ->
-      events = translate(raw)
+      model = model_for(raw, state.model)
+      events = translate_with_model(raw, model)
+
       parent = parent_tool_use_id(raw.data)
       partial_text = Map.get(state.partial_text_by_parent, parent, "")
 
@@ -174,13 +189,29 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
             state.partial_text_by_parent
         end
 
-      {events, %{partial_text_by_parent: partial_text_by_parent, seen_calls: seen_calls}}
+      {events,
+       %{partial_text_by_parent: partial_text_by_parent, seen_calls: seen_calls, model: model}}
     end)
   end
 
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
+
+  defp model_for(%StreamEvent{type: "system", data: %{"subtype" => "init"} = data}, previous),
+    do: nonempty_string(data["model"]) || previous
+
+  defp model_for(_raw, previous), do: previous
+
+  defp translate_with_model(%StreamEvent{type: "result"} = raw, model) when is_binary(model),
+    do: Enum.map(translate(raw), &put_terminal_model(&1, model))
+
+  defp translate_with_model(raw, _model), do: translate(raw)
+
+  defp put_terminal_model(%Event{kind: kind} = event, model) when kind in [:result, :error],
+    do: %{event | data: Map.put(event.data, :model, model)}
+
+  defp put_terminal_model(event, _model), do: event
 
   defp content_events(%{"message" => %{} = message}), do: content_events(message)
 

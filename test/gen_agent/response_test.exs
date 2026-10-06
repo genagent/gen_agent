@@ -104,6 +104,18 @@ defmodule GenAgent.ResponseTest do
       assert response.session_id == "sess-abc"
     end
 
+    test "exposes model from the terminal event even when the event list is compacted" do
+      terminal = Event.new(:result, %{text: "done", model: "claude-sonnet-4-5"})
+      assert Response.from_events([terminal]).model == "claude-sonnet-4-5"
+
+      compact =
+        Response.from_capture([], terminal, nil, Response.new_text_acc(),
+          event_coverage: %{mode: :compact}
+        )
+
+      assert compact.model == "claude-sonnet-4-5"
+    end
+
     test "defaults duration_ms to 0 and session_id to nil" do
       response = Response.from_events([Event.new(:result, %{text: "hi"})])
 

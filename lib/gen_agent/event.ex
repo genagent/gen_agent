@@ -8,6 +8,7 @@ defmodule GenAgent.Event do
 
   ## Event kinds
 
+    * `:session` -- backend-reported session metadata, such as the model.
     * `:text` -- an assistant text chunk (delta). `data` carries `%{text: String.t()}`.
       A backend can set `message_boundary: true` when the text starts a
       separate completed assistant message rather than continuing a delta.
@@ -24,7 +25,8 @@ defmodule GenAgent.Event do
   """
 
   @type kind ::
-          :text
+          :session
+          | :text
           | :tool_use
           | :tool_result
           | :usage

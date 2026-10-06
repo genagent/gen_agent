@@ -206,7 +206,8 @@ defmodule GenAgent.Backends.Codex do
           |> Stream.each(&checkpoint_raw(&1, checkpoint))
           |> EventTranslator.translate_stream(
             usage_baseline: session.usage_total,
-            response_text: session.response_text
+            response_text: session.response_text,
+            requested_model: session.exec_opts[:model]
           )
 
         {:ok, stream, session}
