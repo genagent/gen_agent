@@ -154,6 +154,17 @@ defmodule GenAgent.IntegrationTest do
       end
     end
 
+    test "rejects invalid :max_tell_result_bytes at start" do
+      for value <- [-1, "8192", :infinity, :unlimited, 1.5] do
+        assert {:error, {:init_failed, :error, ArgumentError}} =
+                 GenAgent.start_agent(SimpleAgent,
+                   name: unique_name("bad-tell-result-bytes"),
+                   backend: GenAgent.Backends.Mock,
+                   max_tell_result_bytes: value
+                 )
+      end
+    end
+
     test "accepts boundary :watchdog_ms values" do
       for value <- [1, :infinity] do
         name = unique_name("ok-watchdog")
@@ -201,6 +212,61 @@ defmodule GenAgent.IntegrationTest do
       end
     end
 
+    test "tell result cache evicts old responses when its byte budget is reached" do
+      name = unique_name("tell-result-bytes")
+      large_text = :binary.copy("x", 300_000)
+      script = [Event.new(:text, %{text: large_text}), Event.new(:result, %{text: "ok"})]
+
+      {:ok, pid} =
+        GenAgent.start_agent(SimpleAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          max_tell_result_bytes: 700_000,
+          scripts: [script, script, script]
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+      {:ok, first} = GenAgent.tell(name, "first")
+      wait_until(fn -> match?({:ok, :completed, _}, GenAgent.poll(name, first)) end)
+
+      {:ok, second} = GenAgent.tell_with_completion(name, "second")
+      {:ok, third} = GenAgent.tell_with_completion(name, "third")
+      assert_receive {:gen_agent, :completion, ^name, ^second, {:ok, _}}, 1_000
+      assert_receive {:gen_agent, :completion, ^name, ^third, {:ok, _}}, 1_000
+
+      assert {:error, :not_found} = GenAgent.poll(name, first)
+      assert {:ok, :completed, _} = GenAgent.poll(name, second)
+      assert {:ok, :completed, _} = GenAgent.poll(name, third)
+
+      {_state, data} = :sys.get_state(pid)
+      assert data.tell_result_bytes <= 700_000
+      assert data.tell_result_bytes > 0
+      assert map_size(data.tell_results) == 2
+    end
+
+    test "an oversized completion is delivered but not cached" do
+      name = unique_name("oversized-tell-result")
+
+      {:ok, pid} =
+        GenAgent.start_agent(SimpleAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          max_tell_result_bytes: 0,
+          scripts: [[Event.new(:result, %{text: "ok"})]]
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+      {:ok, ref} = GenAgent.tell_with_completion(name, "work")
+      assert_receive {:gen_agent, :completion, ^name, ^ref, {:ok, %{text: "ok"}}}, 1_000
+      assert {:error, :not_found} = GenAgent.poll(name, ref)
+
+      {_state, data} = :sys.get_state(pid)
+      assert data.tell_result_bytes == 0
+      assert data.tell_results == %{}
+    end
+
     test "start_agent/2 forwards :task_supervisor to init_agent/1 but strips reserved keys" do
       test_pid = self()
 
@@ -227,6 +293,7 @@ defmodule GenAgent.IntegrationTest do
           watchdog_ms: 1_000,
           shutdown: 10_000,
           max_tell_results: 5,
+          max_tell_result_bytes: 5_000,
           foo: :bar,
           test_pid: test_pid
         )

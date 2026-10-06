@@ -586,8 +586,14 @@ defmodule GenAgent do
   `:watchdog_ms` is the per-turn deadline in milliseconds (default
   `600_000`). It must be a positive integer or `:infinity`, which disables
   the watchdog. `:max_tell_results` is the number of completed `tell/2`
-  results kept for `poll/2` (default `100`). It must be a non-negative
-  integer; the oldest results are evicted first and zero retains none.
+  results kept for `poll/2` (default `100`). `:max_tell_result_bytes`
+  bounds their combined serialized size (default `8_388_608`, or 8 MiB),
+  measured with `:erlang.external_size/1` for each ref and result pair.
+  Both limits must be non-negative integers; the oldest results are evicted
+  first when either limit is exceeded. Zero retains none. A single result
+  larger than the byte limit is immediately evicted. Results sent by
+  `tell_with_completion/4` remain pollable until evicted and count against
+  both limits. This measures cached payloads, not total process memory.
 
   `:shutdown` is the supervisor's graceful shutdown timeout in milliseconds
   (default `5_000`), or `:infinity`. A callback still running when this
@@ -603,7 +609,7 @@ defmodule GenAgent do
   An explicit `nil` for a limit is treated as unset and uses the default.
 
   The reserved keys `:name`, `:backend`, `:watchdog_ms`, `:shutdown`,
-  `:max_tell_results`, `:max_events_per_turn`,
+  `:max_tell_results`, `:max_tell_result_bytes`, `:max_events_per_turn`,
   `:max_event_bytes_per_turn`, `:event_retention`, `:max_pending_prompts`,
   `:max_pending_prompt_bytes`, `:max_pending_notifications`, and
   `:max_pending_notification_bytes` are consumed and not forwarded. Any
@@ -661,6 +667,7 @@ defmodule GenAgent do
         :watchdog_ms,
         :shutdown,
         :max_tell_results,
+        :max_tell_result_bytes,
         :max_events_per_turn,
         :max_event_bytes_per_turn,
         :event_retention,
@@ -682,6 +689,7 @@ defmodule GenAgent do
       |> maybe_put(:shutdown, Keyword.get(server_opts, :shutdown))
       |> maybe_put(:watchdog_ms, Keyword.get(server_opts, :watchdog_ms))
       |> maybe_put(:max_tell_results, Keyword.get(server_opts, :max_tell_results))
+      |> maybe_put(:max_tell_result_bytes, Keyword.get(server_opts, :max_tell_result_bytes))
       |> maybe_put(:max_events_per_turn, Keyword.get(server_opts, :max_events_per_turn))
       |> maybe_put(:max_event_bytes_per_turn, Keyword.get(server_opts, :max_event_bytes_per_turn))
       |> maybe_put(:event_retention, Keyword.get(server_opts, :event_retention))
@@ -853,8 +861,9 @@ defmodule GenAgent do
     * `{:error, :not_found}` if the ref is unknown (never issued, or
       pruned from the bounded result cache).
 
-  Only refs returned from `tell/2` are pollable. Refs from `ask/2` are
-  internal and reply directly to the caller.
+  Refs returned from `tell/2` and `tell_with_completion/4` are pollable
+  until evicted by the count or byte limit. Refs from `ask/2` are internal
+  and reply directly to the caller.
   Returns `{:error, :not_found}` if the agent name is not registered.
   """
   @spec poll(name(), request_ref(), timeout()) ::
