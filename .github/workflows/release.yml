@@ -17,6 +17,12 @@ jobs:
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
       paths_released: ${{ steps.release.outputs.paths_released }}
+      core_tag: ${{ steps.release.outputs.tag_name }}
+      claude_tag: ${{ steps.release.outputs['integrations/claude--tag_name'] }}
+      codex_tag: ${{ steps.release.outputs['integrations/codex--tag_name'] }}
+      anthropic_tag: ${{ steps.release.outputs['integrations/anthropic--tag_name'] }}
+      openai_tag: ${{ steps.release.outputs['integrations/openai--tag_name'] }}
+      ensemble_tag: ${{ steps.release.outputs['extensions/ensemble--tag_name'] }}
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
         id: release
@@ -33,8 +39,15 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     steps:
+      - name: Require core release tag
+        if: ${{ contains(fromJSON(needs.release-please.outputs.paths_released), '.') }}
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs.core_tag }}
+        run: test -n "$RELEASE_TAG"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.release-please.outputs.core_tag }}
           persist-credentials: false
 
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
@@ -63,14 +76,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package:
-          - integrations/claude
-          - integrations/codex
-          - integrations/anthropic
-          - integrations/openai
+        include:
+          - package: integrations/claude
+            tag_output: claude_tag
+          - package: integrations/codex
+            tag_output: codex_tag
+          - package: integrations/anthropic
+            tag_output: anthropic_tag
+          - package: integrations/openai
+            tag_output: openai_tag
     steps:
+      - name: Require integration release tag
+        if: ${{ contains(fromJSON(needs.release-please.outputs.paths_released), matrix.package) }}
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs[matrix.tag_output] }}
+        run: test -n "$RELEASE_TAG"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.release-please.outputs[matrix.tag_output] }}
           persist-credentials: false
 
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
@@ -97,8 +121,14 @@ jobs:
     needs: [release-please, publish-integrations]
     if: ${{ needs.release-please.outputs.releases_created == 'true' && contains(fromJSON(needs.release-please.outputs.paths_released), 'extensions/ensemble') }}
     steps:
+      - name: Require Ensemble release tag
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs.ensemble_tag }}
+        run: test -n "$RELEASE_TAG"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.release-please.outputs.ensemble_tag }}
           persist-credentials: false
 
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
