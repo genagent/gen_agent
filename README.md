@@ -259,6 +259,7 @@ See the [Backends guide](guides/backends.md) for backend implementation rules an
 | `resume/1` | Unhalt an agent and drain its mailbox. |
 | `status/2` | Read the agent's current state. |
 | `runtime_snapshot/2` | Read bounded runtime metadata and pending-input counts. |
+| `drain/2` | Refuse new work, finish the active turn, and wait for the agent to exit. |
 | `stop/1` | Terminate the agent. |
 | `child_spec/2` | Build an agent child spec for a caller-owned supervisor. |
 | `stop/2` | Terminate an agent under a caller-owned supervisor. |
@@ -268,13 +269,21 @@ Names resolve through a `Registry`, so callers address agents by name
 (any term). Agents use `restart: :temporary`: a crashed or stopped agent
 must be started explicitly, and its previous state is not restored.
 
-`runtime_snapshot/2` reports the coordinator's current phase, halted
+`runtime_snapshot/2` reports the coordinator's current phase, halted and draining
 flag, queued prompt and buffered notification counts, pending self-chain,
 and active request ref, origin and elapsed/watchdog time. It contains no
 prompt, callback state, backend session or event payload. It is a
 point-in-time observation, not durable state or permission to dispatch.
 The older `status/2` API remains available; its `agent_state` is the
 server's latest retained state, not a live read of an in-flight task.
+
+Use `GenAgent.drain(name, timeout)` during an orderly shutdown. It rejects
+new asks, tells, and acknowledged notifications with `{:error, :draining}`;
+queued asks and completion recipients receive the same error. The active
+turn finishes its callbacks before the agent and backend session terminate.
+`drain/2` returns `:ok` only after that cleanup and process exit. The
+default timeout is `:infinity`; a caller timeout does not cancel a drain
+already accepted by the agent. `stop/1` remains immediate.
 
 ## Request completion messages
 
