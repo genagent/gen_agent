@@ -30,6 +30,14 @@ defmodule GenAgent.Backends.OpenAI do
   3. The next `prompt/2` uses the new `previous_response_id` and
      OpenAI replays all prior context on the server side.
 
+  If the API reports `previous_response_not_found` or a context-window
+  failure for an established chain, the turn emits `{:conversation_lost,
+  body}` as a terminal error and clears `previous_response_id`. The next
+  prompt starts a fresh conversation without restarting the agent process.
+  The failed prompt is not retried automatically. Other HTTP failures leave
+  the conversation ID intact. This backend requires stored responses; it
+  does not replay a local transcript for `store: false` organizations.
+
   ## Instructions do not persist across previous_response_id chains
 
   OpenAI's documentation is explicit: "the instructions used on
@@ -71,6 +79,9 @@ defmodule GenAgent.Backends.OpenAI do
       When set, adds `{"reasoning": {"effort": ...}}` to each request.
     * `:max_output_tokens` -- cap on output tokens per turn. Defaults to `nil`
       (model default). `:max_tokens` remains a deprecated alias.
+    * `:truncation` -- `"auto"` or `"disabled"` for the Responses API.
+      Omitted by default, which uses the API's `"disabled"` default.
+      `"auto"` drops older conversation items when the context window fills.
     * `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults to
       `60_000`; increase it for long-context or slow reasoning turns.
     * `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults to
@@ -92,6 +103,11 @@ defmodule GenAgent.Backends.OpenAI do
   @endpoint "https://api.openai.com/v1/responses"
   @default_model "gpt-5"
   @default_receive_timeout 60_000
+  @conversation_error_codes [
+    "previous_response_not_found",
+    "context_length_exceeded",
+    "context_window_exceeded"
+  ]
   @known_options [
     :api_key,
     :model,
@@ -100,6 +116,7 @@ defmodule GenAgent.Backends.OpenAI do
     :instructions,
     :reasoning_effort,
     :max_output_tokens,
+    :truncation,
     :max_tokens,
     :receive_timeout,
     :connect_timeout,
@@ -112,6 +129,7 @@ defmodule GenAgent.Backends.OpenAI do
     :instructions,
     :reasoning_effort,
     :max_output_tokens,
+    :truncation,
     :receive_timeout,
     :connect_timeout,
     :http_fn,
@@ -128,6 +146,7 @@ defmodule GenAgent.Backends.OpenAI do
           instructions: String.t() | nil,
           reasoning_effort: reasoning_effort(),
           max_output_tokens: pos_integer() | nil,
+          truncation: String.t() | nil,
           receive_timeout: timeout(),
           connect_timeout: timeout() | nil,
           http_fn: (map() -> {:ok, map()} | {:error, term()}),
@@ -138,6 +157,7 @@ defmodule GenAgent.Backends.OpenAI do
   @impl GenAgent.Backend
   def start_session(opts) do
     with :ok <- validate_opts(opts),
+         :ok <- validate_truncation(Keyword.get(opts, :truncation)),
          {:ok, opts} <- normalize_opts(opts) do
       api_key = present(Keyword.get(opts, :api_key)) || present(System.get_env("OPENAI_API_KEY"))
 
@@ -163,6 +183,9 @@ defmodule GenAgent.Backends.OpenAI do
       nil -> :ok
     end
   end
+
+  defp validate_truncation(value) when value in [nil, "auto", "disabled"], do: :ok
+  defp validate_truncation(value), do: {:error, {:invalid_option, :truncation, value}}
 
   defp normalize_opts(opts) do
     case normalize_aliases(opts, :system_prompt, [:instructions, :system]) do
@@ -198,6 +221,7 @@ defmodule GenAgent.Backends.OpenAI do
       instructions: Keyword.get(opts, :system_prompt),
       reasoning_effort: Keyword.get(opts, :reasoning_effort),
       max_output_tokens: Keyword.get(opts, :max_output_tokens),
+      truncation: Keyword.get(opts, :truncation),
       receive_timeout: Keyword.get(opts, :receive_timeout, @default_receive_timeout),
       connect_timeout: Keyword.get(opts, :connect_timeout),
       http_fn: http_fn,
@@ -224,7 +248,14 @@ defmodule GenAgent.Backends.OpenAI do
         {:ok, events, session}
 
       {:error, reason} ->
-        {:error, reason}
+        case conversation_lost_body(session, reason) do
+          {:ok, body} ->
+            error = Event.new(:error, %{reason: {:conversation_lost, body}})
+            {:ok, [error], %{session | previous_response_id: nil}}
+
+          :not_lost ->
+            {:error, reason}
+        end
     end
   rescue
     e -> {:error, {:http_fn_raised, Exception.message(e)}}
@@ -255,6 +286,7 @@ defmodule GenAgent.Backends.OpenAI do
       |> maybe_put(:instructions, session.instructions)
       |> maybe_put(:previous_response_id, session.previous_response_id)
       |> maybe_put(:max_output_tokens, session.max_output_tokens)
+      |> maybe_put(:truncation, session.truncation)
       |> maybe_put_reasoning(session.reasoning_effort)
 
     %{
@@ -274,6 +306,21 @@ defmodule GenAgent.Backends.OpenAI do
 
   defp maybe_put_reasoning(map, nil), do: map
   defp maybe_put_reasoning(map, effort), do: Map.put(map, :reasoning, %{effort: effort})
+
+  defp conversation_lost_body(
+         %__MODULE__{previous_response_id: previous_id},
+         {:http_error, status, %{"error" => %{} = error} = body}
+       )
+       when is_binary(previous_id) and status in [400, 404] do
+    code = error["code"] || error["type"]
+
+    if code in @conversation_error_codes and
+         (status == 400 or code == "previous_response_not_found"),
+       do: {:ok, body},
+       else: :not_lost
+  end
+
+  defp conversation_lost_body(_session, _reason), do: :not_lost
 
   # ---------------------------------------------------------------------------
   # Response parsing
