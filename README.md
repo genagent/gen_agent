@@ -240,7 +240,8 @@ The contract has three required callbacks (`start_session/1`, `prompt/2`,
 `terminate_session/1`). `prompt/3` and `checkpoint_session/2` let CLI
 backends acknowledge a session ID during an active turn, so a later failure
 or interruption does not discard it. `update_session/2` and
-`resume_session/2` remain optional. See `GenAgent.Backend` for details.
+`resume_session/2` and `reset_session/1` remain optional. See
+`GenAgent.Backend` for details.
 
 See the [Backends guide](guides/backends.md) for backend implementation rules and a capability and option comparison.
 
@@ -261,6 +262,7 @@ See the [Backends guide](guides/backends.md) for backend implementation rules an
 | `cancel_request/3` | Remove a queued tell by its exact request ref. |
 | `halt/1` | Pause dispatch after the active turn, without stopping the agent. |
 | `resume/1` | Unhalt an agent and drain its mailbox. |
+| `reset_session/2` | Clear supported backend conversation context between turns while retaining agent state. |
 | `status/2` | Read the agent's current state. |
 | `runtime_snapshot/2` | Read bounded runtime metadata and pending-input counts. |
 | `drain/2` | Refuse new work, finish the active turn, and wait for the agent to exit. |

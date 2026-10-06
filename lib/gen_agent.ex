@@ -216,6 +216,7 @@ defmodule GenAgent do
     * `cancel_request/3` -- remove a queued tell by its request ref.
     * `resume/1` -- unhalt an agent and drain its mailbox.
     * `halt/1` -- halt dispatch after any active turn finishes.
+    * `reset_session/2` -- clear a backend's conversation context between turns.
     * `status/2` -- read the agent's current state.
     * `runtime_snapshot/2` -- read bounded runtime metadata.
     * `drain/2` -- refuse new work, finish the active turn, then stop.
@@ -1070,6 +1071,22 @@ defmodule GenAgent do
   @spec resume(name()) :: :ok
   def resume(name) do
     :gen_statem.cast(via(name), :resume)
+  end
+
+  @doc """
+  Reset an agent's backend conversation context without restarting the agent.
+
+  The backend must implement `c:GenAgent.Backend.reset_session/1`. This
+  call is accepted only while the agent is idle; an active turn returns
+  `{:error, :busy}` so its session cannot be replaced under it. A draining
+  agent returns `{:error, :draining}`. Callback state and queued prompts
+  are preserved. A backend without the callback returns
+  `{:error, :unsupported}`. Returns `{:error, :not_found}` if the agent
+  is not registered. The default call timeout is `:infinity`.
+  """
+  @spec reset_session(name(), timeout()) :: :ok | {:error, term()}
+  def reset_session(name, timeout \\ @default_call_timeout) do
+    call(name, :reset_session, timeout)
   end
 
   @doc """

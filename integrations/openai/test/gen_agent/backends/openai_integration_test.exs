@@ -12,6 +12,9 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
   """
 
   use ExUnit.Case, async: true
+  @compile {:no_warn_undefined, GenAgent}
+
+  alias GenAgent.Backends.OpenAI
 
   @moduletag capture_log: true
 
@@ -96,6 +99,35 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
   end
 
   describe "round trip through GenAgent.ask/2" do
+    test "explicit reset drops the response chain without restarting the agent" do
+      if function_exported?(GenAgent, :reset_session, 1) do
+        observer = self()
+
+        http_fn = fn request ->
+          send(observer, {:request_body, request.body})
+          {:ok, api_response("ok", id: "resp_current")}
+        end
+
+        name = start_openai_agent(http_fn)
+        assert {:ok, _} = GenAgent.ask(name, "one")
+        assert {:ok, _} = GenAgent.ask(name, "two")
+        assert :ok = GenAgent.reset_session(name)
+        assert {:ok, _} = GenAgent.ask(name, "three")
+
+        assert_receive {:request_body, %{input: [%{content: "one"}]} = first}
+        refute Map.has_key?(first, :previous_response_id)
+        assert_receive {:request_body, %{previous_response_id: "resp_current"}}
+        assert_receive {:request_body, %{input: [%{content: "three"}]} = fresh}
+        refute Map.has_key?(fresh, :previous_response_id)
+        assert length(GenAgent.status(name).agent_state.responses) == 3
+      else
+        {:ok, session} = OpenAI.start_session(http_fn: fn _ -> {:ok, api_response("ok")} end)
+        resumed = OpenAI.update_session(session, %{response_id: "resp_current"})
+        assert {:ok, reset} = OpenAI.reset_session(resumed)
+        assert reset.previous_response_id == nil
+      end
+    end
+
     test "assembles a Response from the faked API call" do
       http_fn = fn _req -> {:ok, api_response("hello from the API")} end
       name = start_openai_agent(http_fn)

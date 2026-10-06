@@ -130,6 +130,11 @@ API's `"disabled"` behavior. Other HTTP errors retain the chain. The backend
 always sends `store: true` and does not support local transcript replay for
 organizations where response storage is disabled.
 
+Call `GenAgent.reset_session(name)` between turns to discard the current
+`previous_response_id` and start a fresh conversation on the next prompt.
+The agent process and its application state remain in place. Reset returns
+`{:error, :busy}` during an active turn.
+
 ## Instructions do not persist across turns
 
 OpenAI's docs are explicit: instructions from a prior turn do

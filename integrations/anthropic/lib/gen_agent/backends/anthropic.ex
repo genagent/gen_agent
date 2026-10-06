@@ -52,6 +52,9 @@ defmodule GenAgent.Backends.Anthropic do
     * `:cache` -- opt in to automatic 5-minute prompt caching with
       top-level `cache_control: %{type: "ephemeral"}`. Defaults to `false`.
       Usage reports cache-write and cache-read tokens when present.
+    * `:max_history_turns` -- retain at most this many completed user/assistant
+      pairs in subsequent requests. Defaults to `:infinity`; `0` keeps no
+      prior turns. Older pairs are dropped after each successful turn.
     * `:receive_timeout` -- HTTP receive timeout in milliseconds.
       Defaults to `60_000`. Long-context turns (big messages array,
       slow models) can blow through Req's 15s default, so the backend
@@ -87,6 +90,7 @@ defmodule GenAgent.Backends.Anthropic do
     :system,
     :instructions,
     :cache,
+    :max_history_turns,
     :receive_timeout,
     :connect_timeout,
     :http_fn
@@ -98,6 +102,7 @@ defmodule GenAgent.Backends.Anthropic do
     :max_tokens,
     :system,
     :cache,
+    :max_history_turns,
     :receive_timeout,
     :connect_timeout,
     :http_fn,
@@ -113,6 +118,7 @@ defmodule GenAgent.Backends.Anthropic do
           max_tokens: pos_integer(),
           system: String.t() | nil,
           cache: boolean(),
+          max_history_turns: non_neg_integer() | :infinity,
           receive_timeout: timeout(),
           connect_timeout: timeout() | nil,
           http_fn: (map() -> {:ok, map()} | {:error, term()}),
@@ -124,6 +130,7 @@ defmodule GenAgent.Backends.Anthropic do
   def start_session(opts) do
     with :ok <- validate_opts(opts),
          :ok <- validate_cache(Keyword.get(opts, :cache, false)),
+         :ok <- validate_max_history_turns(Keyword.get(opts, :max_history_turns, :infinity)),
          {:ok, opts} <- normalize_opts(opts) do
       api_key =
         present(Keyword.get(opts, :api_key)) || present(System.get_env("ANTHROPIC_API_KEY"))
@@ -153,6 +160,11 @@ defmodule GenAgent.Backends.Anthropic do
 
   defp validate_cache(value) when is_boolean(value), do: :ok
   defp validate_cache(value), do: {:error, {:invalid_option, :cache, value}}
+  defp validate_max_history_turns(:infinity), do: :ok
+  defp validate_max_history_turns(value) when is_integer(value) and value >= 0, do: :ok
+
+  defp validate_max_history_turns(value),
+    do: {:error, {:invalid_option, :max_history_turns, value}}
 
   defp normalize_opts(opts) do
     case normalize_aliases(opts, :system_prompt, [:system, :instructions]) do
@@ -188,6 +200,7 @@ defmodule GenAgent.Backends.Anthropic do
       max_tokens: Keyword.get(opts, :max_output_tokens, @default_max_tokens),
       system: Keyword.get(opts, :system_prompt),
       cache: Keyword.get(opts, :cache, false),
+      max_history_turns: Keyword.get(opts, :max_history_turns, :infinity),
       receive_timeout: Keyword.get(opts, :receive_timeout, @default_receive_timeout),
       connect_timeout: Keyword.get(opts, :connect_timeout),
       http_fn: http_fn,
@@ -230,10 +243,15 @@ defmodule GenAgent.Backends.Anthropic do
   def update_session(%__MODULE__{} = session, %{text: text}) when is_binary(text) do
     if String.trim(text) == "",
       do: drop_last_user_message(session),
-      else: append_message(session, "assistant", text)
+      else: session |> append_message("assistant", text) |> trim_history()
   end
 
   def update_session(%__MODULE__{} = session, _data), do: session
+
+  if {:reset_session, 1} in GenAgent.Backend.behaviour_info(:callbacks),
+    do: @impl(GenAgent.Backend)
+
+  def reset_session(%__MODULE__{} = session), do: {:ok, %{session | messages: []}}
 
   @impl GenAgent.Backend
   def terminate_session(%__MODULE__{}), do: :ok
@@ -251,6 +269,12 @@ defmodule GenAgent.Backends.Anthropic do
       [%{role: "user"} | rest] -> %{session | messages: Enum.reverse(rest)}
       _ -> session
     end
+  end
+
+  defp trim_history(%__MODULE__{max_history_turns: :infinity} = session), do: session
+
+  defp trim_history(%__MODULE__{max_history_turns: turns, messages: messages} = session) do
+    %{session | messages: Enum.take(messages, -2 * turns)}
   end
 
   defp build_request(%__MODULE__{} = session) do

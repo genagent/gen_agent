@@ -746,6 +746,36 @@ defmodule GenAgent.Server do
     {:keep_state_and_data, [{:reply, from, {:error, :not_current}}]}
   end
 
+  defp dispatch_event({:call, from}, :reset_session, :idle, %Data{draining: false} = data) do
+    result =
+      if function_exported?(data.backend, :reset_session, 1) do
+        try do
+          data.backend.reset_session(data.backend_session)
+        catch
+          _kind, reason -> {:error, {:backend_reset_failed, callback_failure_kind(reason)}}
+        end
+      else
+        {:error, :unsupported}
+      end
+
+    case result do
+      {:ok, session} ->
+        {:keep_state, %{data | backend_session: session}, [{:reply, from, :ok}]}
+
+      {:error, reason} ->
+        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+
+      _ ->
+        {:keep_state_and_data, [{:reply, from, {:error, :invalid_reset_result}}]}
+    end
+  end
+
+  defp dispatch_event({:call, from}, :reset_session, _state, %Data{draining: true}),
+    do: {:keep_state_and_data, [{:reply, from, {:error, :draining}}]}
+
+  defp dispatch_event({:call, from}, :reset_session, _state, _data),
+    do: {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
+
   defp dispatch_event({:call, from}, :status, state, %Data{} = data) do
     status = %{
       state: state,
