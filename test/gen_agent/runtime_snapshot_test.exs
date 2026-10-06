@@ -99,6 +99,7 @@ defmodule GenAgent.RuntimeSnapshotTest do
              [
                :current_request,
                :draining,
+               :halt_pending,
                :halted,
                :pending_notifications,
                :pending_prompts,
@@ -122,6 +123,7 @@ defmodule GenAgent.RuntimeSnapshotTest do
              phase: :idle,
              draining: false,
              halted: false,
+             halt_pending: false,
              pending_prompts: 0,
              pending_notifications: 0,
              self_chain_pending: false,
