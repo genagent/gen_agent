@@ -61,7 +61,8 @@ defmodule GenAgentEnsemble.MixProject do
     ]
 
     for {app, path, hex_constraint} <- backends do
-      if System.get_env("GEN_AGENT_HEX") == "1" do
+      if System.get_env("GEN_AGENT_HEX") == "1" and
+           System.get_env("GEN_AGENT_BACKENDS_PATH") != "1" do
         {app, hex_constraint, only: [:dev, :test]}
       else
         {app, path: "../../integrations/#{path}", only: [:dev, :test]}
