@@ -225,6 +225,7 @@ defmodule GenAgent.IntegrationTest do
           backend: GenAgent.Backends.Mock,
           task_supervisor: :some_supervisor,
           watchdog_ms: 1_000,
+          shutdown: 10_000,
           max_tell_results: 5,
           foo: :bar,
           test_pid: test_pid
@@ -256,6 +257,21 @@ defmodule GenAgent.IntegrationTest do
   end
 
   describe "caller-owned supervision" do
+    test "child_spec/2 passes through and validates the shutdown timeout" do
+      opts = [
+        name: unique_name("shutdown-spec"),
+        backend: GenAgent.Backends.Mock,
+        task_supervisor: self()
+      ]
+
+      assert GenAgent.child_spec(SimpleAgent, opts).shutdown == 5_000
+      assert GenAgent.child_spec(SimpleAgent, opts ++ [shutdown: :infinity]).shutdown == :infinity
+
+      assert_raise ArgumentError, ~r/:shutdown/, fn ->
+        GenAgent.child_spec(SimpleAgent, opts ++ [shutdown: -1])
+      end
+    end
+
     test "requires an explicit task supervisor and preserves temporary children" do
       assert_raise KeyError, fn ->
         GenAgent.child_spec(SimpleAgent,

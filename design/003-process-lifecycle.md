@@ -19,6 +19,11 @@ user cleanup code that silently never fires.
 Trapping exits converts the shutdown into
 `{:EXIT, parent, :shutdown}` -- which `:gen_statem` handles by
 calling `terminate/3` before the process dies. That's the fix.
+This clean path only applies when the agent process can handle the exit
+within its child spec's `:shutdown` window. The default is 5 seconds;
+after that the supervisor sends `:kill`, which bypasses `terminate/3`.
+Both `GenAgent.start_agent/2` and `GenAgent.child_spec/2` accept a
+`:shutdown` option (a non-negative millisecond count or `:infinity`).
 
 Prompt tasks use `Task.Supervisor.async/2`, linking each task to
 its owning agent as well as the shared task supervisor. The link
@@ -96,7 +101,15 @@ Users who want "interrupt AND halt" return `{:halt, state}` from
 `stop/1` is for "I am done with this agent forever." It routes
 through `DynamicSupervisor.terminate_child/2` so the supervisor's
 `terminate/3` path runs, which means `terminate_session/1` and
-`terminate_agent/2` fire cleanly thanks to `trap_exit`.
+`terminate_agent/2` fire cleanly thanks to `trap_exit` when shutdown
+finishes before the child timeout. A blocking callback can prevent the
+agent from handling the shutdown signal. If the timeout expires, the
+supervisor kills the agent and both cleanup callbacks are skipped.
+`stop/1` waits for that termination and the owning `DynamicSupervisor`
+can delay unrelated child operations while it waits. Set `:shutdown`
+above the maximum expected callback and cleanup duration, and avoid
+unbounded blocking work inside agent callbacks. `:infinity` preserves
+cleanup for a callback that eventually returns but can hang a supervisor.
 
 ## Load-bearing consequences
 
