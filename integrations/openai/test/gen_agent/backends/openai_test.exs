@@ -571,6 +571,26 @@ defmodule GenAgent.Backends.OpenAITest do
       assert usage_event.data.output_tokens == 148
     end
 
+    test "reports cached input tokens when the API includes them" do
+      http_fn = fn _request ->
+        {:ok, response} = ok_response("ok").(nil)
+
+        {:ok,
+         put_in(response["usage"]["input_tokens_details"], %{
+           "cached_tokens" => 7
+         })}
+      end
+
+      {:ok, session} = OpenAI.start_session(http_fn: http_fn)
+
+      assert {:ok, [%Event{kind: :usage, data: usage}, %Event{kind: :result}], _} =
+               OpenAI.prompt(session, "hello")
+
+      assert usage.input_tokens == 10
+      assert usage.cached_input_tokens == 7
+      assert usage.total_tokens == 15
+    end
+
     test "omits reasoning_tokens when the field is absent" do
       {:ok, session} =
         OpenAI.start_session(

@@ -49,6 +49,9 @@ defmodule GenAgent.Backends.Anthropic do
       `:max_tokens` remains a deprecated alias.
     * `:system_prompt` -- system prompt (string). `:system` and
       `:instructions` remain deprecated aliases.
+    * `:cache` -- opt in to automatic 5-minute prompt caching with
+      top-level `cache_control: %{type: "ephemeral"}`. Defaults to `false`.
+      Usage reports cache-write and cache-read tokens when present.
     * `:receive_timeout` -- HTTP receive timeout in milliseconds.
       Defaults to `60_000`. Long-context turns (big messages array,
       slow models) can blow through Req's 15s default, so the backend
@@ -83,6 +86,7 @@ defmodule GenAgent.Backends.Anthropic do
     :system_prompt,
     :system,
     :instructions,
+    :cache,
     :receive_timeout,
     :connect_timeout,
     :http_fn
@@ -93,6 +97,7 @@ defmodule GenAgent.Backends.Anthropic do
     :model,
     :max_tokens,
     :system,
+    :cache,
     :receive_timeout,
     :connect_timeout,
     :http_fn,
@@ -107,6 +112,7 @@ defmodule GenAgent.Backends.Anthropic do
           model: String.t(),
           max_tokens: pos_integer(),
           system: String.t() | nil,
+          cache: boolean(),
           receive_timeout: timeout(),
           connect_timeout: timeout() | nil,
           http_fn: (map() -> {:ok, map()} | {:error, term()}),
@@ -117,6 +123,7 @@ defmodule GenAgent.Backends.Anthropic do
   @impl GenAgent.Backend
   def start_session(opts) do
     with :ok <- validate_opts(opts),
+         :ok <- validate_cache(Keyword.get(opts, :cache, false)),
          {:ok, opts} <- normalize_opts(opts) do
       api_key =
         present(Keyword.get(opts, :api_key)) || present(System.get_env("ANTHROPIC_API_KEY"))
@@ -143,6 +150,9 @@ defmodule GenAgent.Backends.Anthropic do
       nil -> :ok
     end
   end
+
+  defp validate_cache(value) when is_boolean(value), do: :ok
+  defp validate_cache(value), do: {:error, {:invalid_option, :cache, value}}
 
   defp normalize_opts(opts) do
     case normalize_aliases(opts, :system_prompt, [:system, :instructions]) do
@@ -177,6 +187,7 @@ defmodule GenAgent.Backends.Anthropic do
       model: Keyword.get(opts, :model, @default_model),
       max_tokens: Keyword.get(opts, :max_output_tokens, @default_max_tokens),
       system: Keyword.get(opts, :system_prompt),
+      cache: Keyword.get(opts, :cache, false),
       receive_timeout: Keyword.get(opts, :receive_timeout, @default_receive_timeout),
       connect_timeout: Keyword.get(opts, :connect_timeout),
       http_fn: http_fn,
@@ -250,6 +261,7 @@ defmodule GenAgent.Backends.Anthropic do
         messages: session.messages
       }
       |> maybe_put(:system, session.system)
+      |> maybe_cache(session.cache)
 
     %{
       url: @endpoint,
@@ -315,20 +327,22 @@ defmodule GenAgent.Backends.Anthropic do
   defp extract_text(_), do: ""
 
   defp extract_usage(%{"usage" => %{} = usage}) do
-    input = usage["input_tokens"]
-    output = usage["output_tokens"]
+    values =
+      %{
+        input_tokens: usage["input_tokens"],
+        output_tokens: usage["output_tokens"],
+        cache_creation_input_tokens: usage["cache_creation_input_tokens"],
+        cache_read_input_tokens: usage["cache_read_input_tokens"]
+      }
+      |> drop_nil_values()
 
-    case {input, output} do
-      {nil, nil} ->
-        nil
-
-      _ ->
-        %{input_tokens: input, output_tokens: output}
-        |> drop_nil_values()
-    end
+    if map_size(values) == 0, do: nil, else: values
   end
 
   defp extract_usage(_), do: nil
+
+  defp maybe_cache(body, true), do: Map.put(body, :cache_control, %{type: "ephemeral"})
+  defp maybe_cache(body, false), do: body
 
   defp default_http(%{url: url, headers: headers, body: body} = request) do
     req_opts =
