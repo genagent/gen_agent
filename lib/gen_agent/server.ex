@@ -20,6 +20,7 @@ defmodule GenAgent.Server do
 
   @default_watchdog_ms :timer.minutes(10)
   @default_max_tell_results 100
+  @default_max_tell_result_bytes 8_388_608
   @default_max_events_per_turn 1_000
   @default_max_event_bytes_per_turn 1_048_576
   @default_event_retention :compact
@@ -42,6 +43,7 @@ defmodule GenAgent.Server do
       :current_request,
       :watchdog_ms,
       :max_tell_results,
+      :max_tell_result_bytes,
       :max_events_per_turn,
       :max_event_bytes_per_turn,
       :event_retention,
@@ -72,6 +74,7 @@ defmodule GenAgent.Server do
       pending_notification_bytes: 0,
       tell_results: %{},
       tell_result_order: :queue.new(),
+      tell_result_bytes: 0,
       # Opt-in stream recipients by request ref. An entry exists from
       # admission until the request is dispatched, cancelled or failed.
       stream_recipients: %{}
@@ -147,6 +150,10 @@ defmodule GenAgent.Server do
     init_opts = Keyword.get(opts, :init_opts, [])
     watchdog_ms = Keyword.get(opts, :watchdog_ms, @default_watchdog_ms)
     max_tell_results = Keyword.get(opts, :max_tell_results, @default_max_tell_results)
+
+    max_tell_result_bytes =
+      Keyword.get(opts, :max_tell_result_bytes, @default_max_tell_result_bytes)
+
     max_events_per_turn = Keyword.get(opts, :max_events_per_turn, @default_max_events_per_turn)
 
     max_event_bytes_per_turn =
@@ -167,6 +174,7 @@ defmodule GenAgent.Server do
 
     validate_watchdog!(watchdog_ms)
     validate_pending_limit!(max_tell_results, :max_tell_results)
+    validate_pending_limit!(max_tell_result_bytes, :max_tell_result_bytes)
     validate_capture_limit!(max_events_per_turn, :max_events_per_turn)
     validate_capture_limit!(max_event_bytes_per_turn, :max_event_bytes_per_turn)
     validate_event_retention!(event_retention)
@@ -189,6 +197,7 @@ defmodule GenAgent.Server do
         agent_state: agent_state,
         watchdog_ms: watchdog_ms,
         max_tell_results: max_tell_results,
+        max_tell_result_bytes: max_tell_result_bytes,
         max_events_per_turn: max_events_per_turn,
         max_event_bytes_per_turn: max_event_bytes_per_turn,
         event_retention: event_retention,
@@ -2109,15 +2118,35 @@ defmodule GenAgent.Server do
   end
 
   defp store_tell_result(%Data{} = data, ref, result) do
-    tell_results = Map.put(data.tell_results, ref, result)
-    order = :queue.in(ref, data.tell_result_order)
+    previous = Map.get(data.tell_results, ref)
+    previous_bytes = if previous, do: :erlang.external_size({ref, previous}), else: 0
 
-    if map_size(tell_results) > data.max_tell_results do
-      {{:value, oldest}, order} = :queue.out(order)
-      tell_results = Map.delete(tell_results, oldest)
-      %{data | tell_results: tell_results, tell_result_order: order}
+    %{
+      data
+      | tell_results: Map.put(data.tell_results, ref, result),
+        tell_result_order:
+          if(previous, do: data.tell_result_order, else: :queue.in(ref, data.tell_result_order)),
+        tell_result_bytes:
+          data.tell_result_bytes + :erlang.external_size({ref, result}) - previous_bytes
+    }
+    |> prune_tell_results()
+  end
+
+  defp prune_tell_results(%Data{} = data) do
+    if map_size(data.tell_results) > data.max_tell_results or
+         data.tell_result_bytes > data.max_tell_result_bytes do
+      {{:value, oldest}, order} = :queue.out(data.tell_result_order)
+      result = Map.fetch!(data.tell_results, oldest)
+
+      %{
+        data
+        | tell_results: Map.delete(data.tell_results, oldest),
+          tell_result_order: order,
+          tell_result_bytes: data.tell_result_bytes - :erlang.external_size({oldest, result})
+      }
+      |> prune_tell_results()
     else
-      %{data | tell_results: tell_results, tell_result_order: order}
+      data
     end
   end
 

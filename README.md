@@ -186,8 +186,12 @@ idle <--- handle_response --- processing (turn done)
   is called.
 - **Watchdog** -- a `:state_timeout` kills any turn that runs longer than
   the `:watchdog_ms` deadline (positive integer milliseconds or `:infinity`,
-  default 10 minutes). `:max_tell_results` (non-negative integer, default 100)
-  bounds how many `tell/2` results `poll/2` retains; zero retains none.
+  default 10 minutes). `:max_tell_results` (default 100) and
+  `:max_tell_result_bytes` (default 8 MiB) bound the completed tell results
+  retained for `poll/2`. Both are non-negative integers; zero retains none.
+  The byte budget uses `:erlang.external_size/1` for each ref and result,
+  including results also sent by `tell_with_completion/4`. The oldest
+  results are evicted first; a result larger than the budget is not retained.
 
 ## Lifecycle hooks
 
