@@ -5,11 +5,13 @@ defmodule GenAgent.ResponseTest do
 
   test "manually constructed responses leave final_message unspecified" do
     assert %Response{text: "synthetic"}.final_message == nil
+    assert %Response{text: "synthetic"}.prompt == nil
   end
 
   test "metadata defaults to an empty map for manual and backend responses" do
     assert %Response{}.metadata == %{}
     assert Response.from_events([Event.new(:result, %{text: "done"})]).metadata == %{}
+    assert Response.from_events([Event.new(:result, %{text: "done"})]).prompt == nil
   end
 
   describe "from_events/2" do
