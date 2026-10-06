@@ -52,6 +52,49 @@ defmodule GenAgent.ReleaseWorkflowTest do
     assert status == 0, output
   end
 
+  test "publish jobs check out the tag for the released component" do
+    release = File.read!(Path.join(@root, ".github/workflows/release.yml"))
+
+    for {path, output} <- [
+          {"integrations/claude", "claude_tag"},
+          {"integrations/codex", "codex_tag"},
+          {"integrations/anthropic", "anthropic_tag"},
+          {"integrations/openai", "openai_tag"},
+          {"extensions/ensemble", "ensemble_tag"}
+        ] do
+      assert release =~
+               "#{output}: \${{ steps.release.outputs['#{path}--tag_name'] }}"
+    end
+
+    assert release =~ "core_tag: \${{ steps.release.outputs.tag_name }}"
+
+    for {job, tag_ref} <- [
+          {"publish-core", "needs.release-please.outputs.core_tag"},
+          {"publish-integrations", "needs.release-please.outputs[matrix.tag_output]"},
+          {"publish-ensemble", "needs.release-please.outputs.ensemble_tag"}
+        ] do
+      block = job_block(release, job)
+      assert block =~ "RELEASE_TAG: \${{ #{tag_ref} }}"
+      assert block =~ "run: test -n \"$RELEASE_TAG\""
+      assert block =~ "ref: \${{ #{tag_ref} }}"
+      assert index!(block, "run: test -n") < index!(block, "actions/checkout@")
+    end
+
+    for {path, output} <- [
+          {"integrations/claude", "claude_tag"},
+          {"integrations/codex", "codex_tag"},
+          {"integrations/anthropic", "anthropic_tag"},
+          {"integrations/openai", "openai_tag"}
+        ] do
+      assert release =~ "package: #{path}\n            tag_output: #{output}"
+    end
+  end
+
+  defp index!(text, needle) do
+    {index, _length} = :binary.match(text, needle)
+    index
+  end
+
   defp job_block(workflow, name) do
     [_, body] = String.split(workflow, "  #{name}:\n", parts: 2)
     body |> String.split(~r/\n  [a-z][a-z-]*:\n/, parts: 2) |> hd()
