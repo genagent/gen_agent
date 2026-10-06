@@ -129,6 +129,8 @@ defmodule GenAgent do
     * `c:handle_response/3` -- a turn completed, decide what to do next.
     * `c:handle_error/3` (optional) -- a turn failed, decide what to do next.
     * `c:handle_event/2` (optional) -- an external event arrived via `notify/2`.
+    * `c:handle_info/2` (optional) -- an ordinary OTP message arrived, such
+      as a timer, monitor `:DOWN`, or completion from another agent.
     * `c:handle_stream_event/2` (optional) -- a backend event arrived mid-turn.
       Runs inside the prompt task, not the agent process.
     * `c:terminate_agent/2` (optional) -- the agent is shutting down.
@@ -141,15 +143,16 @@ defmodule GenAgent do
     * `c:post_run/1` -- on clean `{:halt, state}` from a decision callback or
       `c:pre_turn/2`. For completion side effects.
 
-  The `use GenAgent` macro provides default implementations of the optional
-  callbacks and lifecycle hooks.
+  The `use GenAgent` macro provides default implementations of most optional
+  callbacks and lifecycle hooks. It deliberately leaves `handle_info/2`
+  undefined so unexpected OTP messages can be logged.
 
   ### Where callbacks run
 
   | Callback or step | Runs in |
   | --- | --- |
   | `c:init_agent/1`, `c:pre_run/1`, `c:pre_turn/2` | agent process |
-  | `c:handle_response/3`, `c:handle_error/3`, `c:handle_event/2` | agent process |
+  | `c:handle_response/3`, `c:handle_error/3`, `c:handle_event/2`, `c:handle_info/2` | agent process |
   | `c:post_turn/3`, `c:post_run/1`, `c:terminate_agent/2` | agent process |
   | `c:handle_stream_event/2` | prompt task |
   | Backend `prompt/2,3`, its event stream, `update_session/2` | prompt task |
@@ -345,6 +348,22 @@ defmodule GenAgent do
   @callback handle_event(event :: term(), agent_state()) :: callback_return()
 
   @doc """
+  Handle an ordinary OTP message sent to the agent process. Optional.
+
+  Timers, monitor `:DOWN` messages, and messages from other agents reach this
+  callback after GenAgent has handled its own task and Registry messages.
+  For example, `Process.send_after(self(), :retry, delay_ms)` can trigger a
+  later `{:prompt, text, state}` without blocking the agent process.
+  Messages received during a turn are buffered under the same count and byte
+  limits as `notify/2` events, then handled against the completed turn's
+  state. Return `{:noreply, state}`, `{:prompt, text, state}`, or
+  `{:halt, state}` as in `handle_event/2`. If absent, unexpected messages are
+  logged and discarded. Exceptions and invalid returns are logged and leave
+  the previous state intact.
+  """
+  @callback handle_info(message :: term(), agent_state()) :: callback_return()
+
+  @doc """
   A streaming event arrived mid-turn. Optional.
 
   Runs inside the task that is driving the prompt, not the agent process.
@@ -498,6 +517,7 @@ defmodule GenAgent do
   @optional_callbacks [
     handle_error: 3,
     handle_event: 2,
+    handle_info: 2,
     handle_stream_event: 2,
     terminate_agent: 2,
     pre_run: 1,
@@ -601,7 +621,8 @@ defmodule GenAgent do
   `:max_pending_prompt_bytes` and `:max_pending_notification_bytes`
   (both default `1_048_576`). Limits are non-negative integers; zero
   disables that pending queue. Bytes are the sum of
-  `:erlang.external_size/1` of each queued prompt or notification payload,
+  `:erlang.external_size/1` of each queued prompt or notification payload
+  (including ordinary OTP messages deferred for `c:handle_info/2`),
   not the entire process memory. The active prompt and notifications
   handled immediately while idle are not pending. Self-chaining has one
   reserved slot outside the prompt count limit, but its payload must fit
@@ -1061,7 +1082,8 @@ defmodule GenAgent do
   Read a bounded, metadata-only runtime snapshot of an agent.
 
   `pending_prompts` counts the prompt mailbox; `pending_notifications`
-  counts notifications buffered during a turn; `self_chain_pending`
+  counts notifications and ordinary OTP messages buffered during a turn;
+  `self_chain_pending`
   reports a separately held callback-generated follow-up prompt.
   `draining` is true after `drain/2` has stopped accepting work and before
   the agent exits.

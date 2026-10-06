@@ -153,24 +153,26 @@ defmodule GenAgent.FormatStatusTest do
     refute log =~ @prompt
   end
 
-  test "runtime callback crash does not render callback arguments", %{pid: pid} do
-    Process.unlink(pid)
-    monitor = Process.monitor(pid)
+  test "unknown calls preserve the agent and do not log request arguments", %{
+    pid: pid,
+    name: name
+  } do
     assert {:ok, _} = :gen_statem.call(pid, {:tell, @prompt})
     assert_receive {:backend_prompt, _worker, @prompt}
     assert {:ok, _} = :gen_statem.call(pid, {:tell, "PROMPT-QUEUED"})
 
     log =
       capture_log(fn ->
-        catch_exit(:gen_statem.call(pid, {:unexpected, @prompt}))
-        assert_receive {:DOWN, ^monitor, :process, ^pid, _reason}
+        assert {:error, :unknown_request} = :gen_statem.call(pid, {:unexpected, @prompt})
         Logger.flush()
       end)
 
-    assert log =~ "state callback failed"
+    assert log =~ "received an unknown call"
     refute log =~ @secret
     refute log =~ @prompt
     refute log =~ "PROMPT-QUEUED"
+    assert Process.alive?(pid)
+    assert GenAgent.status(name).state == :processing
   end
 
   test "initialization failure does not render start arguments" do
