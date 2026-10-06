@@ -504,6 +504,7 @@ GenAgent emits telemetry events for observability:
 [:gen_agent, :mailbox, :queued]  # %{agent, depth}
 [:gen_agent, :input, :rejected]  # %{agent, reason: {:overloaded, info}}
 [:gen_agent, :halted]            # %{agent}
+[:gen_agent, :terminated]        # %{agent, reason}; callback-driven exits only
 ```
 
 Enough to build a communication graph, track latency, alert on stuck

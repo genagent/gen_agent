@@ -239,6 +239,7 @@ defmodule GenAgent do
     * `[:gen_agent, :mailbox, :queued]`
     * `[:gen_agent, :input, :rejected]`
     * `[:gen_agent, :halted]`
+    * `[:gen_agent, :terminated]`
 
   Use the content-free turn events for metrics. The older prompt and
   event telemetry can include prompts, raw errors, and agent state.

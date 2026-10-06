@@ -69,6 +69,69 @@ defmodule GenAgent.TurnTelemetryTest do
 
   defp ask(pid, prompt), do: :gen_statem.call(pid, {:ask, prompt}, 5_000)
 
+  test "termination telemetry reports normal and abnormal callback-driven exits",
+       %{name: name, task_sup: task_sup} do
+    observer = self()
+    handler = "terminated-telemetry-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:gen_agent, :terminated],
+        fn event, measurements, metadata, _ ->
+          if metadata.agent == name,
+            do: send(observer, {:terminated, event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    normal = start_agent(name, task_sup, [])
+    assert :ok = :gen_statem.stop(normal, :normal, 1_000)
+
+    assert_receive {:terminated, [:gen_agent, :terminated], %{system_time: time},
+                    %{agent: ^name, reason: :normal}},
+                   500
+
+    assert is_integer(time)
+
+    crashed = start_agent(name, task_sup, [])
+    Process.unlink(crashed)
+    assert :ok = :gen_statem.stop(crashed, :fixture_failure, 1_000)
+
+    assert_receive {:terminated, [:gen_agent, :terminated], %{system_time: time},
+                    %{agent: ^name, reason: :fixture_failure}},
+                   500
+
+    assert is_integer(time)
+  end
+
+  test "an abrupt kill bypasses termination telemetry", %{name: name, task_sup: task_sup} do
+    observer = self()
+    handler = "killed-telemetry-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:gen_agent, :terminated],
+        fn event, measurements, metadata, _ ->
+          if metadata.agent == name,
+            do: send(observer, {:terminated, event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    pid = start_agent(name, task_sup, [])
+    Process.unlink(pid)
+    monitor = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :killed}, 500
+    refute_receive {:terminated, [:gen_agent, :terminated], _, _}, 0
+  end
+
   test "state, mailbox, and notification telemetry tracks a queued turn",
        %{name: name, task_sup: task_sup} do
     parent = self()
