@@ -111,7 +111,7 @@ defmodule GenAgentEnsemble.IEx do
   end
 
   @doc """
-  Poll `name`/`token` until the token completes or `timeout` elapses.
+  Wait for `name`/`token` to complete without consuming its stored result.
 
   Returns the `%Response{}` on success; raises on error or timeout.
   The iex counterpart to `GenAgentEnsemble.ask/3` for cases where
@@ -120,22 +120,12 @@ defmodule GenAgentEnsemble.IEx do
   """
   @spec await(String.t(), String.t(), timeout()) :: Response.t()
   def await(name, token, timeout \\ 30_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_await(name, token, deadline)
-  end
-
-  defp do_await(name, token, deadline) do
-    case GenAgentEnsemble.poll(name, token) do
-      {:ok, :completed, %Response{} = response} ->
+    case GenAgentEnsemble.await(name, token, timeout) do
+      {:ok, %Response{} = response} ->
         response
 
-      {:ok, :pending} ->
-        if System.monotonic_time(:millisecond) < deadline do
-          Process.sleep(50)
-          do_await(name, token, deadline)
-        else
-          raise "E.await(#{inspect(name)}, #{inspect(token)}) timed out"
-        end
+      {:error, :timeout} ->
+        raise "E.await(#{inspect(name)}, #{inspect(token)}) timed out"
 
       {:error, reason} ->
         raise "E.await(#{inspect(name)}, #{inspect(token)}) failed: #{inspect(reason)}"

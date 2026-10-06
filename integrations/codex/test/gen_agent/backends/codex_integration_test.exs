@@ -33,7 +33,8 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
           :skip_git_repo_check,
           :model,
           :cwd,
-          :working_dir
+          :working_dir,
+          :response_text
         ])
 
       {:ok, backend_opts, %State{observer: opts[:observer]}}
@@ -136,6 +137,271 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
     assert followup.session_id == id
     assert initial.text == "ok"
     assert followup.text == "42"
+
+    # Recorded totals are 14956 then 29938; the follow-up reports the difference.
+    assert initial.usage.input_tokens == 14_956
+    assert followup.usage.input_tokens == 14_982
+    assert followup.usage.cached_input_tokens == 12_160
+    assert followup.usage.output_tokens == 5
+    assert followup.usage.cache_write_input_tokens == 0
+    assert followup.usage.reasoning_output_tokens == 0
+  end
+
+  test "host-recorded live totals report a per-turn delta of 16294" do
+    first = [
+      event("thread.started", %{"thread_id" => "thread-live"}),
+      event("turn.completed", %{
+        "usage" => %{
+          "input_tokens" => 14_985,
+          "cached_input_tokens" => 11_008,
+          "cache_write_input_tokens" => 0,
+          "output_tokens" => 5,
+          "reasoning_output_tokens" => 0
+        }
+      })
+    ]
+
+    second = [
+      event("thread.started", %{"thread_id" => "thread-live"}),
+      event("turn.completed", %{
+        "usage" => %{
+          "input_tokens" => 31_279,
+          "cached_input_tokens" => 25_088,
+          "cache_write_input_tokens" => 0,
+          "output_tokens" => 11,
+          "reasoning_output_tokens" => 0
+        }
+      })
+    ]
+
+    {:ok, agent} = Agent.start_link(fn -> [first, second] end)
+
+    name =
+      start_codex_agent(fn _, _ ->
+        {:ok, Agent.get_and_update(agent, fn [h | t] -> {h, t} end)}
+      end)
+
+    assert {:ok, one} = GenAgent.ask(name, "one")
+    assert {:ok, two} = GenAgent.ask(name, "two")
+    assert one.usage.input_tokens == 14_985
+    assert two.usage.input_tokens == 16_294
+    assert two.usage.cached_input_tokens == 14_080
+    assert two.usage.output_tokens == 6
+  end
+
+  describe "response_text option" do
+    @commentary "Let me inspect lib/foo.ex before answering."
+    @final_json ~s({"module":"Foo","public_functions":2})
+
+    defp message(text) do
+      event("item.completed", %{"item" => %{"type" => "agent_message", "text" => text}})
+    end
+
+    defp commentary_then_json(thread_id) do
+      [
+        event("thread.started", %{"thread_id" => thread_id}),
+        event("turn.started", %{}),
+        message(@commentary),
+        event("item.started", %{
+          "item" => %{"id" => "cmd-1", "type" => "command_execution", "status" => "in_progress"}
+        }),
+        event("item.completed", %{
+          "item" => %{
+            "id" => "cmd-1",
+            "type" => "command_execution",
+            "command" => "cat lib/foo.ex",
+            "aggregated_output" => "defmodule Foo do ... end",
+            "exit_code" => 0,
+            "status" => "completed"
+          }
+        }),
+        message(@final_json),
+        event("turn.completed", %{"usage" => %{"input_tokens" => 20, "output_tokens" => 8}})
+      ]
+    end
+
+    defp stream_kinds(name) do
+      Enum.map(GenAgent.status(name).agent_state.stream_events, & &1.kind)
+    end
+
+    test "default keeps the joined text of every agent message" do
+      name = start_codex_agent(fn _, _ -> {:ok, commentary_then_json("t-default")} end)
+
+      assert {:ok, response} = GenAgent.ask(name, "Describe Foo as JSON")
+      assert response.text == @commentary <> "\n\n" <> @final_json
+      assert {:error, %Jason.DecodeError{}} = Jason.decode(response.text)
+      refute Map.has_key?(response.terminal.data, :text)
+
+      assert Enum.map(response.events, & &1.kind) == [
+               :text,
+               :tool_use,
+               :tool_result,
+               :text,
+               :usage,
+               :result
+             ]
+
+      assert stream_kinds(name) == [:text, :tool_use, :tool_result, :text, :usage, :result]
+    end
+
+    test ":final_message returns only the final agent message, so JSON after commentary parses" do
+      name =
+        start_codex_agent(fn _, _ -> {:ok, commentary_then_json("t-final")} end,
+          response_text: :final_message
+        )
+
+      assert {:ok, response} = GenAgent.ask(name, "Describe Foo as JSON")
+      assert response.text == @final_json
+      assert Jason.decode!(response.text) == %{"module" => "Foo", "public_functions" => 2}
+      assert response.session_id == "t-final"
+      assert response.usage == %{input_tokens: 20, output_tokens: 8}
+
+      # Every message still streams and is retained; only the terminal text differs.
+      assert Enum.map(response.events, & &1.kind) == [
+               :text,
+               :tool_use,
+               :tool_result,
+               :text,
+               :usage,
+               :result
+             ]
+
+      assert Enum.map(response.events, & &1.data[:text]) |> Enum.reject(&is_nil/1) == [
+               @commentary,
+               @final_json,
+               @final_json
+             ]
+
+      assert stream_kinds(name) == [:text, :tool_use, :tool_result, :text, :usage, :result]
+      assert response.terminal.data.text == @final_json
+    end
+
+    test ":final_message keeps an empty final message empty and reports no messages as empty" do
+      {:ok, turns} =
+        Agent.start_link(fn ->
+          [
+            [message("draft"), message(""), event("turn.completed", %{})],
+            [event("turn.completed", %{})]
+          ]
+        end)
+
+      name =
+        start_codex_agent(
+          fn _, _ -> {:ok, Agent.get_and_update(turns, fn [h | t] -> {h, t} end)} end,
+          response_text: :final_message
+        )
+
+      assert {:ok, %{text: ""} = response} = GenAgent.ask(name, "empty final")
+      assert Enum.map(response.events, & &1.kind) == [:text, :text, :result]
+      assert {:ok, %{text: "", events: [%{kind: :result}]}} = GenAgent.ask(name, "silent")
+    end
+
+    test ":final_message is retained on the resumed turn without a stale message" do
+      observer = self()
+
+      {:ok, turns} =
+        Agent.start_link(fn ->
+          [
+            [
+              event("thread.started", %{"thread_id" => "t-resume"}),
+              message("first answer"),
+              event("turn.completed", %{"usage" => %{"input_tokens" => 10, "output_tokens" => 2}})
+            ],
+            [
+              event("thread.started", %{"thread_id" => "t-resume"}),
+              event("turn.completed", %{"usage" => %{"input_tokens" => 25, "output_tokens" => 5}})
+            ],
+            [
+              event("thread.started", %{"thread_id" => "t-resume"}),
+              message("ignored draft"),
+              message("third answer"),
+              event("turn.completed", %{"usage" => %{"input_tokens" => 40, "output_tokens" => 9}})
+            ]
+          ]
+        end)
+
+      name =
+        start_codex_agent(
+          fn _, session ->
+            send(observer, {:exec_call, session.thread_id, session.response_text})
+            {:ok, Agent.get_and_update(turns, fn [h | t] -> {h, t} end)}
+          end,
+          response_text: :final_message
+        )
+
+      assert {:ok, first} = GenAgent.ask(name, "one")
+      assert_receive {:exec_call, nil, :final_message}
+      assert first.text == "first answer"
+      assert first.usage == %{input_tokens: 10, output_tokens: 2}
+
+      assert {:ok, second} = GenAgent.ask(name, "two")
+      assert_receive {:exec_call, "t-resume", :final_message}
+      assert second.text == ""
+      assert second.session_id == "t-resume"
+      assert second.usage == %{input_tokens: 15, output_tokens: 3}
+
+      assert {:ok, third} = GenAgent.ask(name, "three")
+      assert_receive {:exec_call, "t-resume", :final_message}
+      assert third.text == "third answer"
+      assert third.usage == %{input_tokens: 15, output_tokens: 4}
+    end
+
+    test ":final_message leaves failed turns as errors and keeps the thread checkpoint" do
+      observer = self()
+
+      exec_fn = fn prompt, session ->
+        send(observer, {:exec_call, prompt, session.thread_id})
+
+        case prompt do
+          "fail" ->
+            {:ok,
+             [
+               event("thread.started", %{"thread_id" => "t-failed"}),
+               message("partial answer"),
+               event("turn.failed", %{"error" => "provider failed"})
+             ]}
+
+          "dangling" ->
+            {:ok, [message("partial answer"), event("error", %{"message" => "network down"})]}
+
+          "truncated" ->
+            {:ok, [message("partial answer")]}
+
+          _ ->
+            {:ok,
+             [event("thread.started", %{"thread_id" => "t-failed"}), event("turn.completed", %{})]}
+        end
+      end
+
+      name = start_codex_agent(exec_fn, response_text: :final_message)
+
+      assert {:error, "provider failed"} = GenAgent.ask(name, "fail")
+      assert_receive {:exec_call, "fail", nil}
+      assert {:error, "network down"} = GenAgent.ask(name, "dangling")
+      assert_receive {:exec_call, "dangling", "t-failed"}
+      assert {:error, :no_terminal_event} = GenAgent.ask(name, "truncated")
+      assert {:ok, %{text: ""}} = GenAgent.ask(name, "recover")
+      assert_receive {:exec_call, "recover", "t-failed"}
+    end
+
+    test "an invalid response_text value is rejected before the exec_fn runs" do
+      observer = self()
+
+      exec_fn = fn _, _ ->
+        send(observer, :exec_called)
+        {:ok, []}
+      end
+
+      assert {:error, {:backend_start_failed, {:invalid_option, :response_text, :last_message}}} =
+               GenAgent.start_agent(CodexAgent,
+                 name: unique_name("codex-invalid"),
+                 backend: GenAgent.Backends.Codex,
+                 exec_fn: exec_fn,
+                 response_text: :last_message
+               )
+
+      refute_receive :exec_called
+    end
   end
 
   describe "round trip through GenAgent.ask/2" do
@@ -384,6 +650,42 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
 
       assert Enum.map(GenAgent.status(name).agent_state.stream_events, & &1.kind) ==
                [:tool_use, :tool_result, :text, :usage, :result]
+    end
+
+    test "a large command output fits the default captured event byte limit once" do
+      output = String.duplicate("x", 600_000)
+
+      item = %{
+        "id" => "cmd-large",
+        "type" => "command_execution",
+        "command" => "cat large-output",
+        "aggregated_output" => output,
+        "exit_code" => 0,
+        "status" => "completed"
+      }
+
+      exec_fn = fn _prompt, _session ->
+        {:ok,
+         [
+           event("item.started", %{"item" => %{item | "aggregated_output" => ""}}),
+           event("item.updated", %{"item" => item}),
+           event("item.completed", %{"item" => item}),
+           event("turn.completed", %{})
+         ]}
+      end
+
+      name = start_codex_agent(exec_fn)
+      assert {:ok, response} = GenAgent.ask(name, "read")
+      assert Enum.map(response.events, & &1.kind) == [:tool_use, :tool_result, :result]
+
+      assert Enum.at(response.events, 0).data == %{
+               "id" => "cmd-large",
+               "type" => "command_execution"
+             }
+
+      assert Enum.at(response.events, 1).data["aggregated_output"] == output
+      assert response.event_coverage.mode == :exact
+      assert response.event_coverage.retained_bytes < 1_048_576
     end
 
     test "stream callbacks observe text before the terminal event arrives" do

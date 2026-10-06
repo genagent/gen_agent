@@ -187,6 +187,49 @@ defmodule GenAgent.Backends.OpenAITest do
       assert session.max_output_tokens == 256
       assert session.reasoning_effort == :medium
     end
+
+    test "accepts shared names and forwards them in the request" do
+      ref = make_ref()
+
+      {:ok, session} =
+        OpenAI.start_session(
+          http_fn: recording_fn(ref, ok_response("hi")),
+          system_prompt: "Be terse.",
+          max_output_tokens: 256
+        )
+
+      assert session.instructions == "Be terse."
+      {:ok, _, _} = OpenAI.prompt(session, "hello")
+      assert_receive {^ref, %{body: %{instructions: "Be terse.", max_output_tokens: 256}}}
+    end
+
+    test "rejects unknown and malformed options before credential lookup" do
+      assert {:error, {:unknown_option, :modle}} = OpenAI.start_session(modle: "wrong")
+
+      assert {:error, {:invalid_options, %{model: "wrong"}}} =
+               OpenAI.start_session(%{model: "wrong"})
+    end
+
+    test "warns for legacy names and rejects conflicting prompt values" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, session} =
+                   OpenAI.start_session(
+                     http_fn: ok_response("hi"),
+                     instructions: "old",
+                     max_tokens: 128
+                   )
+
+          assert session.instructions == "old"
+          assert session.max_output_tokens == 128
+        end)
+
+      assert log =~ ":instructions is deprecated"
+      assert log =~ ":max_tokens is deprecated"
+
+      assert {:error, {:conflicting_options, [:system_prompt, :instructions]}} =
+               OpenAI.start_session(system_prompt: "new", instructions: "old")
+    end
   end
 
   describe "prompt/2 request shape" do
@@ -662,7 +705,7 @@ defmodule GenAgent.Backends.OpenAITest do
       {:ok, session} =
         OpenAI.start_session(
           api_key: "sk-test",
-          instructions: "Always be terse.",
+          system_prompt: "Always be terse.",
           http_fn: http_fn
         )
 

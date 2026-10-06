@@ -19,6 +19,10 @@ defmodule GenAgentEnsemble.Queue do
   @spec enqueue(t, String.t(), String.t()) :: t
   def enqueue(queue, token, prompt), do: :queue.in({token, prompt}, queue)
 
+  @doc "Remove a token while preserving the order of remaining prompts."
+  @spec delete(t, String.t()) :: t
+  def delete(queue, token), do: :queue.filter(fn {queued, _} -> queued != token end, queue)
+
   @spec len(t) :: non_neg_integer()
   def len(queue), do: :queue.len(queue)
 

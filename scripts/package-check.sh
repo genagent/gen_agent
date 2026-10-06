@@ -26,6 +26,12 @@ for package in "${packages[@]}"; do
   (
     cd "${root}/${package}"
     export GEN_AGENT_HEX=1
+    # Ensemble's backend dependencies are test-only. Exercise the sibling
+    # adapters against the published core without requiring their next Hex
+    # releases to have already been published.
+    if [[ "${package}" == "extensions/ensemble" ]]; then
+      export GEN_AGENT_BACKENDS_PATH=1
+    fi
     mix deps.get
     if [[ "${package}" != "." && "${core_status}" == "200" ]]; then
       echo "Compiling and testing ${package} with Hex core ${core_version}"
@@ -41,6 +47,7 @@ for package in "${packages[@]}"; do
       mix compile --warnings-as-errors
       mix test
     fi
+    unset GEN_AGENT_BACKENDS_PATH
     mix hex.build
 
     app="$(sed -n 's/^[[:space:]]*app: :\([a-z_]*\),/\1/p' mix.exs | head -1)"

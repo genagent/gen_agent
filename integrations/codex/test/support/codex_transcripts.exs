@@ -31,8 +31,8 @@ defmodule GenAgent.CodexTranscripts do
 
   def expected("failure") do
     data = List.last(load("failure")).data
-    # Issue #184: the recorded non-agent error item is currently filtered.
-    [{:error, %{reason: data["error"], data: data}}]
+    item = Enum.at(load("failure"), 1).data["item"]
+    [{:tool_result, item}, {:error, %{reason: data["error"], data: data}}]
   end
 
   def expected(name) do
@@ -44,10 +44,17 @@ defmodule GenAgent.CodexTranscripts do
         "resume-followup" -> {29_938, 24_320, 10}
       end
 
-    # Issue #124: cache_write_input_tokens and reasoning_output_tokens are currently dropped.
-    usage = %{input_tokens: input, cached_input_tokens: cached, output_tokens: output}
+    # Raw recorded totals, reported as-is for a fresh session.
+    usage = %{
+      input_tokens: input,
+      cached_input_tokens: cached,
+      cache_write_input_tokens: 0,
+      output_tokens: output,
+      reasoning_output_tokens: 0
+    }
 
-    messages(name) ++ [{:usage, usage}, {:result, %{session_id: thread_id(name)}}]
+    messages(name) ++
+      [{:usage, usage}, {:result, %{session_id: thread_id(name), usage_total: usage}}]
   end
 
   defp messages("command") do
@@ -62,7 +69,7 @@ defmodule GenAgent.CodexTranscripts do
 
     [
       {:text, %{text: "I’ll run the command and report its output.", message_boundary: true}},
-      {:tool_use, item},
+      {:tool_use, Map.take(item, ["id", "type"])},
       {:tool_result, item},
       {:text, %{text: "```text\ncodex-fixture\n```", message_boundary: true}}
     ]
@@ -70,7 +77,13 @@ defmodule GenAgent.CodexTranscripts do
 
   defp messages(name), do: [{:text, %{text: text(name), message_boundary: true}}]
 
-  def assert_events(events, name) do
-    assert Enum.map(events, &{&1.kind, &1.data}) == expected(name)
+  def assert_events(events, name, expected_usage \\ nil) do
+    expected =
+      case expected_usage do
+        nil -> expected(name)
+        usage -> List.keyreplace(expected(name), :usage, 0, {:usage, usage})
+      end
+
+    assert Enum.map(events, &{&1.kind, &1.data}) == expected
   end
 end

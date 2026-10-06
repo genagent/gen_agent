@@ -12,13 +12,16 @@ defmodule GenAgentEnsemble do
       {:ok, pid} = GenAgentEnsemble.start_link(
         name: "research-1",
         strategy: GenAgentEnsemble.Strategies.Solo,
-        opts: [agent: {"worker-a", MyAgent, backend: GenAgent.Backends.Mock}]
+        opts: [
+          agent:
+            {"worker-a", GenAgentEnsemble.Agents.Simple,
+             backend: GenAgentEnsemble.Backends.Echo}
+        ]
       )
 
       {:ok, token} = GenAgentEnsemble.tell("research-1", "hello")
-      {:ok, :pending} = GenAgentEnsemble.poll("research-1", token)
-      # ...later...
-      {:ok, :completed, response} = GenAgentEnsemble.poll("research-1", token)
+      {:ok, response} = GenAgentEnsemble.await("research-1", token)
+      {:ok, :completed, ^response} = GenAgentEnsemble.poll("research-1", token)
 
       {:ok, response} = GenAgentEnsemble.ask("research-1", "quick question", timeout: 30_000)
 
@@ -42,6 +45,56 @@ defmodule GenAgentEnsemble do
   `agent: "alice"` for Switchboard).
   """
   defdelegate tell(name, prompt, opts), to: GenAgentEnsemble.Server
+
+  @doc """
+  Like `tell/3`, returning `{:ok, token}`, with one terminal message sent to
+  the supplied PID:
+
+      {:gen_agent_ensemble, :completion, session, token, {:ok, response} | {:error, reason}}
+
+  The recipient defaults to the caller. It must be a PID (otherwise raises
+  `FunctionClauseError`).
+  Notification does not consume the result stored for `poll/2` or `inbox/1`.
+  Halt delivers `{:error, {:halted, reason}}` before stopping the session;
+  stored results are unavailable after the session terminates.
+  """
+  def tell_with_completion(name, prompt, recipient \\ self(), opts \\ []),
+    do: GenAgentEnsemble.Server.tell_with_completion(name, prompt, recipient, opts)
+
+  @doc """
+  Wait for an existing tell token without consuming its result.
+
+  Returns `{:ok, response}` or `{:error, reason}`. All registered waiters
+  receive the terminal result. `poll/2` and `inbox/1` still consume the
+  stored copy; an await processed after consumption returns
+  `{:error, :not_found}`, as does an unknown token. Server message order
+  determines races between registration, completion, and consumption.
+
+  Timeout is a non-negative number of milliseconds or `:infinity`, default
+  30_000. Zero checks the current result without waiting. Expiry returns
+  `{:error, :timeout}` and removes only this waiter; a late result can still
+  be retrieved. Invalid timeouts raise `FunctionClauseError`.
+  Unavailable or terminated sessions retain normal `GenServer.call/3` exit
+  semantics. Halt replies to registered waiters before stopping the session.
+  """
+  defdelegate await(name, token, timeout \\ 30_000), to: GenAgentEnsemble.Server
+
+  @doc """
+  Cancel one pending token without stopping the ensemble or unrelated work.
+
+  Returns `{:ok, :cancelled}` when child requests acknowledge cancellation,
+  or `{:ok, :cancelled_unconfirmed}` when any child result is uncertain or
+  unsupported. Both close the token with `{:error, :cancelled}` through the
+  usual ask reply, tell completion, await, and poll/inbox paths. Late child
+  events are fenced. Acknowledgement covers BEAM/request cancellation, not
+  settlement of an external provider process.
+
+  Returns `{:error, :already_finished}` for a retained result or a completion
+  that wins the race, `{:error, :not_found}` for unknown/consumed tokens
+  (including finished asks), and `{:error, :unsupported}` when the strategy
+  lacks `handle_cancel/2`. Unsupported strategies are left unchanged.
+  """
+  defdelegate cancel(name, token), to: GenAgentEnsemble.Server
 
   @doc """
   Synchronous prompt. Blocks until the strategy replies or the

@@ -55,9 +55,16 @@ pattern is this idea generalized to N workers plus a coordinator).
 - **`handle_event/2` returning `{:prompt, text, state}`** -- the
   "I received your turn, here's what I'll say next" translation
   from an incoming event into a dispatched prompt.
-- **Mutual halt coordination**: when one side reaches its round
-  cap, it notifies the other with `{:debate, :done}` so both
-  halt together.
+- **Mutual halt coordination**: each side speaks exactly
+  `max_rounds` times. A's last statement is delivered to B, B
+  answers it, and B's last statement is delivered to A. Both halt
+  once the second speaker's last statement has been delivered.
+- **Failure propagation**: `handle_error/3` halts the failing side
+  and notifies the opponent with `{:debate, {:failed, name, reason}}`,
+  so the other side halts too instead of waiting forever.
+- **Observable completion**: every agent sends its `:report_to`
+  process `{:debate, name, :finished}` or
+  `{:debate, name, {:failed, reason}}` when it halts.
 - **Two simultaneous agents with independent sessions**,
   potentially on different backends, each with their own system
   prompt.
@@ -81,7 +88,10 @@ defmodule Debate.Agent do
       :role,
       :topic,
       :max_rounds,
+      :report_to,
       round: 0,
+      heard: 0,
+      status: :running,
       transcript: []
     ]
   end
@@ -89,11 +99,12 @@ defmodule Debate.Agent do
   @impl true
   def init_agent(opts) do
     state = %State{
-      name: Keyword.fetch!(opts, :agent_name),
+      name: GenAgent.current_name(),
       opponent: Keyword.fetch!(opts, :opponent),
       role: Keyword.fetch!(opts, :role),
       topic: Keyword.fetch!(opts, :topic),
-      max_rounds: Keyword.fetch!(opts, :max_rounds)
+      max_rounds: Keyword.fetch!(opts, :max_rounds),
+      report_to: Keyword.get(opts, :report_to)
     }
 
     system = """
@@ -106,45 +117,69 @@ defmodule Debate.Agent do
     just rebut or extend the argument.
     """
 
-    {:ok, [system: system, max_tokens: Keyword.get(opts, :max_tokens, 200)], state}
+    backend_opts =
+      [system: system, max_tokens: Keyword.get(opts, :max_tokens, 200)] ++
+        Keyword.get(opts, :backend_opts, [])
+
+    {:ok, backend_opts, state}
   end
 
   @impl true
   def handle_response(_ref, response, %State{} = state) do
     text = String.trim(response.text)
-    new_round = state.round + 1
-    new_state = %{state | round: new_round, transcript: state.transcript ++ [{state.name, text}]}
+    new_state = record(%{state | round: state.round + 1}, state.name, text)
 
-    cond do
-      new_round >= state.max_rounds ->
-        # Our last say. Tell the opponent to wrap up too and halt.
-        GenAgent.notify(state.opponent, {:debate, :done})
-        {:halt, new_state}
+    # Always pass the statement on, including our last one.
+    GenAgent.notify(state.opponent, {:opponent_said, text})
 
-      true ->
-        # Pass the ball.
-        GenAgent.notify(state.opponent, {:opponent_said, text})
-        {:noreply, new_state}
+    if new_state.heard >= new_state.max_rounds do
+      # The opponent already had its last word and we just had ours.
+      finish(new_state, :finished)
+    else
+      {:noreply, new_state}
     end
   end
 
   @impl true
-  def handle_event({:opponent_said, text}, %State{} = state) do
-    prompt = ~s"""
-    Your opponent just said: "#{text}"
-
-    Respond briefly, staying in your role.
-    """
-
-    {:prompt, prompt, state}
+  def handle_error(_ref, reason, %State{} = state) do
+    # Backend error, watchdog timeout or interrupt. The opponent is idle
+    # waiting for our statement, so tell it and stop.
+    GenAgent.notify(state.opponent, {:debate, {:failed, state.name, reason}})
+    finish(state, {:failed, reason})
   end
 
-  def handle_event({:debate, :done}, %State{} = state) do
-    # Opponent asked us to stop. Halt if we have not already.
-    {:halt, state}
+  @impl true
+  def handle_event({:opponent_said, text}, %State{} = state) do
+    state = record(%{state | heard: state.heard + 1}, state.opponent, text)
+
+    if state.round >= state.max_rounds do
+      # The opponent had the last word; nothing left to say.
+      finish(state, :finished)
+    else
+      prompt = ~s"""
+      Your opponent just said: "#{text}"
+
+      Respond briefly, staying in your role.
+      """
+
+      {:prompt, prompt, state}
+    end
+  end
+
+  def handle_event({:debate, {:failed, who, _reason}}, %State{} = state) do
+    finish(state, {:failed, {:opponent_failed, who}})
   end
 
   def handle_event(_other, state), do: {:noreply, state}
+
+  # Each agent keeps one ordered transcript: its own statements and the
+  # opponent's, in the order this agent saw them.
+  defp record(state, who, text), do: %{state | transcript: state.transcript ++ [{who, text}]}
+
+  defp finish(state, status) do
+    if state.report_to, do: send(state.report_to, {:debate, state.name, status})
+    {:halt, %{state | status: status}}
+  end
 end
 ```
 
@@ -164,13 +199,19 @@ defmodule Debate do
     name_a = "debate-#{id}-a"
     name_b = "debate-#{id}-b"
 
-    shared = [backend: backend, topic: topic, max_rounds: max_rounds]
+    shared = [
+      backend: backend,
+      backend_opts: Keyword.get(opts, :backend_opts, []),
+      topic: topic,
+      max_rounds: max_rounds,
+      report_to: Keyword.get(opts, :report_to, self())
+    ]
 
     {:ok, _} = GenAgent.start_agent(Agent,
-      [name: name_a, agent_name: name_a, opponent: name_b, role: role_a] ++ shared)
+      [name: name_a, opponent: name_b, role: role_a] ++ shared)
 
     {:ok, _} = GenAgent.start_agent(Agent,
-      [name: name_b, agent_name: name_b, opponent: name_a, role: role_b] ++ shared)
+      [name: name_b, opponent: name_a, role: role_b] ++ shared)
 
     # Kick off agent A with the opening statement.
     {:ok, _ref} = GenAgent.tell(name_a,
@@ -195,19 +236,42 @@ end
 # prompt and will produce the first turn. When A's handle_response
 # fires, it notifies B with {:opponent_said, text}, and B's
 # handle_event turns that into B's next prompt. And so on.
+#
+# Each side speaks max_rounds times: A, B, A, B, ... B's last
+# statement is delivered to A, which records it and halts. With
+# max_rounds: 1, A opens and B answers.
+
+# Each agent halts and reports to :report_to (the caller by default),
+# so there are two reports per debate. A turn failure on either side
+# halts both, and each reports. Wait for both, matching on the agent
+# name so a report left over from an earlier debate is never taken:
+results =
+  for name <- [handle.a, handle.b] do
+    receive do
+      {:debate, ^name, :finished} -> :ok
+      {:debate, ^name, {:failed, reason}} -> {:error, reason}
+    end
+  end
 
 # Inspect live state:
 GenAgent.status(handle.a)
 GenAgent.status(handle.b)
 
-# Read the interleaved transcript:
-%{agent_state: %{transcript: transcript_a}} = GenAgent.status(handle.a)
-%{agent_state: %{transcript: transcript_b}} = GenAgent.status(handle.b)
+# Read the transcript. Each agent stores its own statements and the
+# opponent's as {speaker, text} in the order it saw them. There is no
+# shared store, but once the debate finishes both agents hold the same
+# ordered conversation, so either one will do:
+%{agent_state: %{transcript: transcript}} = GenAgent.status(handle.a)
 
 # Clean up:
 GenAgent.stop(handle.a)
 GenAgent.stop(handle.b)
 ```
+
+`test/guides/debate_test.exs` compiles `Debate.Agent` and `Debate`
+from this page and runs them on a local stub backend. It covers equal
+turn counts at `max_rounds` of 1 and 3, delivery of the final
+statement, a failed turn on either side, and transcript order.
 
 ## Variations
 

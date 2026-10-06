@@ -17,16 +17,23 @@ defmodule GenAgent.Backends.Anthropic do
 
   ## How the two halves of a turn land in the session
 
-  1. `prompt/2` appends the user's message to `session.messages`
-     **before** making the API call, and returns the updated session
-     along with the event list. The state machine stores that updated
-     session.
+  1. `prompt/2` includes the user's message in the API request. It returns
+     that updated session only for a completed turn. A rejected terminal
+     stop leaves the previous history intact.
   2. When the state machine delivers the terminal `:result` event,
      it calls `update_session/2` with the event's data, and this
      backend appends the assistant's message to `session.messages`.
-     If the response is empty or refused, it removes the unanswered
-     user message instead.
+     If the response is empty, it removes the unanswered user message instead.
   3. The next `prompt/2` sends the updated history to the API.
+
+  `end_turn` and `stop_sequence` produce a terminal `:result` event whose
+  data includes `:text`, `:stop_reason`, `:stop_details` (when provided),
+  `:model`, `:message_id`, and `:session_id`. `refusal` produces an `:error`
+  with reason `{:refusal, stop_details}`. `max_tokens` and
+  `model_context_window_exceeded` produce `:error` with reason
+  `{:response_incomplete, %{stop_reason: reason, stop_details: details}}`.
+  Other stop reasons are rejected as `{:unexpected_stop_reason, reason}`,
+  because this text-only backend cannot complete tool or paused turns.
 
   This uses both sides of the `GenAgent.Backend` contract in a way
   the CLI backends don't: CLI backends leave `prompt/2`'s returned
@@ -38,8 +45,10 @@ defmodule GenAgent.Backends.Anthropic do
       `start_session/1` returns `{:error, :missing_api_key}` when neither
       provides a non-empty key, unless a one-arity `:http_fn` is supplied.
     * `:model` -- model name. Defaults to `"claude-sonnet-4-5"`.
-    * `:max_tokens` -- max tokens per turn. Defaults to `1024`.
-    * `:system` -- system prompt (string).
+    * `:max_output_tokens` -- max tokens per turn. Defaults to `1024`.
+      `:max_tokens` remains a deprecated alias.
+    * `:system_prompt` -- system prompt (string). `:system` and
+      `:instructions` remain deprecated aliases.
     * `:receive_timeout` -- HTTP receive timeout in milliseconds.
       Defaults to `60_000`. Long-context turns (big messages array,
       slow models) can blow through Req's 15s default, so the backend
@@ -49,9 +58,15 @@ defmodule GenAgent.Backends.Anthropic do
       Defaults to Req's default when unset.
     * `:http_fn` -- a 1-arity function `(request_map) -> {:ok, response_map} | {:error, term}`
       that replaces the default `Req`-backed HTTP call. Intended for tests.
+
+  Unknown option keys return `{:error, {:unknown_option, key}}`. Conflicting
+  values for the shared name and an alias return `{:error, {:conflicting_options,
+  keys}}`.
   """
 
   @behaviour GenAgent.Backend
+
+  require Logger
 
   alias GenAgent.Event
 
@@ -60,6 +75,18 @@ defmodule GenAgent.Backends.Anthropic do
   @default_model "claude-sonnet-4-5"
   @default_max_tokens 1024
   @default_receive_timeout 60_000
+  @known_options [
+    :api_key,
+    :model,
+    :max_tokens,
+    :max_output_tokens,
+    :system_prompt,
+    :system,
+    :instructions,
+    :receive_timeout,
+    :connect_timeout,
+    :http_fn
+  ]
 
   defstruct [
     :api_key,
@@ -89,14 +116,56 @@ defmodule GenAgent.Backends.Anthropic do
 
   @impl GenAgent.Backend
   def start_session(opts) do
-    api_key = present(Keyword.get(opts, :api_key)) || present(System.get_env("ANTHROPIC_API_KEY"))
+    with :ok <- validate_opts(opts),
+         {:ok, opts} <- normalize_opts(opts) do
+      api_key =
+        present(Keyword.get(opts, :api_key)) || present(System.get_env("ANTHROPIC_API_KEY"))
 
-    # A caller-supplied :http_fn replaces the HTTP call (a stub or a proxy that
-    # adds credentials), so only the default transport requires a key.
-    if is_nil(api_key) and not is_function(Keyword.get(opts, :http_fn), 1) do
-      {:error, :missing_api_key}
-    else
-      build_session(api_key, opts)
+      # A caller-supplied :http_fn replaces the HTTP call (a stub or a proxy that
+      # adds credentials), so only the default transport requires a key.
+      if is_nil(api_key) and not is_function(Keyword.get(opts, :http_fn), 1) do
+        {:error, :missing_api_key}
+      else
+        build_session(api_key, opts)
+      end
+    end
+  end
+
+  defp validate_opts(opts) do
+    if Keyword.keyword?(opts),
+      do: validate_known_opts(opts),
+      else: {:error, {:invalid_options, opts}}
+  end
+
+  defp validate_known_opts(opts) do
+    case Enum.find(opts, fn {key, _} -> key not in @known_options end) do
+      {key, _} -> {:error, {:unknown_option, key}}
+      nil -> :ok
+    end
+  end
+
+  defp normalize_opts(opts) do
+    case normalize_aliases(opts, :system_prompt, [:system, :instructions]) do
+      {:ok, opts} -> normalize_aliases(opts, :max_output_tokens, [:max_tokens])
+      error -> error
+    end
+  end
+
+  defp normalize_aliases(opts, canonical, aliases) do
+    present = Enum.filter([canonical | aliases], &Keyword.has_key?(opts, &1))
+
+    case Enum.uniq(Enum.map(present, &Keyword.fetch!(opts, &1))) do
+      [_first, _second | _] ->
+        {:error, {:conflicting_options, present}}
+
+      _ ->
+        Enum.each(present -- [canonical], fn alias_key ->
+          Logger.warning("#{inspect(alias_key)} is deprecated; use #{inspect(canonical)}")
+        end)
+
+        value = if present == [], do: nil, else: Keyword.fetch!(opts, hd(present))
+        opts = Keyword.drop(opts, aliases)
+        {:ok, if(present == [], do: opts, else: Keyword.put(opts, canonical, value))}
     end
   end
 
@@ -106,8 +175,8 @@ defmodule GenAgent.Backends.Anthropic do
     session = %__MODULE__{
       api_key: api_key,
       model: Keyword.get(opts, :model, @default_model),
-      max_tokens: Keyword.get(opts, :max_tokens, @default_max_tokens),
-      system: Keyword.get(opts, :system),
+      max_tokens: Keyword.get(opts, :max_output_tokens, @default_max_tokens),
+      system: Keyword.get(opts, :system_prompt),
       receive_timeout: Keyword.get(opts, :receive_timeout, @default_receive_timeout),
       connect_timeout: Keyword.get(opts, :connect_timeout),
       http_fn: http_fn,
@@ -125,14 +194,17 @@ defmodule GenAgent.Backends.Anthropic do
 
   @impl GenAgent.Backend
   def prompt(%__MODULE__{} = session, prompt) when is_binary(prompt) do
-    session = append_message(session, "user", prompt)
-
-    request = build_request(session)
+    pending_session = append_message(session, "user", prompt)
+    request = build_request(pending_session)
 
     case session.http_fn.(request) do
       {:ok, body} ->
         events = response_to_events(body, session.client_session_id)
-        {:ok, events, session}
+
+        next_session =
+          if List.last(events).kind == :error, do: session, else: pending_session
+
+        {:ok, events, next_session}
 
       {:error, reason} ->
         {:error, reason}
@@ -142,10 +214,6 @@ defmodule GenAgent.Backends.Anthropic do
   end
 
   @impl GenAgent.Backend
-  def update_session(%__MODULE__{} = session, %{stop_reason: "refusal"}) do
-    drop_last_user_message(session)
-  end
-
   # Text that is empty or only whitespace is not a usable assistant turn:
   # remove the unanswered user message so history keeps alternating.
   def update_session(%__MODULE__{} = session, %{text: text}) when is_binary(text) do
@@ -212,13 +280,29 @@ defmodule GenAgent.Backends.Anthropic do
         text: text,
         session_id: client_session_id,
         stop_reason: stop_reason,
+        stop_details: body["stop_details"],
         model: body["model"],
         message_id: body["id"]
       }
       |> drop_nil_values()
 
-    usage_events ++ [Event.new(:result, result_data)]
+    terminal_event =
+      case stop_error(stop_reason, body["stop_details"]) do
+        nil -> Event.new(:result, result_data)
+        reason -> Event.new(:error, Map.put(result_data, :reason, reason))
+      end
+
+    usage_events ++ [terminal_event]
   end
+
+  defp stop_error(reason, _details) when reason in ["end_turn", "stop_sequence"], do: nil
+  defp stop_error("refusal", details), do: {:refusal, details}
+
+  defp stop_error(reason, details)
+       when reason in ["max_tokens", "model_context_window_exceeded"],
+       do: {:response_incomplete, %{stop_reason: reason, stop_details: details}}
+
+  defp stop_error(reason, _details), do: {:unexpected_stop_reason, reason}
 
   defp extract_text(%{"content" => content}) when is_list(content) do
     content
@@ -248,7 +332,7 @@ defmodule GenAgent.Backends.Anthropic do
 
   defp default_http(%{url: url, headers: headers, body: body} = request) do
     req_opts =
-      [headers: headers, json: body, retry: false]
+      [headers: headers, json: body, retry: false, redirect: false]
       |> maybe_put_opt(:receive_timeout, request[:receive_timeout])
       |> maybe_put_opt(:connect_options, connect_options(request[:connect_timeout]))
 

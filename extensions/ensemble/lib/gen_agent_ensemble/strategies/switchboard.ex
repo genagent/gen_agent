@@ -102,6 +102,16 @@ defmodule GenAgentEnsemble.Strategies.Switchboard do
   end
 
   @impl true
+  def handle_cancel(token, state) do
+    pending =
+      Map.new(state.pending, fn {agent, queue} ->
+        {agent, :queue.filter(&(&1 != token), queue)}
+      end)
+
+    {:ok, [], %{state | pending: pending}}
+  end
+
+  @impl true
   def handle_dispatch_rejected(agent, token, reason, state) do
     queue = Map.fetch!(state.pending, agent)
     queue = queue |> :queue.to_list() |> Enum.reject(&(&1 == token)) |> :queue.from_list()

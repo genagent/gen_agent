@@ -94,7 +94,7 @@ defmodule Pipeline.Stage do
   @impl true
   def init_agent(opts) do
     state = %State{
-      name: Keyword.fetch!(opts, :agent_name),
+      name: GenAgent.current_name(),
       next_stage: Keyword.get(opts, :next_stage),
       role: Keyword.fetch!(opts, :role),
       instruction: Keyword.fetch!(opts, :instruction),
@@ -184,7 +184,6 @@ defmodule Pipeline do
 
       {:ok, _pid} = GenAgent.start_agent(Stage,
         name: name,
-        agent_name: name,
         backend: backend,
         next_stage: Map.fetch!(next_map, name),
         role: cfg.role,

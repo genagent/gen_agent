@@ -11,6 +11,11 @@ defmodule GenAgentEnsemble.Strategy do
   applies the ops in order, updates strategy state, and waits for the
   next event.
 
+  Callbacks run synchronously in the Ensemble Server process. A callback that
+  blocks delays all calls handled by that server; a callback that raises or
+  returns an unexpected shape stops the session. Optional callbacks and their
+  individual fallbacks are documented below.
+
   See `GenAgentEnsemble.Strategies.Solo` for a minimal reference
   implementation.
 
@@ -75,6 +80,9 @@ defmodule GenAgentEnsemble.Strategy do
   it with work they dispatch. Pass the token in every `:dispatch` op;
   responses land back in `handle_response` tagged with the *agent* that
   produced them after the framework checks that token is still pending.
+  `handle_response/3` does not receive the token, so keep your own
+  agent-to-token mapping if the strategy needs to identify the originating
+  request.
   """
 
   @type agent_name :: String.t()
@@ -96,18 +104,49 @@ defmodule GenAgentEnsemble.Strategy do
 
   @type result :: {:ok, [op], strategy_state}
 
-  @callback init(keyword) :: {:ok, strategy_state, [start_spec]}
+  @doc """
+  Initialize strategy state and return the initial child specifications.
+
+  Returning `{:error, reason}` stops server initialization with `reason`.
+  """
+  @callback init(keyword) :: {:ok, strategy_state, [start_spec]} | {:error, term()}
+
+  @doc "Handle a caller's non-blocking `tell`, returning operations and updated state."
   @callback handle_tell(prompt, keyword, token, strategy_state) :: result
+
+  @doc "Handle a caller's `ask`, returning operations and updated state."
   @callback handle_ask(prompt, keyword, token, strategy_state) :: result
+
+  @doc "Handle a successful agent response. The callback receives the agent name, not the request token."
   @callback handle_response(agent_name, response, strategy_state) :: result
+
+  @doc "Handle an active agent turn error. If the token is no longer pending, this callback is skipped. If omitted, the server logs the error as unhandled and leaves strategy state unchanged."
   @callback handle_error(agent_name, term(), strategy_state) :: result
+
+  @doc "Handle a rejected child start. Defining this callback halts the current operation batch; if omitted, remaining operations continue."
   @callback handle_start_rejected(agent_name, term(), strategy_state) :: result
+
+  @doc "Handle a rejected token-scoped dispatch. This halts the current operation batch. If omitted, the server closes its token with a dispatch error; a callback that does not close the token also gets that fallback."
   @callback handle_dispatch_rejected(agent_name, token, term(), strategy_state) :: result
+  @doc """
+  Remove a cancelled token and advance queued work. Return operations for
+  successors, but never reply to the cancelled token: the server closes it.
+  Child refs are fenced before these operations execute. Implementations must
+  use token-scoped dispatches to support cancellation safely. Without this
+  callback cancellation returns `{:error, :unsupported}` without changes.
+  """
+  @callback handle_cancel(token, strategy_state) :: result
+  @doc "Handle an event sent to the session. If omitted, the event is ignored and state is unchanged."
   @callback handle_notify(term(), strategy_state) :: result
+
+  @doc "Handle an agent going down. If omitted, strategy state is unchanged."
   @callback handle_agent_down(agent_name, term(), strategy_state) :: result
+
+  @doc "Return extra status fields. These are merged over the server's base map and can replace its keys; if omitted, no extra fields are added."
   @callback handle_status(strategy_state) :: map()
 
   @optional_callbacks [
+    handle_cancel: 2,
     handle_error: 3,
     handle_start_rejected: 3,
     handle_dispatch_rejected: 4,

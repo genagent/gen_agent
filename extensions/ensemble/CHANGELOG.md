@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.6.1](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.6.0...gen_agent_ensemble-v0.6.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **ensemble:** bound Supervisor fan-out ([#358](https://github.com/genagent/gen_agent/issues/358)) ([cd32dbc](https://github.com/genagent/gen_agent/commit/cd32dbc5bf3b7bc42f0b25534813358227898906))
+* **ensemble:** keep original topic in debate turns ([#364](https://github.com/genagent/gen_agent/issues/364)) ([4d84f1c](https://github.com/genagent/gen_agent/commit/4d84f1c5da42dc0ff0be34e116f03f02797dc7fd))
+* **ensemble:** require unique consensus and tolerate reachable errors ([#365](https://github.com/genagent/gen_agent/issues/365)) ([c5b689a](https://github.com/genagent/gen_agent/commit/c5b689a8219ae3eb827042e90bf48af564528cbb))
+
+## [0.6.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.5.0...gen_agent_ensemble-v0.6.0) (2026-10-02)
+
+
+### Features
+
+* **ensemble:** cancel tokens without stopping the session ([#339](https://github.com/genagent/gen_agent/issues/339)) ([e5cf390](https://github.com/genagent/gen_agent/commit/e5cf39039c246c10ae8b550c31f96cbd8c90fa68))
+* **ensemble:** notify token completion and await without polling ([#337](https://github.com/genagent/gen_agent/issues/337)) ([521f62d](https://github.com/genagent/gen_agent/commit/521f62d9ff619fcb01c20d35a8fc5bf2ec02563f))
+
+## [0.5.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.4.0...gen_agent_ensemble-v0.5.0) (2026-10-02)
+
+
+### Features
+
+* **ensemble:** include subtasks in Supervisor synthesis ([#323](https://github.com/genagent/gen_agent/issues/323)) ([47864f4](https://github.com/genagent/gen_agent/commit/47864f4bd3e6a9cea058f5ad89597673b5a2e061))
+
+
+### Bug Fixes
+
+* **deps:** allow core 0.7 in CLI adapters and Ensemble ([#327](https://github.com/genagent/gen_agent/issues/327)) ([f9d3a21](https://github.com/genagent/gen_agent/commit/f9d3a218b5e7beb82217f829c4b267c2f7504829))
+
 ## [0.4.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.3.0...gen_agent_ensemble-v0.4.0) (2026-10-02)
 
 

@@ -44,9 +44,9 @@ sessions, non-blocking."
 
 ## What the callback recipe exercises
 
-- `GenAgent.start_agent/2`, `tell/2`, `poll/2`, `notify/2`,
-  `interrupt/1`, `halt/1`, `resume/1`, `stop/1` -- the full public
-  API.
+- `GenAgent.start_agent/2`, `tell/2`, `poll/2`, `status/1`,
+  `notify_ack/2`, `interrupt/1`, `resume/1`, and `stop/1`. Halting
+  uses a notification whose `handle_event/2` returns `{:halt, state}`.
 - `handle_response/3` and `handle_error/3` returning plain
   `{:noreply, state}` every time. The agent never self-chains and
   never halts on its own.
@@ -80,8 +80,8 @@ defmodule Switchboard.SessionAgent do
 
   The agent never self-chains and never halts on its own. Every
   turn is a plain `{:noreply, state}` so the manager stays in
-  charge. Notifications are used only to update the summary and
-  advance the inbox cursor.
+  charge. Manager notifications update the summary, acknowledge the
+  inbox, or halt the session.
   """
 
   use GenAgent
@@ -98,8 +98,7 @@ defmodule Switchboard.SessionAgent do
   @impl true
   def init_agent(opts) do
     path = Keyword.fetch!(opts, :cwd)
-    backend_opts = Keyword.drop(opts, [:name, :backend])
-    {:ok, backend_opts, %State{path: path}}
+    {:ok, opts, %State{path: path}}
   end
 
   @impl true
@@ -138,8 +137,8 @@ defmodule Switchboard.SessionAgent do
     {:noreply, %{state | summary: markdown}}
   end
 
-  def handle_event(:ack_inbox, %State{} = state) do
-    {:noreply, %{state | inbox_cursor: length(state.history)}}
+  def handle_event({:ack_inbox, seen}, %State{} = state) do
+    {:noreply, %{state | inbox_cursor: max(state.inbox_cursor, seen)}}
   end
 
   def handle_event({:switchboard, :halt}, %State{} = state) do
@@ -157,8 +156,13 @@ defmodule Switchboard do
   @moduledoc """
   Manager-facing API over Switchboard.SessionAgent.
 
-  Every function delegates to GenAgent.* and unwraps the
-  SessionAgent.State struct from the returned agent_state.
+  Synchronous operations return {:error, :not_found} for missing names.
+  Other exits (including timeouts and crashes) propagate. State readers
+  return {:error, :not_session} for another callback's state.
+
+  interrupt/1 and resume/1 are best-effort casts: :ok does not confirm
+  that a session exists. Names belong to the application; do not reuse
+  a name for a replacement session while operations are in flight.
   """
 
   alias Switchboard.SessionAgent
@@ -181,69 +185,100 @@ defmodule Switchboard do
     end
   end
 
-  @doc "Non-blocking send. Returns {:ok, request_ref} or {:error, :busy}."
-  def send(name, prompt) when is_binary(prompt) do
-    case GenAgent.status(name) do
-      %{state: :processing} -> {:error, :busy}
-      %{halted: true} -> {:error, :halted}
-      _ -> GenAgent.tell(name, prompt)
-    end
+  @doc """
+  Submit without waiting for completion. Returns {:ok, request_ref},
+  {:error, {:overloaded, info}}, or {:error, :not_found}.
+  Busy sessions queue prompts; halted sessions queue until resume/1.
+  Admission is decided by tell/2 in one call, with no status preflight.
+  """
+  def submit(name, prompt) when is_binary(prompt) do
+    call(fn -> GenAgent.tell(name, prompt) end)
   end
 
-  @doc "Poll a previously-issued send."
-  def poll(name, ref), do: GenAgent.poll(name, ref)
+  @doc "Submit to application-owned names, retaining every admission outcome."
+  def broadcast(names, prompt) do
+    Enum.map(names, fn name -> {name, submit(name, prompt)} end)
+  end
 
-  @doc "Return new turns since the last `inbox(name, ack: true)`."
+  @doc "Poll a previously submitted request; a missing name or ref returns not_found."
+  def poll(name, ref), do: call(fn -> GenAgent.poll(name, ref) end)
+
+  @doc """
+  Return {:ok, %{new_requests: turns, summary: markdown}} from a snapshot.
+  With ack: true, acknowledge only that snapshot's cursor. A turn still
+  in flight remains unread. Admission may be deferred; repeated reads
+  can return the same turns until the acknowledgment is applied.
+  Returns {:error, {:overloaded, info}} if acknowledgment is rejected.
+  """
   def inbox(name, opts \\ []) do
-    ack = Keyword.get(opts, :ack, false)
+    with {:ok, state} <- session_state(name) do
+      new_items = Enum.drop(state.history, state.inbox_cursor)
+      seen = length(state.history)
 
-    case GenAgent.status(name) do
-      %{agent_state: %SessionAgent.State{} = state} ->
-        new_items = Enum.drop(state.history, state.inbox_cursor)
-        if ack and new_items != [], do: GenAgent.notify(name, :ack_inbox)
+      result =
+        if Keyword.get(opts, :ack, false) and new_items != [] do
+          call(fn -> GenAgent.notify_ack(name, {:ack_inbox, seen}) end)
+        else
+          :ok
+        end
+
+      with :ok <- result do
         {:ok, %{new_requests: new_items, summary: state.summary}}
-
-      _ ->
-        {:error, :not_found}
+      end
     end
   end
 
-  @doc "Read the manager-curated summary."
+  @doc "Read the manager-curated summary as {:ok, markdown}."
   def summary_get(name) do
-    case GenAgent.status(name) do
-      %{agent_state: %SessionAgent.State{summary: s}} -> {:ok, s}
-      _ -> {:error, :not_found}
-    end
+    with {:ok, state} <- session_state(name), do: {:ok, state.summary}
   end
 
-  @doc "Update the manager-curated summary."
+  @doc """
+  Update the summary. Returns :ok on admission (possibly deferred),
+  {:error, {:overloaded, info}}, or {:error, :not_found}.
+  """
   def summary_update(name, markdown) when is_binary(markdown) do
-    GenAgent.notify(name, {:update_summary, markdown})
+    call(fn -> GenAgent.notify_ack(name, {:update_summary, markdown}) end)
   end
 
-  @doc "Return the full turn history for a session."
+  @doc "Return {:ok, history}, optionally limited to the last positive limit turns."
   def transcript(name, opts \\ []) do
-    case GenAgent.status(name) do
-      %{agent_state: %SessionAgent.State{history: history}} ->
-        limit = Keyword.get(opts, :limit)
-        if is_integer(limit) and limit > 0, do: Enum.take(history, -limit), else: history
-
-      _ ->
-        {:error, :not_found}
+    with {:ok, state} <- session_state(name) do
+      limit = Keyword.get(opts, :limit)
+      history = state.history
+      {:ok, if(is_integer(limit) and limit > 0, do: Enum.take(history, -limit), else: history)}
     end
   end
 
-  @doc "Cancel the in-flight request on a session."
+  @doc "Cancel the in-flight request. Cast returns :ok even for a missing name."
   def interrupt(name), do: GenAgent.interrupt(name)
 
-  @doc "Halt a session (freezes mailbox; use resume/1 to unfreeze)."
-  def halt(name), do: GenAgent.notify(name, {:switchboard, :halt})
+  @doc """
+  Request a halt; an in-flight turn finishes before this takes effect.
+  Prompts queue until resume/1. Returns :ok on admission (possibly
+  deferred), {:error, {:overloaded, info}}, or {:error, :not_found}.
+  """
+  def halt(name), do: call(fn -> GenAgent.notify_ack(name, {:switchboard, :halt}) end)
 
-  @doc "Resume a halted session."
+  @doc "Resume a halted session. Cast returns :ok even for a missing name."
   def resume(name), do: GenAgent.resume(name)
 
-  @doc "Stop a session."
-  def stop_session(name), do: GenAgent.stop(name)
+  @doc "Stop a session; returns :ok or {:error, :not_found}."
+  def stop_session(name), do: call(fn -> GenAgent.stop(name) end)
+
+  defp session_state(name) do
+    case call(fn -> GenAgent.status(name) end) do
+      %{agent_state: %SessionAgent.State{} = state} -> {:ok, state}
+      {:error, _} = error -> error
+      _ -> {:error, :not_session}
+    end
+  end
+
+  defp call(fun) do
+    fun.()
+  catch
+    :exit, {:noproc, _} -> {:error, :not_found}
+  end
 end
 ```
 
@@ -262,8 +297,8 @@ end
 )
 
 # Non-blocking prompts.
-{:ok, ref_a} = Switchboard.send("project-a", "what files are here?")
-{:ok, ref_b} = Switchboard.send("project-b", "list tests in test/")
+{:ok, ref_a} = Switchboard.submit("project-a", "what files are here?")
+{:ok, ref_b} = Switchboard.submit("project-b", "list tests in test/")
 
 # Poll.
 Switchboard.poll("project-a", ref_a)
@@ -277,7 +312,7 @@ Switchboard.inbox("project-a")
 Switchboard.inbox("project-a", ack: true)
 
 # Manager-curated summary.
-Switchboard.summary_update("project-a", "## Status\\nworking on auth.")
+Switchboard.summary_update("project-a", "## Status\nworking on auth.")
 
 # Stop.
 Switchboard.stop_session("project-a")
@@ -285,10 +320,11 @@ Switchboard.stop_session("project-a")
 
 ## Variations
 
-- **Broadcast to many sessions.** Add a `broadcast/2` helper that
-  enumerates the registry and calls `send/2` on each. Use
-  `GenAgent.tell/2`'s natural mailbox queueing so you don't lose
-  prompts against currently-busy sessions.
+- **Broadcast to many sessions.** Use `Switchboard.broadcast(names, prompt)`
+  with session names tracked by your application. Each name is paired
+  with its `submit/2` result, including missing-name and overload errors.
+  Busy sessions queue accepted prompts; halted sessions wait for resume.
+  Broadcast admission is per session, not atomic across the fleet.
 - **Live telemetry tail.** Attach a telemetry handler to
   `[:gen_agent, :prompt, :start|:stop|:error]` and
   `[:gen_agent, :state, :changed]` and print one line per event
@@ -299,5 +335,5 @@ Switchboard.stop_session("project-a")
   supervision tree at startup, mark any previously in-flight
   requests as `:interrupted`.
 - **MCP surface.** Expose the facade functions as MCP tools
-  (`switchboard_start_session`, `switchboard_send`, etc.) so any
+  (`switchboard_start_session`, `switchboard_submit`, etc.) so any
   MCP host can drive the fleet.

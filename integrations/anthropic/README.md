@@ -56,8 +56,8 @@ defmodule MyApp.Assistant do
   @impl true
   def init_agent(_opts) do
     backend_opts = [
-      system: "You are a concise, helpful assistant.",
-      max_tokens: 512
+      system_prompt: "You are a concise, helpful assistant.",
+      max_output_tokens: 512
     ]
 
     {:ok, backend_opts, %State{}}
@@ -93,9 +93,21 @@ session struct so multi-turn conversations work transparently:
 ```
 
 Conversation history lives in `session.messages` as an in-order list
-of `%{"role" => ..., "content" => ...}` maps, appended on both sides
-of each turn (user message on dispatch, assistant message on terminal
-`:result` event).
+of `%{role: ..., content: ...}` maps with atom keys. The user message is
+included in the API request. The assistant message is appended when the
+terminal `:result` event carries non-blank text. If that text is empty or
+only whitespace, the unanswered user message is removed. Refusals and
+incomplete responses also leave prior history intact, so a later turn does
+not resend a failed prompt.
+
+`end_turn` and `stop_sequence` are successful stops. Their terminal event
+data includes `:stop_reason` and, when the API provides it,
+`:stop_details`; callers can read them through `response.terminal.data`.
+A refusal returns `{:error, {:refusal, stop_details}}`. A `max_tokens` or
+`model_context_window_exceeded` stop returns
+`{:error, {:response_incomplete, %{stop_reason: reason, stop_details: details}}}`.
+Other stops are rejected as `{:error, {:unexpected_stop_reason, reason}}`
+because this text-only backend cannot complete a paused or tool-use turn.
 
 ## Backend options
 
@@ -105,8 +117,10 @@ of each turn (user message on dispatch, assistant message on terminal
   `{:error, {:backend_start_failed, :missing_api_key}}`), unless a one-arity
   `:http_fn` is supplied.
 - `:model` -- model name. Defaults to `"claude-sonnet-4-5"`.
-- `:max_tokens` -- max tokens per turn. Defaults to `1024`.
-- `:system` -- system prompt (string).
+- `:max_output_tokens` -- max tokens per turn. Defaults to `1024`.
+  `:max_tokens` remains a deprecated alias.
+- `:system_prompt` -- system prompt (string). `:system` and
+  `:instructions` remain deprecated aliases.
 - `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
   to `60_000`. The 60-second default can be short for long reasoning turns.
 - `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults
@@ -117,6 +131,8 @@ of each turn (user message on dispatch, assistant message on terminal
   tests that want to stub out the API.
 
 See `GenAgent.Backends.Anthropic` for the full module docs.
+Unknown keys fail session startup with `{:unknown_option, key}`; conflicting
+values supplied through aliases fail with `{:conflicting_options, keys}`.
 
 ## Why no tool use?
 

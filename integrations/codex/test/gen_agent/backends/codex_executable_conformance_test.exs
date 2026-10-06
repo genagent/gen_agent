@@ -1,38 +1,26 @@
 defmodule GenAgent.Backends.CodexExecutableConformanceTest do
-  use ExUnit.Case, async: false
+  use GenAgent.Test.BackendConformance, async: false, lifecycle: true
 
   alias GenAgent.CodexTranscripts, as: Transcripts
 
-  import GenAgent.TestDownAssertions
-
   @moduletag capture_log: true
 
-  defmodule Agent do
-    use GenAgent
-
-    @impl true
-    def init_agent(opts) do
-      {observer, backend_opts} = Keyword.pop!(opts, :observer)
-      {:ok, backend_opts, %{observer: observer, responses: [], errors: []}}
-    end
-
-    @impl true
-    def handle_stream_event(event, state) do
-      send(state.observer, {:stream_event, event.kind, self()})
-      state
-    end
-
-    @impl true
-    def handle_response(ref, response, state) do
-      send(state.observer, {:completed, ref})
-      {:noreply, %{state | responses: [response | state.responses]}}
-    end
-
-    @impl true
-    def handle_error(ref, reason, state) do
-      send(state.observer, {:failed, ref, reason})
-      {:noreply, %{state | errors: [reason | state.errors]}}
-    end
+  defp conformance_setup(context) do
+    %{
+      backend: GenAgent.Backends.Codex,
+      agent_opts: [binary: context.binary, working_dir: context.directory],
+      first_prompt: "first prompt",
+      second_prompt: "follow-up prompt",
+      error_prompt: "replay:failure",
+      hold_prompt: "hold",
+      assert_error: fn reason -> assert reason == Transcripts.failure() end,
+      assert_threaded: fn first, _second ->
+        resume_args = args(context.directory, :resume)
+        assert Enum.take(resume_args, 2) == ["exec", "resume"]
+        assert first.session_id in resume_args
+        assert first.session_id == Transcripts.thread_id("resume-initial")
+      end
+    }
   end
 
   setup do
@@ -90,7 +78,7 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
         working_dir: context.directory
       ] ++ opts
 
-    assert {:ok, _pid} = GenAgent.start_agent(Agent, agent_opts)
+    assert {:ok, _pid} = GenAgent.start_agent(GenAgent.Test.BackendConformance.Agent, agent_opts)
 
     on_exit(fn ->
       if GenAgent.whereis(name), do: GenAgent.stop(name)
@@ -135,7 +123,15 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
 
     assert {:ok, second} = GenAgent.ask(name, "follow-up prompt")
     assert second.text == "42"
-    Transcripts.assert_events(second.events, "resume-followup")
+
+    Transcripts.assert_events(second.events, "resume-followup", %{
+      input_tokens: 14_982,
+      cached_input_tokens: 12_160,
+      cache_write_input_tokens: 0,
+      output_tokens: 5,
+      reasoning_output_tokens: 0
+    })
+
     assert second.session_id == first.session_id
 
     resume_args = args(context.directory, :resume)
@@ -155,6 +151,87 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
     assert File.read!(Path.join(context.directory, "resume.env")) == "configured\n"
   end
 
+  test "response_text: :final_message selects the last message and never reaches the CLI",
+       context do
+    name = start_agent(context, response_text: :final_message)
+
+    assert {:ok, response} = GenAgent.ask(name, "replay:command")
+    assert response.text == "```text\ncodex-fixture\n```"
+
+    assert Enum.map(response.events, & &1.kind) == [
+             :text,
+             :tool_use,
+             :tool_result,
+             :text,
+             :usage,
+             :result
+           ]
+
+    assert Enum.at(response.events, 0).data.text == "I’ll run the command and report its output."
+
+    fresh_args = args(context.directory, :fresh)
+    assert List.last(fresh_args) == "replay:command"
+    refute Enum.any?(fresh_args, &String.contains?(&1, ["response_text", "final_message"]))
+
+    assert {:ok, second} = GenAgent.ask(name, "follow-up prompt")
+    assert second.text == "42"
+    resume_args = args(context.directory, :resume)
+    assert Enum.take(resume_args, 2) == ["exec", "resume"]
+    refute Enum.any?(resume_args, &String.contains?(&1, ["response_text", "final_message"]))
+  end
+
+  test "a quiet CLI turn reports the configured idle timeout", context do
+    name = start_agent(context, idle_timeout_ms: 200, timeout: 5_000)
+
+    assert {:error, {:idle_timeout, 200}} = GenAgent.ask(name, "hold")
+    assert_receive {:failed, _ref, {:idle_timeout, 200}}
+  end
+
+  test "the whole-turn deadline is distinct from the idle timeout", context do
+    name = start_agent(context, idle_timeout_ms: nil, timeout: 200)
+
+    assert {:error, {:timeout, 200}} = GenAgent.ask(name, "hold")
+    assert_receive {:failed, _ref, {:timeout, 200}}
+  end
+
+  test "a completed turn keeps its buffered terminal event after slow consumption", context do
+    exec_fn = fn prompt, session ->
+      stream =
+        prompt
+        |> CodexWrapper.Exec.new()
+        |> CodexWrapper.Exec.stream(session.config)
+        |> Stream.transform(false, fn event, paused? ->
+          unless paused?, do: Process.sleep(350)
+          {[event], true}
+        end)
+
+      {:ok, stream}
+    end
+
+    name = start_agent(context, timeout: 200, idle_timeout_ms: nil, exec_fn: exec_fn)
+
+    assert {:ok, response} = GenAgent.ask(name, "first prompt")
+    assert response.session_id == Transcripts.thread_id("resume-initial")
+  end
+
+  test "an oversized CLI JSONL event fails the turn instead of losing its text", context do
+    output_path = Path.join(context.directory, "oversized.jsonl")
+
+    oversized =
+      Jason.encode!(%{
+        "type" => "item.completed",
+        "item" => %{"type" => "agent_message", "text" => String.duplicate("x", 1_048_600)}
+      })
+
+    File.write!(output_path, oversized <> "\n" <> ~s({"type":"turn.completed"}) <> "\n")
+    File.write!(context.binary, "#!/bin/sh\ncat \"$GEN_AGENT_OUTPUT\"\n")
+
+    name = start_agent(context, env: [{"GEN_AGENT_OUTPUT", output_path}])
+
+    assert {:error, {:line_too_long, 1_048_576}} = GenAgent.ask(name, "oversized")
+    assert_receive {:failed, _ref, {:line_too_long, 1_048_576}}
+  end
+
   for recording <- Transcripts.names() do
     @tag recording: recording
     test "replays #{recording} through the wrapper and Port runner", context do
@@ -166,6 +243,7 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
         reason = Transcripts.failure()
         assert {:error, ^reason} = GenAgent.ask(name, "replay:#{recording}")
         assert GenAgent.status(name).agent_state.errors == [reason]
+        assert_receive {:stream_event, :tool_result, _}
         assert_receive {:stream_event, :error, _}
         refute_receive {:stream_event, _, _}
       else
@@ -181,37 +259,6 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
       {stdout, status} = System.cmd(context.binary, ["exec", "replay:#{recording}"])
       assert stdout == File.read!(Path.join(Transcripts.directory(), "#{recording}.jsonl"))
       assert status == Transcripts.manifest()["scenarios"][recording]["exit_status"]
-    end
-  end
-
-  for action <- [:interrupt, :watchdog, :stop, :kill] do
-    @tag action: action
-    test "#{action} stops the BEAM task on the executable streaming path", context do
-      action = context.action
-      watchdog_ms = if action == :watchdog, do: 500, else: 5_000
-      name = start_agent(context, watchdog_ms: watchdog_ms)
-      assert {:ok, ref} = GenAgent.tell(name, "hold")
-      assert_receive {:stream_event, :text, task_pid}, 1_000
-      task_monitor = Process.monitor(task_pid)
-
-      case action do
-        :interrupt ->
-          assert :ok = GenAgent.interrupt(name)
-          assert_receive {:failed, ^ref, :interrupted}, 1_000
-          assert {:error, :interrupted} = GenAgent.poll(name, ref)
-
-        :watchdog ->
-          assert_receive {:failed, ^ref, :timeout}, 1_000
-          assert {:error, :timeout} = GenAgent.poll(name, ref)
-
-        :stop ->
-          assert :ok = GenAgent.stop(name)
-
-        :kill ->
-          Process.exit(GenAgent.whereis(name), :kill)
-      end
-
-      assert_killed_or_gone(task_monitor, task_pid, 1_000)
     end
   end
 

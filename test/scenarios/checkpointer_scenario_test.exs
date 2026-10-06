@@ -1,183 +1,345 @@
+# Compile the copyable module directly from the guide, avoiding a second implementation.
+guide = Path.expand("../../guides/patterns/checkpointer.md", __DIR__)
+
+for [_, code] <- Regex.scan(~r/```elixir\n(.*?)\n```/s, File.read!(guide)),
+    String.starts_with?(code, "defmodule Checkpointer.Agent do") do
+  Code.compile_string(code, guide)
+end
+
 defmodule GenAgent.Scenarios.CheckpointerTest do
   @moduledoc """
-  End-to-end scenario port of `Playground.Checkpointer`.
+  End-to-end scenario for the Checkpointer guide.
 
-  Human-in-the-loop review workflow. The agent works through a
-  multi-step task, but after each step sits idle with a
-  `:awaiting_review` phase marker rather than halting. The manager
-  inspects state, then drives the next step via notify:
-
-    * `:approve`          -- continue to the next step
-    * `{:revise, hint}`   -- redo the current step with feedback
-    * `:finish`           -- halt early
-
-  Validates the "idle with phase marker" pattern. Halt would be
-  the wrong primitive here -- a halted mailbox blocks any
-  subsequent `{:prompt, ..., state}` return from `handle_event`,
-  so the next step would never dispatch.
+  Runs the guide's own `Checkpointer.Agent` against a scripted backend
+  whose turns block until the test replies, so notifications can be
+  sent while a turn is in flight. Covers the happy paths plus the
+  protocol hazards: a review queued during processing, duplicate
+  approvals, stale tokens after a revision, and failed turns.
   """
 
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag capture_log: true
 
-  alias GenAgent.Backends.Mock
   alias GenAgent.Event
 
-  defmodule Agent do
+  defmodule Backend do
     @moduledoc false
-    use GenAgent
-
-    defmodule State do
-      @moduledoc false
-      defstruct [
-        :task,
-        :total_steps,
-        :parent,
-        phase: :running,
-        step: 0,
-        drafts: []
-      ]
-    end
+    @behaviour GenAgent.Backend
 
     @impl true
-    def init_agent(opts) do
-      state = %State{
-        task: Keyword.fetch!(opts, :task),
-        total_steps: Keyword.fetch!(opts, :total_steps),
-        parent: Keyword.fetch!(opts, :parent)
-      }
+    def start_session(_opts), do: {:ok, Process.whereis(GenAgent.Scenarios.CheckpointerTest)}
 
-      {:ok, [scripts: Keyword.get(opts, :scripts, [])], state}
-    end
-
+    # Each turn announces itself to the test and blocks until it is answered.
     @impl true
-    def handle_response(_ref, response, %State{} = state) do
-      state = %{
-        state
-        | drafts: state.drafts ++ [response.text],
-          phase: :awaiting_review
-      }
+    def prompt(observer, prompt) do
+      send(observer, {:turn, prompt, self()})
 
-      send(state.parent, {:awaiting_review, state.step, response.text})
-      # NOT :halt. Idle-with-phase-marker is the pause primitive.
-      {:noreply, state}
-    end
-
-    @impl true
-    def handle_event(:approve, %State{phase: :awaiting_review} = state) do
-      next = state.step + 1
-
-      if next >= state.total_steps do
-        send(state.parent, {:finished, state.drafts})
-        {:halt, %{state | phase: :finished}}
-      else
-        state = %{state | step: next, phase: :running}
-        {:prompt, "next step: #{next + 1}/#{state.total_steps}", state}
+      receive do
+        {:reply, {:ok, text}} -> {:ok, [Event.new(:result, %{text: text})], observer}
+        {:reply, {:error, reason}} -> {:error, reason}
+      after
+        5_000 -> {:error, :fixture_deadline}
       end
     end
 
-    def handle_event({:revise, hint}, %State{phase: :awaiting_review} = state) do
-      state = %{state | phase: :running}
-      {:prompt, "revise step #{state.step + 1}: #{hint}", state}
-    end
-
-    def handle_event(:finish, %State{phase: :awaiting_review} = state) do
-      send(state.parent, {:finished_early, state.drafts})
-      {:halt, %{state | phase: :finished}}
-    end
-
-    def handle_event(_event, state), do: {:noreply, state}
+    @impl true
+    def terminate_session(_session), do: :ok
   end
 
-  defp result(text), do: [Event.new(:result, %{text: text})]
+  setup do
+    Process.register(self(), GenAgent.Scenarios.CheckpointerTest)
 
-  defp start_with_scripts(scripts) do
     name = "checkpointer-#{System.unique_integer([:positive])}"
 
     {:ok, _pid} =
-      GenAgent.start_agent(Agent,
+      GenAgent.start_agent(Checkpointer.Agent,
         name: name,
-        backend: Mock,
-        scripts: scripts,
+        backend: Backend,
         task: "write a 3-part tagline",
-        total_steps: 3,
-        parent: self()
+        total_steps: 3
       )
 
-    {:ok, _ref} = GenAgent.tell(name, "start")
-    name
+    on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+    {:ok, name: name}
   end
 
+  defp agent_state(name), do: GenAgent.status(name).agent_state
+
+  # Answer the next turn and return its prompt.
+  defp answer(reply) do
+    assert_receive {:turn, prompt, task}, 1_000
+    send(task, {:reply, reply})
+    prompt
+  end
+
+  # Start the agent's first turn and answer it with a draft.
+  defp first_draft(name, text \\ "draft 1") do
+    {:ok, _ref} = GenAgent.tell(name, "start")
+    answer({:ok, text})
+    await_phase(name, :awaiting_review)
+  end
+
+  defp await_phase(name, phase, attempts \\ 100) do
+    state = agent_state(name)
+
+    cond do
+      state.phase == phase ->
+        state
+
+      attempts == 0 ->
+        flunk("expected phase #{inspect(phase)}, got #{inspect(state.phase)}")
+
+      true ->
+        Process.sleep(10)
+        await_phase(name, phase, attempts - 1)
+    end
+  end
+
+  # Wait until a turn is in flight and the runtime is processing it.
+  defp await_turn(name) do
+    assert_receive {:turn, prompt, task}, 1_000
+    assert GenAgent.status(name).state == :processing
+    {prompt, task}
+  end
+
+  defp finish_turn(task, reply), do: send(task, {:reply, reply})
+
   describe "idle-with-phase-marker pause primitive" do
-    test "approves through all steps and finishes" do
-      name =
-        start_with_scripts([
-          result("draft 1"),
-          result("draft 2"),
-          result("draft 3")
-        ])
+    test "approves through all steps and finishes", %{name: name} do
+      s1 = first_draft(name)
+      status = GenAgent.status(name)
+      assert status.state == :idle
+      refute status.halted
+      assert s1.current_step == 1
+      assert s1.draft == "draft 1"
+      assert is_reference(s1.review_token)
 
-      assert_receive {:awaiting_review, 0, "draft 1"}, 500
-      # Agent is idle with phase marker, NOT halted.
-      s = GenAgent.status(name)
-      assert s.state == :idle
-      refute s.halted
-      assert s.agent_state.phase == :awaiting_review
+      GenAgent.notify(name, {:review, s1.review_token, :approve})
+      answer({:ok, "draft 2"})
+      s2 = await_phase(name, :awaiting_review)
+      assert s2.current_step == 2
+      refute s2.review_token == s1.review_token
 
-      GenAgent.notify(name, :approve)
-      assert_receive {:awaiting_review, 1, "draft 2"}, 500
+      GenAgent.notify(name, {:review, s2.review_token, :approve})
+      answer({:ok, "draft 3"})
+      s3 = await_phase(name, :awaiting_review)
+      assert s3.current_step == 3
 
-      GenAgent.notify(name, :approve)
-      assert_receive {:awaiting_review, 2, "draft 3"}, 500
+      GenAgent.notify(name, {:review, s3.review_token, :approve})
+      done = await_phase(name, :done)
 
-      GenAgent.notify(name, :approve)
-      assert_receive {:finished, ["draft 1", "draft 2", "draft 3"]}, 500
-
+      assert Enum.map(done.history, & &1.draft) == ["draft 1", "draft 2", "draft 3"]
+      assert done.review_token == nil
       assert GenAgent.status(name).halted == true
-      GenAgent.stop(name)
     end
 
-    test "revise redoes the current step with feedback in the prompt" do
-      name =
-        start_with_scripts([
-          result("draft 1"),
-          fn prompt ->
-            assert String.contains?(prompt, "be more specific")
-            result("draft 1 revised")
-          end,
-          result("draft 2"),
-          result("draft 3")
-        ])
+    test "revise redoes the current step with feedback in the prompt", %{name: name} do
+      s1 = first_draft(name)
 
-      assert_receive {:awaiting_review, 0, "draft 1"}, 500
-      GenAgent.notify(name, {:revise, "be more specific"})
-      assert_receive {:awaiting_review, 0, "draft 1 revised"}, 500
+      GenAgent.notify(name, {:review, s1.review_token, {:revise, "be more specific"}})
+      prompt = answer({:ok, "draft 1 revised"})
+      assert prompt =~ "be more specific"
 
-      GenAgent.notify(name, :approve)
-      assert_receive {:awaiting_review, 1, "draft 2"}, 500
-      GenAgent.notify(name, :approve)
-      assert_receive {:awaiting_review, 2, "draft 3"}, 500
-      GenAgent.notify(name, :approve)
-      assert_receive {:finished, _}, 500
+      s1b = await_phase(name, :awaiting_review)
+      assert s1b.current_step == 1
+      assert s1b.draft == "draft 1 revised"
+      assert s1b.review_token != s1.review_token
+      assert [%{feedback: nil}, %{feedback: "be more specific"}] = s1b.history
 
-      GenAgent.stop(name)
+      GenAgent.notify(name, {:review, s1b.review_token, :approve})
+      answer({:ok, "draft 2"})
+      assert await_phase(name, :awaiting_review).current_step == 2
     end
 
-    test "finish halts early without running remaining steps" do
-      name =
-        start_with_scripts([
-          result("draft 1"),
-          result("draft 2")
-        ])
+    test "finish halts early without running remaining steps", %{name: name} do
+      s1 = first_draft(name)
 
-      assert_receive {:awaiting_review, 0, "draft 1"}, 500
-      GenAgent.notify(name, :finish)
-      assert_receive {:finished_early, ["draft 1"]}, 500
+      GenAgent.notify(name, {:review, s1.review_token, :finish})
+      done = await_phase(name, :done)
 
+      assert Enum.map(done.history, & &1.draft) == ["draft 1"]
       assert GenAgent.status(name).halted == true
-      # The second script should NOT have been consumed.
-      GenAgent.stop(name)
+      refute_receive {:turn, _, _}, 50
+    end
+  end
+
+  describe "review targets" do
+    test "a review with no target or a made-up target is ignored", %{name: name} do
+      s1 = first_draft(name)
+
+      GenAgent.notify(name, {:review, nil, :approve})
+      GenAgent.notify(name, {:review, make_ref(), :approve})
+      GenAgent.notify(name, {:review, :approve})
+      GenAgent.notify(name, :approve)
+
+      assert agent_state(name) == s1
+      refute_receive {:turn, _, _}, 50
+    end
+
+    test "a review sent while a turn is in flight is not applied to the unseen draft",
+         %{name: name} do
+      s1 = first_draft(name)
+
+      GenAgent.notify(name, {:review, s1.review_token, :approve})
+      {_prompt, task} = await_turn(name)
+
+      # The reviewer has not seen draft 2. These are queued by the runtime and
+      # drained after handle_response/3 has set :awaiting_review again.
+      GenAgent.notify(name, {:review, s1.review_token, :approve})
+      GenAgent.notify(name, {:review, s1.review_token, :finish})
+      GenAgent.notify(name, {:review, s1.review_token, {:revise, "too early"}})
+      assert GenAgent.runtime_snapshot(name).pending_notifications == 3
+
+      finish_turn(task, {:ok, "draft 2"})
+      s2 = await_phase(name, :awaiting_review)
+
+      assert s2.current_step == 2
+      assert s2.draft == "draft 2"
+      assert is_reference(s2.review_token)
+      assert GenAgent.status(name).state == :idle
+      assert GenAgent.runtime_snapshot(name).pending_notifications == 0
+      refute GenAgent.status(name).halted
+      refute_receive {:turn, _, _}, 50
+
+      # The fresh token still works.
+      GenAgent.notify(name, {:review, s2.review_token, :approve})
+      answer({:ok, "draft 3"})
+      assert await_phase(name, :awaiting_review).current_step == 3
+    end
+
+    test "a duplicate approve during the next turn does not advance another step",
+         %{name: name} do
+      s1 = first_draft(name)
+
+      GenAgent.notify(name, {:review, s1.review_token, :approve})
+      {_prompt, task} = await_turn(name)
+      GenAgent.notify(name, {:review, s1.review_token, :approve})
+
+      finish_turn(task, {:ok, "draft 2"})
+      s2 = await_phase(name, :awaiting_review)
+
+      assert s2.current_step == 2
+      assert length(s2.history) == 2
+      refute_receive {:turn, _, _}, 50
+    end
+
+    test "two approvals queued together advance one step", %{name: name} do
+      s1 = first_draft(name)
+
+      GenAgent.notify(name, {:review, s1.review_token, :approve})
+      GenAgent.notify(name, {:review, s1.review_token, :approve})
+
+      {prompt, task} = await_turn(name)
+      assert prompt =~ "step 2 of 3"
+      finish_turn(task, {:ok, "draft 2"})
+
+      s2 = await_phase(name, :awaiting_review)
+      assert s2.current_step == 2
+      refute_receive {:turn, _, _}, 50
+    end
+
+    test "the old token is rejected after a revision", %{name: name} do
+      s1 = first_draft(name)
+
+      GenAgent.notify(name, {:review, s1.review_token, {:revise, "tighter"}})
+      answer({:ok, "draft 1 revised"})
+      s1b = await_phase(name, :awaiting_review)
+
+      GenAgent.notify(name, {:review, s1.review_token, :approve})
+
+      assert agent_state(name) == s1b
+      refute_receive {:turn, _, _}, 50
+    end
+  end
+
+  describe "failed turns" do
+    test "a failed first turn is visible and recoverable by retry", %{name: name} do
+      {:ok, _ref} = GenAgent.tell(name, "start")
+      answer({:error, :boom})
+
+      failed = await_phase(name, :failed)
+      assert failed.failure.reason == :boom
+      assert failed.failure.prompt == "start"
+      assert failed.review_token == nil
+      assert failed.history == []
+
+      # Review events cannot apply to a failed turn.
+      GenAgent.notify(name, {:review, make_ref(), :approve})
+      GenAgent.notify(name, {:review, nil, :finish})
+      assert agent_state(name) == failed
+
+      GenAgent.notify(name, {:retry, failed.failure.ref})
+      assert answer({:ok, "draft 1"}) == "start"
+
+      s1 = await_phase(name, :awaiting_review)
+      assert s1.current_step == 1
+      assert s1.failure == nil
+      assert is_reference(s1.review_token)
+    end
+
+    test "a failed approval turn is retried with the same prompt", %{name: name} do
+      s1 = first_draft(name)
+
+      GenAgent.notify(name, {:review, s1.review_token, :approve})
+      step2_prompt = answer({:error, :timeout})
+
+      failed = await_phase(name, :failed)
+      assert failed.current_step == 2
+      assert failed.failure.prompt == step2_prompt
+      assert failed.review_token == nil
+      assert length(failed.history) == 1
+
+      # The consumed token cannot be replayed against the failed state.
+      GenAgent.notify(name, {:review, s1.review_token, :approve})
+      assert agent_state(name) == failed
+
+      GenAgent.notify(name, {:retry, failed.failure.ref})
+      assert answer({:ok, "draft 2"}) == step2_prompt
+
+      s2 = await_phase(name, :awaiting_review)
+      assert s2.current_step == 2
+      assert Enum.map(s2.history, & &1.draft) == ["draft 1", "draft 2"]
+    end
+
+    test "a failed revision turn keeps the step and history", %{name: name} do
+      s1 = first_draft(name)
+
+      GenAgent.notify(name, {:review, s1.review_token, {:revise, "shorter"}})
+      revise_prompt = answer({:error, :overloaded})
+
+      failed = await_phase(name, :failed)
+      assert failed.current_step == 1
+      assert length(failed.history) == 1
+      assert failed.failure.prompt == revise_prompt
+
+      GenAgent.notify(name, {:retry, failed.failure.ref})
+      assert answer({:ok, "draft 1 shorter"}) == revise_prompt
+
+      s1b = await_phase(name, :awaiting_review)
+      assert s1b.current_step == 1
+      assert Enum.map(s1b.history, & &1.draft) == ["draft 1", "draft 1 shorter"]
+    end
+
+    test "a stale or made-up retry is ignored, and a failure can recur", %{name: name} do
+      {:ok, _ref} = GenAgent.tell(name, "start")
+      answer({:error, :first})
+      failed = await_phase(name, :failed)
+
+      GenAgent.notify(name, {:retry, make_ref()})
+      assert agent_state(name) == failed
+
+      GenAgent.notify(name, {:retry, failed.failure.ref})
+      answer({:error, :second})
+      failed2 = await_phase(name, :failed)
+      assert failed2.failure.reason == :second
+      refute failed2.failure.ref == failed.failure.ref
+
+      # Retrying the first failure again does nothing.
+      GenAgent.notify(name, {:retry, failed.failure.ref})
+      assert agent_state(name) == failed2
+      refute_receive {:turn, _, _}, 50
     end
   end
 end

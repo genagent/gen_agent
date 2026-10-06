@@ -63,7 +63,7 @@ defmodule GenAgentEnsemble.Strategies.DebateTest do
     assert resp.text == "alice:\na1\n\nbob:\nb1\n\nalice:\na2\n\nbob:\nb2"
   end
 
-  test "each agent sees the previous agent's response as its prompt", %{name: name} do
+  test "each agent sees the original prompt and previous speaker's response", %{name: name} do
     alice_agent = :ets.new(:alice_prompts, [:public, :set])
     bob_agent = :ets.new(:bob_prompts, [:public, :set])
 
@@ -89,8 +89,15 @@ defmodule GenAgentEnsemble.Strategies.DebateTest do
     alice_prompts = :ets.tab2list(alice_agent) |> Enum.sort() |> Enum.map(&elem(&1, 1))
     bob_prompts = :ets.tab2list(bob_agent) |> Enum.sort() |> Enum.map(&elem(&1, 1))
 
-    assert alice_prompts == ["opening", "b:y1"]
-    assert bob_prompts == ["a:x1", "a:x2"]
+    # Alice's first turn gets the opening prompt unchanged
+    assert Enum.at(alice_prompts, 0) == "opening"
+    # Alice's second turn gets opening + bob's first response with speaker label
+    assert Enum.at(alice_prompts, 1) == "opening\n\nbob:\nb:y1"
+
+    # Bob's first turn gets opening + alice's first response with speaker label
+    assert Enum.at(bob_prompts, 0) == "opening\n\nalice:\na:x1"
+    # Bob's second turn gets opening + alice's second response with speaker label
+    assert Enum.at(bob_prompts, 1) == "opening\n\nalice:\na:x2"
   end
 
   test "converge fn ends the debate early", %{name: name} do
@@ -223,6 +230,32 @@ defmodule GenAgentEnsemble.Strategies.DebateTest do
 
     assert %{text: "alice:\na1\n\nbob:\nb1"} = await_completion(name, t1)
     assert %{text: "alice:\na2\n\nbob:\nb2"} = await_completion(name, t2)
+  end
+
+  test "queued debates get their own original prompt without leakage" do
+    {:ok, state, _} =
+      Debate.init(
+        agents: [{"alice", TestAgent, []}, {"bob", TestAgent, []}],
+        rounds: 2
+      )
+
+    {:ok, [{:dispatch, "alice", "first debate topic", :first}], state} =
+      Debate.handle_tell("first debate topic", [], :first, state)
+
+    {:ok, [], state} = Debate.handle_tell("second debate topic", [], :second, state)
+
+    {:ok, [{:dispatch, "bob", first_prompt, :first}], state} =
+      Debate.handle_response("alice", %GenAgent.Response{text: "first argument"}, state)
+
+    assert first_prompt == "first debate topic\n\nalice:\nfirst argument"
+
+    {:ok, [{:reply, :first, _}, {:dispatch, "alice", "second debate topic", :second}], state} =
+      Debate.handle_response("bob", %GenAgent.Response{text: "first reply"}, state)
+
+    {:ok, [{:dispatch, "bob", second_prompt, :second}], _state} =
+      Debate.handle_response("alice", %GenAgent.Response{text: "second argument"}, state)
+
+    assert second_prompt == "second debate topic\n\nalice:\nsecond argument"
   end
 
   test "agent death halts the session", %{name: name} do

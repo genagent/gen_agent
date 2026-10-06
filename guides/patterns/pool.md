@@ -46,8 +46,11 @@ expert.
 The defining move is that `handle_response/3` returns
 `{:noreply, state}` so the worker stays idle for the next task
 instead of halting. Combined with `GenAgent.tell/2`'s natural
-mailbox queueing (a busy worker buffers incoming work), you get
-backpressure for free.
+bounded pending queue, a busy worker can buffer incoming work up to
+its configured limits. The defaults are 1,000 pending prompts and
+1,048,576 bytes (measured with `:erlang.external_size/1`); the active
+turn is excluded. Callers must handle overload rejections by slowing
+down, retrying later, or reporting the rejection.
 
 ## What the callback recipe exercises
 
@@ -55,11 +58,15 @@ backpressure for free.
   from `handle_response/3` sends the worker back to idle,
   accumulating results on state.
 - **Per-worker mailbox queueing via `tell/2`**: `GenAgent.tell/2`
-  queues when a worker is busy, so the dispatcher can fire-and-
-  forget without checking for availability.
-- **Round-robin dispatch via an atomic counter** (`:counters`).
+  queues when a worker is busy, or returns an overload error when
+  its pending queue is full.
+- **Round-robin dispatch via an atomic increment** (`:atomics.add_get/3`).
+  Concurrent attempts take distinct positions in the rotation;
+  arrival and completion order can differ. Rejections also consume a position.
 - **Pool-wide quiescence detection**: "all workers are idle and
-  their mailboxes are empty" -- a small loop over `status/1`.
+  their pending queues are empty" -- a loop over `runtime_snapshot/1`
+  that does not copy accumulated results. Stop submitting before waiting;
+  this is not a barrier against concurrent submissions.
 
 ## Callback reference implementation
 
@@ -72,21 +79,21 @@ defmodule Pool.Worker do
   @moduledoc """
   A pool worker that stays alive across many turns.
 
-  handle_response returns {:noreply, state}, accumulating results
-  in state. A task submitted to a busy worker waits in its
-  mailbox (GenAgent.tell/2's natural queueing behavior).
+  Successes and failures accumulate in state, identified by prompt
+  and request ref. Accepted tasks wait in the bounded pending queue
+  while the worker is busy.
   """
 
   use GenAgent
 
   defmodule State do
-    defstruct [:name, :role, results: []]
+    defstruct [:name, :role, :task, results: []]
   end
 
   @impl true
   def init_agent(opts) do
     state = %State{
-      name: Keyword.fetch!(opts, :worker_name),
+      name: GenAgent.current_name(),
       role: Keyword.get(opts, :role, "research assistant")
     }
 
@@ -99,8 +106,16 @@ defmodule Pool.Worker do
   end
 
   @impl true
-  def handle_response(_ref, response, %State{} = state) do
+  def pre_turn(task, %State{} = state) do
+    {:ok, task, %{state | task: task}}
+  end
+
+  @impl true
+  def handle_response(ref, response, %State{} = state) do
     entry = %{
+      ref: ref,
+      task: state.task,
+      status: :ok,
       text: String.trim(response.text),
       usage: response.usage,
       duration_ms: response.duration_ms,
@@ -108,7 +123,20 @@ defmodule Pool.Worker do
     }
 
     # NOT :halt -- the worker stays alive for the next task.
-    {:noreply, %{state | results: state.results ++ [entry]}}
+    {:noreply, %{state | task: nil, results: [entry | state.results]}}
+  end
+
+  @impl true
+  def handle_error(ref, reason, %State{} = state) do
+    entry = %{
+      ref: ref,
+      task: state.task,
+      status: :error,
+      reason: reason,
+      completed_at: System.system_time(:millisecond)
+    }
+
+    {:noreply, %{state | task: nil, results: [entry | state.results]}}
   end
 end
 ```
@@ -119,54 +147,57 @@ end
 defmodule Pool do
   alias Pool.Worker
 
-  @type handle :: %{workers: [String.t()], counter: :counters.counters_ref()}
+  @type handle :: %{workers: [String.t()], counter: :atomics.atomics_ref()}
 
   def start(size, opts \\ []) when is_integer(size) and size > 0 do
     role = Keyword.get(opts, :role, "research assistant")
     backend = Keyword.get(opts, :backend, GenAgent.Backends.Anthropic)
     id = System.unique_integer([:positive])
+    limits = Keyword.take(opts, [:max_pending_prompts, :max_pending_prompt_bytes])
 
     workers =
       1..size
       |> Enum.map(fn i ->
         name = "pool-#{id}-#{i}"
 
-        {:ok, _pid} = GenAgent.start_agent(Worker,
-          name: name,
-          backend: backend,
-          worker_name: name,
-          role: role
-        )
+        {:ok, _pid} =
+          GenAgent.start_agent(
+            Worker,
+            [
+              name: name,
+              backend: backend,
+              role: role
+            ] ++ limits
+          )
 
         name
       end)
 
-    counter = :counters.new(1, [:atomics])
+    counter = :atomics.new(1, [])
     {:ok, %{workers: workers, counter: counter}}
   end
 
   @doc """
-  Submit a task. Round-robins across workers and returns the ref
-  so you can poll if you want.
+  Submit a task. Returns {:ok, {worker, ref}} for accepted work,
+  or {:error, reason}, including {:error, {:overloaded, info}}.
+  Rejected tasks have no ref and will not appear in results/1.
   """
   def submit(%{workers: workers, counter: counter}, task) when is_binary(task) do
-    idx = :counters.get(counter, 1)
-    :counters.add(counter, 1, 1)
+    idx = :atomics.add_get(counter, 1, 1) - 1
     worker = Enum.at(workers, rem(idx, length(workers)))
-    # tell/2 naturally queues when the target is busy.
-    {:ok, ref} = GenAgent.tell(worker, task)
-    {:ok, {worker, ref}}
+
+    case GenAgent.tell(worker, task) do
+      {:ok, ref} -> {:ok, {worker, ref}}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   def submit_many(pool, tasks) when is_list(tasks) do
-    Enum.map(tasks, fn t ->
-      {:ok, tuple} = submit(pool, t)
-      tuple
-    end)
+    Enum.map(tasks, fn task -> {task, submit(pool, task)} end)
   end
 
   @doc """
-  Block until every worker is idle with an empty mailbox.
+  Wait for accepted work to finish. Call after all submitters have finished.
   """
   def wait_for_all(pool, timeout \\ 120_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
@@ -174,12 +205,12 @@ defmodule Pool do
   end
 
   @doc """
-  Return per-worker results.
+  Return per-worker successes and failures in completion order.
   """
   def results(%{workers: workers}) do
     Enum.map(workers, fn name ->
       %{agent_state: %Worker.State{results: r}} = GenAgent.status(name)
-      %{worker: name, count: length(r), results: r}
+      %{worker: name, count: length(r), results: Enum.reverse(r)}
     end)
   end
 
@@ -190,16 +221,19 @@ defmodule Pool do
   defp do_wait(%{workers: workers} = pool, deadline) do
     any_busy =
       Enum.any?(workers, fn w ->
-        case GenAgent.status(w) do
-          %{state: :processing} -> true
-          %{queued: q} when q > 0 -> true
-          _ -> false
-        end
+        snapshot = GenAgent.runtime_snapshot(w)
+
+        snapshot.phase != :idle or snapshot.pending_prompts > 0 or
+          snapshot.pending_notifications > 0 or snapshot.self_chain_pending
       end)
 
     cond do
-      not any_busy -> :ok
-      System.monotonic_time(:millisecond) >= deadline -> {:error, :timeout}
+      not any_busy ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        {:error, :timeout}
+
       true ->
         Process.sleep(200)
         do_wait(pool, deadline)
@@ -211,21 +245,33 @@ end
 ## Using it
 
 ```elixir
-{:ok, pool} = Pool.start(3, role: "trivia expert")
+{:ok, pool} =
+  Pool.start(3,
+    role: "trivia expert",
+    max_pending_prompts: 100,
+    max_pending_prompt_bytes: 262_144
+  )
 
-Pool.submit_many(pool, [
-  "capital of France?",
-  "who wrote Hamlet?",
-  "first president of the US?",
-  "speed of light in vacuum?",
-  "chemical symbol for gold?",
-  "tallest mountain on Earth?",
-  "largest ocean?",
-  "year WWII ended?",
-  "composer of the Ninth Symphony?"
-])
+submissions =
+  Pool.submit_many(pool, [
+    "capital of France?",
+    "who wrote Hamlet?",
+    "first president of the US?",
+    "speed of light in vacuum?",
+    "chemical symbol for gold?",
+    "tallest mountain on Earth?",
+    "largest ocean?",
+    "year WWII ended?",
+    "composer of the Ninth Symphony?"
+  ])
 
-Pool.wait_for_all(pool)
+# Keep each task paired with its admission outcome; surface rejections.
+Enum.each(submissions, fn
+  {_task, {:ok, {_worker, _ref}}} -> :ok
+  {task, {:error, reason}} -> IO.inspect({task, reason}, label: "rejected")
+end)
+
+:ok = Pool.wait_for_all(pool)
 
 Pool.results(pool)
 # => [%{worker: "pool-1-1", count: 3, results: [...]},
@@ -235,12 +281,21 @@ Pool.results(pool)
 Pool.stop(pool)
 ```
 
+Each result includes `task`, `ref`, and `status: :ok | :error`.
+Failures include `reason` and count toward the worker's total. The ref
+distinguishes repeated identical prompts. Results accumulate for the lifetime
+of this simple example; a long-running service should drain or persist them.
+Cancelling a request while it is still queued bypasses the worker callbacks,
+so it does not create a result entry; use the returned ref to check that outcome.
+
 ## Variations
 
 - **Work-stealing instead of round-robin.** Instead of assigning
-  the next task to `next_idx`, ask each worker's status and pick
-  the one with the smallest queue. More balanced under uneven
-  task durations but adds N status calls per submit.
+  the next task to `idx`, read each worker's `runtime_snapshot/1` and
+  pick the one with the smallest `pending_prompts` count, preferring
+  idle workers. More balanced under uneven task durations but adds N
+  snapshot calls per submit. These observations can race with other
+  submitters, so overload handling is still required.
 - **Typed workers.** Not every worker needs the same role. Start
   the pool with a map of `%{role => count}` and dispatch based
   on task metadata.
@@ -249,5 +304,7 @@ Pool.stop(pool)
   `gen_agent`'s watchdog and let slow turns time out.
 - **Auto-scaling.** Watch pool-wide queue depth via
   `[:gen_agent, :mailbox, :queued]` telemetry; when it grows
-  past a threshold, spawn more workers; when it shrinks, halt
-  the extras.
+  past a threshold, spawn more workers; when it shrinks, remove the
+  extras from dispatch, drain their accepted work, then stop them with
+  `GenAgent.stop/1` (or `Pool.stop/1` on the removed subset). Coordinate
+  worker-list changes with submitters; halting alone leaves processes alive.

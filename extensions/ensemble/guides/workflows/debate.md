@@ -2,10 +2,11 @@
 
 ## Topology
 
-Two agents take turns arguing about a topic. The prompt hits the
-first agent; that agent's response becomes the second agent's
-prompt; the second agent's response becomes the first agent's next
-prompt; and so on until they converge or a round cap is reached.
+Two agents take turns arguing about a topic. The first agent receives
+the original prompt. On turn 2 and beyond, each agent receives the
+original prompt, the previous speaker's name, and that speaker's
+response text. The debate continues until convergence or a round cap
+is reached.
 
 ```
 +-------+    +--------+        +-------+        +-------+
@@ -14,19 +15,26 @@ prompt; and so on until they converge or a round cap is reached.
                                    ^        \_____|
                                    |______________|
 
-turn 1:  "Topic X"          -> alice -> "opener"
-turn 2:   "opener"           -> bob   -> "rebuttal"
-turn 3:   "rebuttal"         -> alice -> "counter"
-turn 4:   "counter"          -> bob   -> "AGREED on Y"  (converged)
+turn 1:  "Topic X"
+         -> alice -> "opener"
+
+turn 2:  "Topic X" + "alice: opener"
+         -> bob   -> "rebuttal"
+
+turn 3:  "Topic X" + "bob: rebuttal"
+         -> alice -> "counter"
+
+turn 4:  "Topic X" + "alice: counter"
+         -> bob   -> "AGREED on Y"  (converged)
 
 final reply: transcript of all 4 turns, or last, or synthesized.
 ```
 
 Each agent's backend session retains the full back-and-forth in its
 own conversation memory, so turn N sees turns 1..N-1 in context.
-The prompt wire format is just the previous agent's response text
-(same convention as Pipeline), so the first turn's prompt is what
-establishes the topic.
+The first turn receives the original question unchanged. Later turns
+include the original question plus the previous agent's name and response,
+so each agent knows who they are responding to and what the original topic was.
 
 ## When to reach for it
 
@@ -38,7 +46,7 @@ establishes the topic.
   single model is overconfidence.
 
 For more than two agents or a moderator/synthesizer, Consensus
-(planned) is the better fit. For parallel fan-out, use Supervisor.
+is the better fit. For parallel fan-out, use Supervisor.
 
 ## Config
 
@@ -53,7 +61,7 @@ config :gen_agent_ensemble,
           {"pro-redis", GenAgentEnsemble.Agents.Simple,
             backend: GenAgent.Backends.Anthropic,
             system: "You argue for Redis as the primary store. Be concrete, cite tradeoffs, respond directly to the other side's points."},
-          {"pro-postgres", GenAgentEnsemble.Agents.Anthropic,
+          {"pro-postgres", GenAgentEnsemble.Agents.Simple,
             backend: GenAgent.Backends.Anthropic,
             system: "You argue for Postgres as the primary store. Same rules."}
         ],

@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.1](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.4.0...gen_agent_openai-v0.4.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **deps:** test HTTP adapters with published core 0.7 ([#406](https://github.com/genagent/gen_agent/issues/406)) ([ce57268](https://github.com/genagent/gen_agent/commit/ce57268f57d6893b10d5bdf501e022953a85a8d6))
+
+## [0.4.0](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.3.0...gen_agent_openai-v0.4.0) (2026-10-03)
+
+
+### Features
+
+* **examples:** primitive examples 04 to 06, an examples index, and HTTP testing recipes ([#317](https://github.com/genagent/gen_agent/issues/317)) ([6eb6691](https://github.com/genagent/gen_agent/commit/6eb6691129eea348d49de7c7abe29dcb76255426))
+
+
+### Bug Fixes
+
+* **backends:** reject HTTP redirects from provider endpoints ([#378](https://github.com/genagent/gen_agent/issues/378)) ([49f719c](https://github.com/genagent/gen_agent/commit/49f719cd2ed15367cc7a94a9a7d7b28169e2e57f))
+* **backends:** validate options and align shared names ([#389](https://github.com/genagent/gen_agent/issues/389)) ([68abf7c](https://github.com/genagent/gen_agent/commit/68abf7cde4ca185980ac3f8375d94390f98bf3d4))
+
 ## [0.3.0](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.2.3...gen_agent_openai-v0.3.0) (2026-10-02)
 
 

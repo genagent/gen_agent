@@ -50,6 +50,34 @@ defmodule GenAgent.Backends.OpenAIHTTPTest do
     assert request.options[:receive_timeout] == 60_000
     refute Map.has_key?(request.options, :connect_options)
     assert request.options[:retry] == false
+    assert request.options[:redirect] == false
+  end
+
+  test "cross-host redirects never forward the API key or conversation" do
+    {:ok, session} = OpenAI.start_session(api_key: "test-key")
+
+    for status <- [302, 307, 308] do
+      Process.put(
+        {Adapter, :reply},
+        Req.Response.new(
+          status: status,
+          headers: %{"location" => ["https://other.example/responses"]},
+          body: "redirect"
+        )
+      )
+
+      assert {:error, {:http_error, ^status, _body}} = OpenAI.prompt(session, "private prompt")
+      assert_receive {:req_request, request}
+      assert URI.to_string(request.url) == "https://api.openai.com/v1/responses"
+      assert Req.Request.get_header(request, "authorization") == ["Bearer test-key"]
+
+      assert Jason.decode!(request.body)["input"] == [
+               %{"role" => "user", "content" => "private prompt"}
+             ]
+
+      assert request.options[:redirect] == false
+      refute_receive {:req_request, _request}
+    end
   end
 
   test "non-200 responses preserve status and decoded body, with custom timeouts" do

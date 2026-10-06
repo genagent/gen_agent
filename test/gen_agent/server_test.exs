@@ -8,6 +8,29 @@ defmodule GenAgent.ServerTest do
   alias GenAgent.Server
   alias GenAgent.Support.TestAgent
 
+  defmodule StartupAgent do
+    use GenAgent
+
+    @impl true
+    def init_agent(opts), do: Keyword.fetch!(opts, :return)
+
+    @impl true
+    def handle_response(_ref, _response, state), do: {:noreply, state}
+  end
+
+  defmodule StartupBackend do
+    @behaviour GenAgent.Backend
+
+    @impl true
+    def start_session(return), do: return
+
+    @impl true
+    def prompt(_session, _prompt), do: {:error, :unused}
+
+    @impl true
+    def terminate_session(_session), do: :ok
+  end
+
   setup do
     sup_name = :"task_sup_#{System.unique_integer([:positive])}"
     task_sup = start_supervised!({Task.Supervisor, name: sup_name})
@@ -92,6 +115,97 @@ defmodule GenAgent.ServerTest do
   end
 
   describe "caller-owned retries" do
+    test "stream recipients receive events from every attempt before final completion", %{
+      task_sup: sup
+    } do
+      pid =
+        start_server(
+          sup,
+          [
+            [Event.new(:text, %{text: "first"}), Event.new(:error, %{reason: :again})],
+            [Event.new(:text, %{text: "second"}), Event.new(:result, %{text: "done"})]
+          ],
+          error_handler: fn _, _, s -> {:prompt, "retry", s} end
+        )
+
+      {:ok, ref} = :gen_statem.call(pid, {:tell_with_completion, "go", self(), :queue, self()})
+
+      assert_receive {:gen_agent, :event, "test", ^ref,
+                      %Event{kind: :text, data: %{text: "first"}}}
+
+      assert_receive {:gen_agent, :event, "test", ^ref, %Event{kind: :error}}
+
+      assert_receive {:gen_agent, :event, "test", ^ref,
+                      %Event{kind: :text, data: %{text: "second"}}}
+
+      assert_receive {:gen_agent, :event, "test", ^ref, %Event{kind: :result}}
+      assert_receive {:gen_agent, :completion, "test", ^ref, {:ok, %{text: "done"}}}
+      refute_receive {:gen_agent, :completion, "test", ^ref, _}
+    end
+
+    test "draining a halted pending retry settles its original caller", %{task_sup: sup} do
+      for mode <- [:ask, :tell] do
+        observer = self()
+
+        pid =
+          start_server(sup, [retry_gate(self(), :first, [Event.new(:error, %{reason: :again})])],
+            error_handler: fn _, _, s -> {:prompt, "retry", s} end,
+            event_handler: fn :halt, s ->
+              send(observer, :halted)
+              {:halt, s}
+            end
+          )
+
+        caller = if mode == :ask, do: Task.async(fn -> ask(pid, "go") end)
+
+        ref =
+          if mode == :tell do
+            {:ok, ref} = :gen_statem.call(pid, {:tell_with_completion, "go", self(), :queue})
+            ref
+          end
+
+        assert_receive {:retry_gate, :first, task, _}
+        notify(pid, :halt)
+        send(task, :release)
+        assert_receive :halted
+        assert status(pid).halted
+        assert :gen_statem.call(pid, :runtime_snapshot).self_chain_pending
+        assert :ok = :gen_statem.call(pid, :drain)
+
+        if caller do
+          assert {:error, :draining} = Task.await(caller)
+        else
+          assert_receive {:gen_agent, :completion, "test", ^ref, {:error, :draining}}
+        end
+
+        refute_receive {:retry_gate, _, _, _}
+      end
+    end
+
+    test "orderly stop replies to an ask waiting in a halted retry", %{task_sup: sup} do
+      observer = self()
+
+      pid =
+        start_server(sup, [retry_gate(self(), :first, [Event.new(:error, %{reason: :again})])],
+          error_handler: fn _, _, s -> {:prompt, "retry", s} end,
+          event_handler: fn :halt, s ->
+            send(observer, :halted)
+            {:halt, s}
+          end
+        )
+
+      caller = Task.async(fn -> ask(pid, "go") end)
+      assert_receive {:retry_gate, :first, task, _}
+      notify(pid, :halt)
+      send(task, :release)
+      assert_receive :halted
+      assert status(pid).halted
+      assert :gen_statem.call(pid, :runtime_snapshot).self_chain_pending
+
+      assert :ok = :gen_statem.stop(pid, :normal, 1_000)
+      assert {:error, {:agent_terminated, :normal}} = Task.await(caller)
+    end
+
     test "tell stays pending and completion is delivered exactly once", %{task_sup: sup} do
       for completion? <- [false, true] do
         pid =
@@ -409,11 +523,62 @@ defmodule GenAgent.ServerTest do
     end
   end
 
+  defp wait_for_queue(pid, expected, attempts \\ 50)
+  defp wait_for_queue(_pid, _expected, 0), do: flunk("request was not queued")
+
+  defp wait_for_queue(pid, expected, attempts) do
+    if status(pid).queued == expected do
+      :ok
+    else
+      Process.sleep(10)
+      wait_for_queue(pid, expected, attempts - 1)
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Startup
   # ---------------------------------------------------------------------------
 
   describe "startup" do
+    test "rejects a duplicate registered name without replacing the first agent" do
+      name = {:duplicate, make_ref()}
+      opts = [name: name, backend: Mock]
+      {:ok, pid} = GenAgent.start_agent(TestAgent, opts)
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+      assert {:error, {:already_started, ^pid}} = GenAgent.start_agent(TestAgent, opts)
+      assert GenAgent.whereis(name) == pid
+      assert Process.alive?(pid)
+    end
+
+    test "attributes init_agent errors and malformed returns to the agent module" do
+      for {return, expected} <- [
+            {{:error, :refused}, :refused},
+            {:garbage, :garbage}
+          ] do
+        assert {:error, {:init_agent_failed, ^expected}} =
+                 GenAgent.start_agent(StartupAgent,
+                   name: make_ref(),
+                   backend: StartupBackend,
+                   return: return
+                 )
+      end
+    end
+
+    test "attributes backend errors and malformed returns to the backend" do
+      for {return, expected} <- [
+            {{:error, :unavailable}, :unavailable},
+            {:garbage, :garbage}
+          ] do
+        assert {:error, {:backend_start_failed, ^expected}} =
+                 GenAgent.start_agent(StartupAgent,
+                   name: make_ref(),
+                   backend: StartupBackend,
+                   return: {:ok, return, %{}}
+                 )
+      end
+    end
+
     test "starts in :idle with no current request", %{task_sup: task_sup} do
       pid = start_server(task_sup, [])
       s = status(pid)
@@ -454,23 +619,21 @@ defmodule GenAgent.ServerTest do
 
     test "queues a second ask while one is in-flight and replies to both",
          %{task_sup: task_sup} do
-      slow_first = fn _prompt ->
-        Stream.resource(
-          fn -> :start end,
-          fn
-            :start -> {[Event.new(:result, %{text: "first"})], :done}
-            :done -> {:halt, :done}
-          end,
-          fn _ -> :ok end
-        )
-      end
-
-      pid = start_server(task_sup, [slow_first, result_events("second")])
+      pid =
+        start_server(task_sup, [
+          Mock.gate(:first, result_events("first")),
+          result_events("second")
+        ])
 
       task1 = Task.async(fn -> ask(pid, "a") end)
-      # Give task1 a chance to enter :processing.
-      Process.sleep(20)
+      assert_receive {:mock_blocked, :first, turn_pid}
       task2 = Task.async(fn -> ask(pid, "b") end)
+
+      wait_for_queue(pid, 1)
+      assert status(pid).state == :processing
+      assert Task.yield(task2, 0) == nil
+
+      send(turn_pid, {:mock_release, :first})
 
       assert {:ok, r1} = Task.await(task1)
       assert {:ok, r2} = Task.await(task2)
@@ -620,6 +783,29 @@ defmodule GenAgent.ServerTest do
   # ---------------------------------------------------------------------------
 
   describe "halt + resume" do
+    test "an ask submitted while halted waits until resume", %{task_sup: task_sup} do
+      responder = fn
+        _ref, %{text: "halt"}, state -> {:halt, state}
+        _ref, _response, state -> {:noreply, state}
+      end
+
+      pid =
+        start_server(task_sup, [result_events("halt"), result_events("after")],
+          responder: responder
+        )
+
+      assert {:ok, %{text: "halt"}} = ask(pid, "first")
+      assert status(pid).halted
+
+      queued = Task.async(fn -> ask(pid, "second") end)
+      wait_for_queue(pid, 1)
+      assert Task.yield(queued, 0) == nil
+
+      resume(pid)
+      assert {:ok, %{text: "after"}} = Task.await(queued)
+      refute status(pid).halted
+    end
+
     test "halt freezes the mailbox until resume", %{task_sup: task_sup} do
       responder = fn
         _ref, %{text: "halt me"}, state -> {:halt, state}
@@ -912,26 +1098,19 @@ defmodule GenAgent.ServerTest do
   # ---------------------------------------------------------------------------
 
   describe "watchdog" do
-    test "fires after the configured timeout and delivers :timeout",
+    test "kills the active task and delivers :timeout",
          %{task_sup: task_sup} do
-      slow = fn _ ->
-        Stream.resource(
-          fn -> :s end,
-          fn
-            :s ->
-              Process.sleep(1_000)
-              {[Event.new(:result, %{text: "never"})], :d}
-
-            :d ->
-              {:halt, :d}
-          end,
-          fn _ -> :ok end
+      pid =
+        start_server(task_sup, [Mock.gate(:watchdog, result_events("never"))], [],
+          watchdog_ms: 500
         )
-      end
 
-      pid = start_server(task_sup, [slow], [], watchdog_ms: 50)
+      caller = Task.async(fn -> ask(pid, "go") end)
+      assert_receive {:mock_blocked, :watchdog, turn_pid}
+      monitor = Process.monitor(turn_pid)
 
-      assert {:error, :timeout} = ask(pid, "go")
+      assert {:error, :timeout} = Task.await(caller)
+      assert_receive {:DOWN, ^monitor, :process, ^turn_pid, :killed}
       assert status(pid).state == :idle
     end
   end
@@ -1079,11 +1258,8 @@ defmodule GenAgent.ServerTest do
       assert status(pid).halted
     end
 
-    test "default handle_error is {:noreply, state} (via use GenAgent)",
+    test "agent stays idle and usable after a failed turn with a noreply error handler",
          %{task_sup: task_sup} do
-      # Without an error_handler keyword, TestAgent defaults to noreply,
-      # which mirrors the `use GenAgent` default. Verify a failed turn
-      # leaves the agent idle and ready for more work.
       pid = start_server(task_sup, [{:error, :boom}, result_events("ok after error")])
 
       assert {:error, :boom} = ask(pid, "first")

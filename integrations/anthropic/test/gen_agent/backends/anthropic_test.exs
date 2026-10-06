@@ -143,6 +143,50 @@ defmodule GenAgent.Backends.AnthropicTest do
       assert session.max_tokens == 4096
     end
 
+    test "accepts shared names and forwards them in the request" do
+      ref = make_ref()
+
+      {:ok, session} =
+        Anthropic.start_session(
+          http_fn: recording_fn(ref, ok_response("hi")),
+          system_prompt: "Be terse.",
+          max_output_tokens: 256
+        )
+
+      assert session.system == "Be terse."
+      assert session.max_tokens == 256
+      {:ok, _, _} = Anthropic.prompt(session, "hello")
+      assert_receive {^ref, %{body: %{system: "Be terse.", max_tokens: 256}}}
+    end
+
+    test "rejects unknown and malformed options before credential lookup" do
+      assert {:error, {:unknown_option, :modle}} = Anthropic.start_session(modle: "wrong")
+
+      assert {:error, {:invalid_options, %{model: "wrong"}}} =
+               Anthropic.start_session(%{model: "wrong"})
+    end
+
+    test "warns for legacy names and rejects conflicting prompt values" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, session} =
+                   Anthropic.start_session(
+                     http_fn: ok_response("hi"),
+                     system: "old",
+                     max_tokens: 128
+                   )
+
+          assert session.system == "old"
+          assert session.max_tokens == 128
+        end)
+
+      assert log =~ ":system is deprecated"
+      assert log =~ ":max_tokens is deprecated"
+
+      assert {:error, {:conflicting_options, [:system_prompt, :system]}} =
+               Anthropic.start_session(system_prompt: "new", system: "old")
+    end
+
     test "receive_timeout defaults to 60_000" do
       {:ok, session} = Anthropic.start_session(http_fn: ok_response("hi"))
       assert session.receive_timeout == 60_000
@@ -298,6 +342,58 @@ defmodule GenAgent.Backends.AnthropicTest do
       assert is_binary(data.session_id)
     end
 
+    test "only completed text stops produce results; rejected stops retain details and usage" do
+      for {stop_reason, expected_reason} <- [
+            {"refusal", {:refusal, %{"type" => "refusal"}}},
+            {"max_tokens",
+             {:response_incomplete,
+              %{stop_reason: "max_tokens", stop_details: %{"type" => "refusal"}}}},
+            {"model_context_window_exceeded",
+             {:response_incomplete,
+              %{
+                stop_reason: "model_context_window_exceeded",
+                stop_details: %{"type" => "refusal"}
+              }}},
+            {"pause_turn", {:unexpected_stop_reason, "pause_turn"}}
+          ] do
+        http_fn = fn _req ->
+          {:ok,
+           ok_response("partial", stop_reason: stop_reason).(nil)
+           |> elem(1)
+           |> Map.put("stop_details", %{"type" => "refusal"})}
+        end
+
+        {:ok, session} = Anthropic.start_session(http_fn: http_fn)
+        {:ok, events, returned_session} = Anthropic.prompt(session, "unanswered")
+
+        assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
+        assert data.reason == expected_reason
+        assert data.stop_reason == stop_reason
+        assert data.stop_details == %{"type" => "refusal"}
+        assert data.text == "partial"
+        assert returned_session.messages == []
+      end
+    end
+
+    test "stop_sequence remains a successful terminal result with stop details" do
+      details = %{"type" => "stop_sequence"}
+
+      http_fn = fn _req ->
+        {:ok,
+         ok_response("done", stop_reason: "stop_sequence").(nil)
+         |> elem(1)
+         |> Map.put("stop_details", details)}
+      end
+
+      {:ok, session} = Anthropic.start_session(http_fn: http_fn)
+
+      {:ok, [%Event{kind: :usage}, %Event{kind: :result, data: data}], _session} =
+        Anthropic.prompt(session, "prompt")
+
+      assert data.stop_reason == "stop_sequence"
+      assert data.stop_details == details
+    end
+
     test "propagates HTTP errors" do
       failing = fn _req -> {:error, {:http_error, 429, %{"type" => "rate_limit"}}} end
 
@@ -374,16 +470,6 @@ defmodule GenAgent.Backends.AnthropicTest do
                  %{role: "assistant", content: "reply"}
                ]
       end
-    end
-
-    test "removes a refused turn even when the response contains text" do
-      {:ok, session} = Anthropic.start_session(api_key: "sk-test", http_fn: ok_response("x"))
-      session = %{session | messages: [%{role: "user", content: "refused"}]}
-
-      session =
-        Anthropic.update_session(session, %{text: "I cannot help", stop_reason: "refusal"})
-
-      assert session.messages == []
     end
   end
 

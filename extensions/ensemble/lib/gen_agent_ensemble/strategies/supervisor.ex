@@ -25,6 +25,12 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
       `[{worker_name, text}]`, or a two-argument function also accepting
       the corresponding ordered sub-prompts. The default labels each
       worker response with its assigned sub-prompt.
+    * `:max_subtasks` (optional) -- positive integer upper bound on the
+      number of sub-prompts a decomposition may return. Defaults to 10.
+      A decomposition with more sub-prompts fails the run with
+      `{:too_many_subtasks, count, max}`; no workers are started and the
+      sub-prompts are not truncated. Any other value raises
+      `ArgumentError` at init.
 
   ## Limits
 
@@ -43,6 +49,8 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   alias GenAgentEnsemble.Queue
   alias GenAgentEnsemble.Usage
 
+  @default_max_subtasks 10
+
   defstruct [
     :coordinator,
     :worker_prefix,
@@ -50,6 +58,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     :worker_opts,
     :decomposer,
     :synthesizer,
+    max_subtasks: @default_max_subtasks,
     subtasks: [],
     phase: :idle,
     queue: nil,
@@ -62,6 +71,12 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     {w_prefix, w_mod, w_opts} = Keyword.fetch!(opts, :worker_template)
     decomposer = Keyword.fetch!(opts, :decomposer)
     synthesizer = Keyword.get(opts, :synthesizer, &default_synthesizer/2)
+    max_subtasks = Keyword.get(opts, :max_subtasks, @default_max_subtasks)
+
+    unless is_integer(max_subtasks) and max_subtasks > 0 do
+      raise ArgumentError,
+            "Supervisor :max_subtasks must be a positive integer, got: #{inspect(max_subtasks)}"
+    end
 
     state = %__MODULE__{
       coordinator: c_name,
@@ -70,6 +85,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
       worker_opts: w_opts,
       decomposer: decomposer,
       synthesizer: synthesizer,
+      max_subtasks: max_subtasks,
       queue: Queue.new()
     }
 
@@ -109,6 +125,23 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     state = %{state | usage: Usage.add(state.usage, state.coordinator, response.usage)}
     sub_prompts = state.decomposer.(response.text)
 
+    case length(sub_prompts) do
+      count when count > state.max_subtasks ->
+        reject_decomposition(token, count, state)
+
+      _ ->
+        fan_out(token, response, sub_prompts, state)
+    end
+  end
+
+  defp reject_decomposition(token, count, state) do
+    reason = {:too_many_subtasks, count, state.max_subtasks}
+    state = %{state | phase: :idle, subtasks: []}
+    {ops, state} = maybe_prepend_next(state, [{:reply_error, token, reason}])
+    {:ok, ops, state}
+  end
+
+  defp fan_out(token, response, sub_prompts, state) do
     {op_lists, progress} =
       sub_prompts
       |> Enum.with_index(1)
@@ -208,6 +241,28 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
       _ ->
         {:ok, [], state}
     end
+  end
+
+  @impl true
+  def handle_cancel(token, state) do
+    state = %{state | queue: Queue.delete(state.queue, token)}
+
+    case state.phase do
+      {:decomposing, ^token} ->
+        cancel_run(state, [])
+
+      {:fanning_out, ^token, progress} ->
+        cancel_run(state, Enum.map(progress, fn {worker, _} -> {:stop, worker} end))
+
+      _ ->
+        {:ok, [], state}
+    end
+  end
+
+  defp cancel_run(state, stop_ops) do
+    state = %{state | phase: :idle, subtasks: [], usage: Usage.new()}
+    {ops, state} = maybe_prepend_next(state, stop_ops)
+    {:ok, ops, state}
   end
 
   @impl true

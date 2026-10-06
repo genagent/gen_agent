@@ -1,7 +1,7 @@
 defmodule GenAgentClaude.MixProject do
   use Mix.Project
 
-  @version "0.2.1"
+  @version "0.2.7"
   @source_url "https://github.com/genagent/gen_agent"
   @source_path "integrations/claude"
 
@@ -33,7 +33,7 @@ defmodule GenAgentClaude.MixProject do
   defp deps do
     [
       gen_agent_dep(),
-      {:claude_wrapper, "~> 0.14.5"},
+      {:claude_wrapper, "~> 0.15.2"},
       {:forcola, "~> 0.4.0", only: :test},
       {:ex_doc, "~> 0.35", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

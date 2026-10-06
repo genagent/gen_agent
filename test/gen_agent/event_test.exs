@@ -16,11 +16,12 @@ defmodule GenAgent.EventTest do
     end
 
     test "stamps a monotonic timestamp" do
-      e1 = Event.new(:text, %{text: "a"})
-      Process.sleep(2)
-      e2 = Event.new(:text, %{text: "b"})
+      before_ts = System.monotonic_time(:millisecond)
+      event = Event.new(:text, %{text: "a"})
+      after_ts = System.monotonic_time(:millisecond)
 
-      assert e2.timestamp >= e1.timestamp
+      assert event.timestamp >= before_ts
+      assert event.timestamp <= after_ts
     end
   end
 

@@ -5,6 +5,8 @@ defmodule GenAgent.Response do
   A `Response` is built by the state machine after a terminal event
   (`:result` or `:error`) arrives from the backend. It carries:
 
+    * `:prompt` -- the prompt actually sent to the backend after `pre_turn/2`
+      rewriting. It is `nil` for responses built outside an agent turn.
     * `:text` -- the full assembled assistant text for the turn.
     * `:final_message` -- the terminal text when provided, otherwise the
       last boundary-marked assistant message (or all text if no boundary
@@ -18,12 +20,14 @@ defmodule GenAgent.Response do
       retained log. `mode: :exact` means no event was omitted.
     * `:usage` -- token usage if the backend reported any, otherwise `nil`.
     * `:duration_ms` -- wall-clock time from prompt dispatch to terminal event.
+    * `:metadata` -- additive application or orchestration results, defaulting to `%{}`.
     * `:session_id` -- the backend's session identifier, if any.
   """
 
   alias GenAgent.Event
 
   @type t :: %__MODULE__{
+          prompt: String.t() | nil,
           text: String.t(),
           final_message: String.t() | nil,
           events: [Event.t()],
@@ -31,16 +35,19 @@ defmodule GenAgent.Response do
           event_coverage: map(),
           usage: map() | nil,
           duration_ms: non_neg_integer(),
+          metadata: map(),
           session_id: String.t() | nil
         }
 
-  defstruct text: "",
+  defstruct prompt: nil,
+            text: "",
             final_message: nil,
             events: [],
             terminal: nil,
             event_coverage: %{},
             usage: nil,
             duration_ms: 0,
+            metadata: %{},
             session_id: nil
 
   @doc """

@@ -90,9 +90,9 @@ and `finish_error`.
   CONTINUES -- subsequent events still get their callbacks called
   so their state mutations aren't lost. This matters for audit/log
   style callbacks that shouldn't be silenced by an unrelated halt.
-- `safely_handle_event/3` wraps user callback in try/rescue so a
-  buggy `handle_event/2` doesn't crash the drain loop and lose
-  subsequent events.
+- `safely_handle_event/4` catches exceptions and rejects malformed
+  callback returns, retaining the previous state so a buggy
+  `handle_event/2` does not crash the drain loop or lose subsequent events.
 
 ## Related
 
@@ -103,3 +103,7 @@ and `finish_error`.
   callback and BEFORE `drain_pending_events`, so a commit hook sees
   the turn's own state, not the state after buffered notifies are
   drained. This ordering is deliberate.
+- A clean halt drains all already-buffered notifications before `post_run`
+  and `[:gen_agent, :halted]` observe the state. If an event itself halts,
+  the remaining buffered events are applied before completion fires once.
+  Notifications received after completion can still update the halted agent.

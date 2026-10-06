@@ -76,7 +76,7 @@ defmodule MyApp.Assistant do
   @impl true
   def init_agent(_opts) do
     backend_opts = [
-      instructions: "You are a concise, helpful assistant.",
+      system_prompt: "You are a concise, helpful assistant.",
       max_output_tokens: 512
     ]
 
@@ -107,7 +107,8 @@ in the next request. This backend threads one id across turns:
 ```elixir
 # Turn 1: fresh conversation, no previous_response_id
 {:ok, r1} = GenAgent.ask("my-assistant", "Remember the number 42")
-# Turn 2: backend sends previous_response_id = r1.response_id
+# Turn 2: backend sends previous_response_id from r1's terminal event
+# (r1.terminal.data.response_id), carried forward automatically
 # OpenAI replays turn 1's context on the server side
 {:ok, r2} = GenAgent.ask("my-assistant", "What number did I ask you to remember?")
 # r2.text =~ "42"
@@ -122,8 +123,8 @@ responses remain referenceable.
 
 OpenAI's docs are explicit: instructions from a prior turn do
 **not** carry over when you chain via `previous_response_id`. This
-backend therefore resends `:instructions` on every request when
-the option is set. The per-turn token cost is tiny, but the
+backend therefore resends the `:system_prompt` option as API `instructions`
+on every request when the option is set. The per-turn token cost is tiny, but the
 invariant matters -- a future optimization that "only sends
 instructions once" would silently break system-prompt behavior on
 every turn after the first.
@@ -136,13 +137,14 @@ every turn after the first.
   `{:error, {:backend_start_failed, :missing_api_key}}`), unless a one-arity
   `:http_fn` is supplied.
 - `:model` -- model name. Defaults to `"gpt-5"`.
-- `:instructions` -- system prompt (string). Resent every turn.
+- `:system_prompt` -- system prompt (string). Resent every turn as API
+  `instructions`; `:instructions` and `:system` remain deprecated aliases.
 - `:reasoning_effort` -- an atom or string passed through as
   `reasoning.effort` on reasoning models (for example `:low`,
   `:medium`, `:high`), or `nil` for the model default. The backend
   does not validate it; accepted values depend on the model.
 - `:max_output_tokens` -- cap on output tokens per turn. Defaults
-  to `nil` (model default).
+  to `nil` (model default). `:max_tokens` remains a deprecated alias.
 - `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
   to `60_000`. The 60-second default can be short for long reasoning turns.
 - `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults
@@ -153,6 +155,8 @@ every turn after the first.
   tests that want to stub out the API.
 
 See `GenAgent.Backends.OpenAI` for the full module docs.
+Unknown keys fail session startup with `{:unknown_option, key}`; conflicting
+values supplied through aliases fail with `{:conflicting_options, keys}`.
 
 ## Why no tool use?
 

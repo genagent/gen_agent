@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.5.0](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.8...gen_agent_codex-v0.5.0) (2026-10-05)
+
+
+### Features
+
+* **codex:** optionally return only the final agent message ([#394](https://github.com/genagent/gen_agent/issues/394)) ([b251a13](https://github.com/genagent/gen_agent/commit/b251a1321242edea1c895f76e0a16d38c357dc53))
+
+
+### Bug Fixes
+
+* **backends:** align CLI adapter wrapper constraints ([#396](https://github.com/genagent/gen_agent/issues/396)) ([#397](https://github.com/genagent/gen_agent/issues/397)) ([ecbbec4](https://github.com/genagent/gen_agent/commit/ecbbec479745689685a78ec0aa1b7c2e8aaad4c2))
+
+## [0.4.8](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.7...gen_agent_codex-v0.4.8) (2026-10-03)
+
+
+### Bug Fixes
+
+* **backends:** validate options and align shared names ([#389](https://github.com/genagent/gen_agent/issues/389)) ([68abf7c](https://github.com/genagent/gen_agent/commit/68abf7cde4ca185980ac3f8375d94390f98bf3d4))
+
+## [0.4.7](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.6...gen_agent_codex-v0.4.7) (2026-10-03)
+
+
+### Bug Fixes
+
+* **codex:** require wrapper oversized-line errors ([#388](https://github.com/genagent/gen_agent/issues/388)) ([19561f7](https://github.com/genagent/gen_agent/commit/19561f7efdacce476ca4ec39d75b191f93a609b9))
+* **codex:** translate current item types without duplicate payloads ([#386](https://github.com/genagent/gen_agent/issues/386)) ([c4baa01](https://github.com/genagent/gen_agent/commit/c4baa01ff07070b73b19055a62968025d60c4b46)), closes [#184](https://github.com/genagent/gen_agent/issues/184)
+
+## [0.4.6](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.5...gen_agent_codex-v0.4.6) (2026-10-03)
+
+
+### Bug Fixes
+
+* **codex:** report CLI stream timeouts to GenAgent ([#383](https://github.com/genagent/gen_agent/issues/383)) ([c0ca936](https://github.com/genagent/gen_agent/commit/c0ca936ab415ea562bc0851f08f50128aeabe0d6))
+* **codex:** require buffered timeout drain fix ([#384](https://github.com/genagent/gen_agent/issues/384)) ([172b24c](https://github.com/genagent/gen_agent/commit/172b24c20aff847f5aaaabb4db085d3bc8c12741))
+* **codex:** validate session sandbox and working directory ([#377](https://github.com/genagent/gen_agent/issues/377)) ([255ce70](https://github.com/genagent/gen_agent/commit/255ce7032ec6757f7f4fa5b56c27184c5e8a0465))
+
+## [0.4.5](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.4...gen_agent_codex-v0.4.5) (2026-10-02)
+
+
+### Bug Fixes
+
+* **codex:** report completed-turn usage deltas ([#371](https://github.com/genagent/gen_agent/issues/371)) ([9d89ff3](https://github.com/genagent/gen_agent/commit/9d89ff3569b4bee3d1056f968c8bc1246416b4fa))
+
+## [0.4.4](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.3...gen_agent_codex-v0.4.4) (2026-10-02)
+
+
+### Bug Fixes
+
+* **codex:** reject ephemeral and verbose session options ([#368](https://github.com/genagent/gen_agent/issues/368)) ([4935fc3](https://github.com/genagent/gen_agent/commit/4935fc3e3c0fb72f9025398d8748250c658e572a))
+
+## [0.4.3](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.2...gen_agent_codex-v0.4.3) (2026-10-02)
+
+
+### Bug Fixes
+
+* **codex:** require wrapper with Forcola 0.4 support ([#362](https://github.com/genagent/gen_agent/issues/362)) ([378ff10](https://github.com/genagent/gen_agent/commit/378ff10e5d931704b7df6c3f5fac40f2924cdcf0))
+
+## [0.4.2](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.1...gen_agent_codex-v0.4.2) (2026-10-02)
+
+
+### Bug Fixes
+
+* **deps:** allow core 0.7 in CLI adapters and Ensemble ([#327](https://github.com/genagent/gen_agent/issues/327)) ([f9d3a21](https://github.com/genagent/gen_agent/commit/f9d3a218b5e7beb82217f829c4b267c2f7504829))
+
 ## [0.4.1](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.4.0...gen_agent_codex-v0.4.1) (2026-10-02)
 
 

@@ -131,6 +131,178 @@ defmodule GenAgent.IntegrationTest do
         GenAgent.start_agent(SimpleAgent, name: "no-backend")
       end
     end
+
+    test "rejects invalid :watchdog_ms at start" do
+      for value <- [-5, 0, "600000", :never, 1.5] do
+        assert {:error, {:init_failed, :error, ArgumentError}} =
+                 GenAgent.start_agent(SimpleAgent,
+                   name: unique_name("bad-watchdog"),
+                   backend: GenAgent.Backends.Mock,
+                   watchdog_ms: value
+                 )
+      end
+    end
+
+    test "rejects invalid :max_tell_results at start" do
+      for value <- [-1, "100", :infinity, :unlimited, 1.5] do
+        assert {:error, {:init_failed, :error, ArgumentError}} =
+                 GenAgent.start_agent(SimpleAgent,
+                   name: unique_name("bad-tell-results"),
+                   backend: GenAgent.Backends.Mock,
+                   max_tell_results: value
+                 )
+      end
+    end
+
+    test "rejects invalid :max_tell_result_bytes at start" do
+      for value <- [-1, "8192", :infinity, :unlimited, 1.5] do
+        assert {:error, {:init_failed, :error, ArgumentError}} =
+                 GenAgent.start_agent(SimpleAgent,
+                   name: unique_name("bad-tell-result-bytes"),
+                   backend: GenAgent.Backends.Mock,
+                   max_tell_result_bytes: value
+                 )
+      end
+    end
+
+    test "accepts boundary :watchdog_ms values" do
+      for value <- [1, :infinity] do
+        name = unique_name("ok-watchdog")
+
+        assert {:ok, _pid} =
+                 GenAgent.start_agent(SimpleAgent,
+                   name: name,
+                   backend: GenAgent.Backends.Mock,
+                   watchdog_ms: value,
+                   scripts: [[Event.new(:result, %{text: "ok"})]]
+                 )
+
+        on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+      end
+    end
+
+    test "max_tell_results 0 retains nothing and 1 keeps only the newest" do
+      for {limit, expected} <- [{0, :evicted}, {1, :kept}] do
+        name = unique_name("tell-results")
+
+        {:ok, _pid} =
+          GenAgent.start_agent(SimpleAgent,
+            name: name,
+            backend: GenAgent.Backends.Mock,
+            max_tell_results: limit,
+            scripts: [
+              [Event.new(:result, %{text: "a"})],
+              [Event.new(:result, %{text: "b"})]
+            ]
+          )
+
+        on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+        {:ok, first} = GenAgent.tell_with_completion(name, "one")
+        {:ok, second} = GenAgent.tell_with_completion(name, "two")
+        assert_receive {:gen_agent, :completion, ^name, ^first, {:ok, _}}, 1_000
+        assert_receive {:gen_agent, :completion, ^name, ^second, {:ok, _}}, 1_000
+
+        assert {:error, :not_found} = GenAgent.poll(name, first)
+
+        case expected do
+          :evicted -> assert {:error, :not_found} = GenAgent.poll(name, second)
+          :kept -> assert {:ok, :completed, _} = GenAgent.poll(name, second)
+        end
+      end
+    end
+
+    test "tell result cache evicts old responses when its byte budget is reached" do
+      name = unique_name("tell-result-bytes")
+      large_text = :binary.copy("x", 300_000)
+      script = [Event.new(:text, %{text: large_text}), Event.new(:result, %{text: "ok"})]
+
+      {:ok, pid} =
+        GenAgent.start_agent(SimpleAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          max_tell_result_bytes: 700_000,
+          scripts: [script, script, script]
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+      {:ok, first} = GenAgent.tell(name, "first")
+      wait_until(fn -> match?({:ok, :completed, _}, GenAgent.poll(name, first)) end)
+
+      {:ok, second} = GenAgent.tell_with_completion(name, "second")
+      {:ok, third} = GenAgent.tell_with_completion(name, "third")
+      assert_receive {:gen_agent, :completion, ^name, ^second, {:ok, _}}, 1_000
+      assert_receive {:gen_agent, :completion, ^name, ^third, {:ok, _}}, 1_000
+
+      assert {:error, :not_found} = GenAgent.poll(name, first)
+      assert {:ok, :completed, _} = GenAgent.poll(name, second)
+      assert {:ok, :completed, _} = GenAgent.poll(name, third)
+
+      {_state, data} = :sys.get_state(pid)
+      assert data.tell_result_bytes <= 700_000
+      assert data.tell_result_bytes > 0
+      assert map_size(data.tell_results) == 2
+    end
+
+    test "an oversized completion is delivered but not cached" do
+      name = unique_name("oversized-tell-result")
+
+      {:ok, pid} =
+        GenAgent.start_agent(SimpleAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          max_tell_result_bytes: 0,
+          scripts: [[Event.new(:result, %{text: "ok"})]]
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+      {:ok, ref} = GenAgent.tell_with_completion(name, "work")
+      assert_receive {:gen_agent, :completion, ^name, ^ref, {:ok, %{text: "ok"}}}, 1_000
+      assert {:error, :not_found} = GenAgent.poll(name, ref)
+
+      {_state, data} = :sys.get_state(pid)
+      assert data.tell_result_bytes == 0
+      assert data.tell_results == %{}
+    end
+
+    test "start_agent/2 forwards :task_supervisor to init_agent/1 but strips reserved keys" do
+      test_pid = self()
+
+      defmodule EchoOpts do
+        use GenAgent
+
+        @impl true
+        def init_agent(opts) do
+          send(opts[:test_pid], {:init_opts, Keyword.delete(opts, :test_pid)})
+          {:ok, [scripts: []], []}
+        end
+
+        @impl true
+        def handle_response(_ref, _response, state), do: {:noreply, state}
+      end
+
+      name = unique_name("echo")
+
+      {:ok, _pid} =
+        GenAgent.start_agent(EchoOpts,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          task_supervisor: :some_supervisor,
+          watchdog_ms: 1_000,
+          shutdown: 10_000,
+          max_tell_results: 5,
+          max_tell_result_bytes: 5_000,
+          foo: :bar,
+          test_pid: test_pid
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+      assert_receive {:init_opts, opts}, 1_000
+      assert Enum.sort(opts) == [foo: :bar, task_supervisor: :some_supervisor]
+    end
   end
 
   describe "stop/1" do
@@ -152,6 +324,21 @@ defmodule GenAgent.IntegrationTest do
   end
 
   describe "caller-owned supervision" do
+    test "child_spec/2 passes through and validates the shutdown timeout" do
+      opts = [
+        name: unique_name("shutdown-spec"),
+        backend: GenAgent.Backends.Mock,
+        task_supervisor: self()
+      ]
+
+      assert GenAgent.child_spec(SimpleAgent, opts).shutdown == 5_000
+      assert GenAgent.child_spec(SimpleAgent, opts ++ [shutdown: :infinity]).shutdown == :infinity
+
+      assert_raise ArgumentError, ~r/:shutdown/, fn ->
+        GenAgent.child_spec(SimpleAgent, opts ++ [shutdown: -1])
+      end
+    end
+
     test "requires an explicit task supervisor and preserves temporary children" do
       assert_raise KeyError, fn ->
         GenAgent.child_spec(SimpleAgent,
@@ -452,15 +639,16 @@ defmodule GenAgent.IntegrationTest do
   # ---------------------------------------------------------------------------
 
   describe "use GenAgent" do
-    test "provides default handle_event that keeps state" do
-      # SimpleAgent does not override handle_event -- the default from the
-      # use macro should accept any event and return :noreply.
-      name = start_simple([])
-      assert :ok = GenAgent.notify(name, {:random_event, 1})
+    test "generates default handle_event/2 and handle_error/3 that keep state" do
+      # SimpleAgent overrides neither; call the macro-generated defaults
+      # directly, since the server falls back when they are missing.
+      state = %SimpleAgent.State{responses: [{make_ref(), "x"}]}
 
-      # Agent should still be idle and alive with unchanged state.
-      Process.sleep(10)
-      assert GenAgent.status(name).state == :idle
+      assert function_exported?(SimpleAgent, :handle_event, 2)
+      assert function_exported?(SimpleAgent, :handle_error, 3)
+
+      assert {:noreply, ^state} = SimpleAgent.handle_event({:random_event, 1}, state)
+      assert {:noreply, ^state} = SimpleAgent.handle_error(make_ref(), :boom, state)
     end
   end
 

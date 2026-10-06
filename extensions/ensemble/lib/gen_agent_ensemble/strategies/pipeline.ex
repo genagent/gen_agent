@@ -111,6 +111,20 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
   end
 
   @impl true
+  def handle_cancel(token, state) do
+    state = %{state | queue: Queue.delete(state.queue, token)}
+
+    case state.phase do
+      {:in_stage, _, ^token} ->
+        {ops, state} = maybe_start_next(%{state | phase: :idle, usage: Usage.new()}, [])
+        {:ok, ops, state}
+
+      _ ->
+        {:ok, [], state}
+    end
+  end
+
+  @impl true
   def handle_dispatch_rejected(stage, token, reason, state) do
     case state.phase do
       {:in_stage, _idx, ^token} -> handle_error(stage, reason, state)

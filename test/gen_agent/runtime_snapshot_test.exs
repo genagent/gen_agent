@@ -98,6 +98,7 @@ defmodule GenAgent.RuntimeSnapshotTest do
     assert Map.keys(snapshot) |> Enum.sort() ==
              [
                :current_request,
+               :draining,
                :halted,
                :pending_notifications,
                :pending_prompts,
@@ -119,6 +120,7 @@ defmodule GenAgent.RuntimeSnapshotTest do
 
     assert snapshot == %{
              phase: :idle,
+             draining: false,
              halted: false,
              pending_prompts: 0,
              pending_notifications: 0,

@@ -3,11 +3,11 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   Two agents take turns arguing about a prompt until they converge
   or a round cap is reached.
 
-  The incoming prompt hits the first agent. That agent's response
-  text becomes the prompt for the second agent, whose response
-  becomes the prompt for the first again, and so on. Each agent's
-  own `GenAgent` session keeps the full back-and-forth in its
-  backend memory, so turn N sees turns 1..N-1 in context.
+  The incoming prompt hits the first agent. On turn 2 and beyond,
+  each agent receives the original question, the previous speaker's
+  name, and that speaker's response text. Each agent's own `GenAgent`
+  session keeps the full back-and-forth in its backend memory, so
+  turn N sees turns 1..N-1 in context.
 
   ## Options
 
@@ -111,7 +111,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   def handle_ask(prompt, _opts, token, state), do: start_or_queue(prompt, token, state)
 
   defp start_or_queue(prompt, token, %{phase: :idle} = state) do
-    phase = {:running, token, state.first, 0, []}
+    phase = {:running, token, state.first, 0, [], prompt}
     {:ok, [{:dispatch, state.first, prompt, token}], %{state | phase: phase, usage: Usage.new()}}
   end
 
@@ -122,15 +122,15 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   @impl true
   def handle_response(agent, response, state) do
     case state.phase do
-      {:running, token, awaiting, turns, transcript} when agent == awaiting ->
-        advance(token, agent, response, turns, transcript, state)
+      {:running, token, awaiting, turns, transcript, original_prompt} when agent == awaiting ->
+        advance(token, agent, response, turns, transcript, original_prompt, state)
 
       _ ->
         {:ok, [], state}
     end
   end
 
-  defp advance(token, agent, response, turns, transcript, state) do
+  defp advance(token, agent, response, turns, transcript, original_prompt, state) do
     state = %{state | usage: Usage.add(state.usage, agent, response.usage)}
     transcript = transcript ++ [{agent, response.text}]
     turns = turns + 1
@@ -140,9 +140,10 @@ defmodule GenAgentEnsemble.Strategies.Debate do
       finalize(token, transcript, state)
     else
       other = other_agent(agent, state)
+      next_prompt = "#{original_prompt}\n\n#{agent}:\n#{response.text}"
 
-      {:ok, [{:dispatch, other, response.text, token}],
-       %{state | phase: {:running, token, other, turns, transcript}}}
+      {:ok, [{:dispatch, other, next_prompt, token}],
+       %{state | phase: {:running, token, other, turns, transcript, original_prompt}}}
     end
   end
 
@@ -179,7 +180,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
       {:ok, {token, prompt}, rest} ->
         state = %{
           state
-          | phase: {:running, token, state.first, 0, []},
+          | phase: {:running, token, state.first, 0, [], prompt},
             queue: rest,
             usage: Usage.new()
         }
@@ -194,7 +195,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   @impl true
   def handle_error(_agent, reason, state) do
     case state.phase do
-      {:running, token, _, _, _} ->
+      {:running, token, _, _, _, _} ->
         state = %{state | phase: :idle}
         {ops, state} = maybe_start_next(state, [{:reply_error, token, reason}])
         {:ok, ops, state}
@@ -205,9 +206,23 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   end
 
   @impl true
+  def handle_cancel(token, state) do
+    state = %{state | queue: Queue.delete(state.queue, token)}
+
+    case state.phase do
+      {:running, ^token, _, _, _, _} ->
+        {ops, state} = maybe_start_next(%{state | phase: :idle, usage: Usage.new()}, [])
+        {:ok, ops, state}
+
+      _ ->
+        {:ok, [], state}
+    end
+  end
+
+  @impl true
   def handle_dispatch_rejected(agent, token, reason, state) do
     case state.phase do
-      {:running, ^token, _, _, _} -> handle_error(agent, reason, state)
+      {:running, ^token, _, _, _, _} -> handle_error(agent, reason, state)
       _ -> {:ok, [{:reply_error, token, reason}], state}
     end
   end
@@ -227,7 +242,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
         :idle ->
           :idle
 
-        {:running, _token, awaiting, turns, transcript} ->
+        {:running, _token, awaiting, turns, transcript, _original_prompt} ->
           %{awaiting: awaiting, turns: turns, transcript_len: length(transcript)}
       end
 

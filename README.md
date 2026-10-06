@@ -38,7 +38,7 @@ semantics of turns.
 ```elixir
 def deps do
   [
-    {:gen_agent, "~> 0.6.2"}, # x-release-please-version
+    {:gen_agent, "~> 0.7.0"}, # x-release-please-version
     # Plus at least one backend:
     {:gen_agent_claude, "~> 0.2.0"},
     {:gen_agent_codex, "~> 0.4.0"},
@@ -185,7 +185,13 @@ idle <--- handle_response --- processing (turn done)
   mailbox. A halted agent ignores queued prompts until `GenAgent.resume/1`
   is called.
 - **Watchdog** -- a `:state_timeout` kills any turn that runs longer than
-  the configured deadline (default 10 minutes). Configurable per agent.
+  the `:watchdog_ms` deadline (positive integer milliseconds or `:infinity`,
+  default 10 minutes). `:max_tell_results` (default 100) and
+  `:max_tell_result_bytes` (default 8 MiB) bound the completed tell results
+  retained for `poll/2`. Both are non-negative integers; zero retains none.
+  The byte budget uses `:erlang.external_size/1` for each ref and result,
+  including results also sent by `tell_with_completion/4`. The oldest
+  results are evicted first; a result larger than the budget is not retained.
 
 ## Lifecycle hooks
 
@@ -241,6 +247,7 @@ See the [Backends guide](guides/backends.md) for backend implementation rules an
 | Function | What it does |
 |---|---|
 | `start_agent/2` | Start an agent under the supervision tree. |
+| `current_name/0` | Read the registered name from an agent callback. |
 | `ask/3` | Synchronous prompt. Blocks until the turn finishes. |
 | `tell/3` | Async prompt. Returns a ref for `poll/3`. |
 | `tell_with_completion/4` | Async prompt with a request-scoped completion message. |
@@ -253,6 +260,7 @@ See the [Backends guide](guides/backends.md) for backend implementation rules an
 | `resume/1` | Unhalt an agent and drain its mailbox. |
 | `status/2` | Read the agent's current state. |
 | `runtime_snapshot/2` | Read bounded runtime metadata and pending-input counts. |
+| `drain/2` | Refuse new work, finish the active turn, and wait for the agent to exit. |
 | `stop/1` | Terminate the agent. |
 | `child_spec/2` | Build an agent child spec for a caller-owned supervisor. |
 | `stop/2` | Terminate an agent under a caller-owned supervisor. |
@@ -261,14 +269,24 @@ See the [Backends guide](guides/backends.md) for backend implementation rules an
 Names resolve through a `Registry`, so callers address agents by name
 (any term). Agents use `restart: :temporary`: a crashed or stopped agent
 must be started explicitly, and its previous state is not restored.
+Callbacks can use `GenAgent.current_name()` in both the agent process and
+the prompt task; no duplicate `agent_name` option is needed.
 
-`runtime_snapshot/2` reports the coordinator's current phase, halted
+`runtime_snapshot/2` reports the coordinator's current phase, halted and draining
 flag, queued prompt and buffered notification counts, pending self-chain,
 and active request ref, origin and elapsed/watchdog time. It contains no
 prompt, callback state, backend session or event payload. It is a
 point-in-time observation, not durable state or permission to dispatch.
 The older `status/2` API remains available; its `agent_state` is the
 server's latest retained state, not a live read of an in-flight task.
+
+Use `GenAgent.drain(name, timeout)` during an orderly shutdown. It rejects
+new asks, tells, and acknowledged notifications with `{:error, :draining}`;
+queued asks and completion recipients receive the same error. The active
+turn finishes its callbacks before the agent and backend session terminate.
+`drain/2` returns `:ok` only after that cleanup and process exit. The
+default timeout is `:infinity`; a caller timeout does not cancel a drain
+already accepted by the agent. `stop/1` remains immediate.
 
 ## Request completion messages
 
@@ -516,9 +534,34 @@ mix credo --strict
 mix dialyzer
 ```
 
-The test suite uses an in-process `GenAgent.Backends.Mock` (in
-`test/support/`) that lets you script backend responses without any
-external process. See `test/gen_agent/server_test.exs` for examples.
+These commands check the root package. Run `scripts/quality.sh` to validate
+all six packages; see the [contributor guide](https://github.com/genagent/gen_agent/blob/main/CONTRIBUTING.md)
+for setup and release conventions.
+
+`GenAgent.Backends.Mock` ships with the core package so applications can
+test their own agent callbacks without a provider account or CLI. Return
+`scripts:` from `init_agent/1`, one script per turn:
+
+```elixir
+def init_agent(opts) do
+  events = [GenAgent.Event.new(:result, %{text: "done"})]
+  {:ok, [scripts: [events]], %{observer: Keyword.fetch!(opts, :observer)}}
+end
+
+{:ok, _pid} = GenAgent.start_agent(MyAgent,
+  name: "test-worker",
+  backend: GenAgent.Backends.Mock,
+  observer: self()
+)
+
+assert {:ok, response} = GenAgent.ask("test-worker", "work")
+assert response.text == "done"
+assert GenAgent.Backends.Mock.history("test-worker") == ["work"]
+```
+
+Use `GenAgent.Backends.Mock.gate/2` when a test needs to inspect an active
+turn or queue before releasing it. See the module documentation for the
+release message and supported script shapes.
 
 ## License
 
