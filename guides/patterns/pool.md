@@ -93,7 +93,7 @@ defmodule Pool.Worker do
   @impl true
   def init_agent(opts) do
     state = %State{
-      name: Keyword.fetch!(opts, :worker_name),
+      name: GenAgent.current_name(),
       role: Keyword.get(opts, :role, "research assistant")
     }
 
@@ -166,7 +166,6 @@ defmodule Pool do
             [
               name: name,
               backend: backend,
-              worker_name: name,
               role: role
             ] ++ limits
           )

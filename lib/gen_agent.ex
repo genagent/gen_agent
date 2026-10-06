@@ -155,6 +155,11 @@ defmodule GenAgent do
   | Backend `prompt/2,3`, its event stream, `update_session/2` | prompt task |
   | Backend `start_session/1`, `terminate_session/1`, `checkpoint_session/2` | agent process |
 
+  `current_name/0` returns the registered agent name in callbacks on either
+  process, including `init_agent/1` and `handle_stream_event/2`. It returns
+  `nil` outside those processes. The name is kept separate from the options
+  that an agent might forward to its backend.
+
   Anything that runs in the agent process blocks the agent from handling
   other messages while it runs. Synchronous calls such as `status/2`,
   `poll/3`, `tell/3`, `runtime_snapshot/2` and `notify_ack/3` are handled
@@ -278,6 +283,8 @@ defmodule GenAgent do
 
   `opts` is the keyword list passed to `start_agent/2` minus the reserved
   keys consumed by GenAgent itself (`:name`, `:backend`, etc.).
+  Use `current_name/0` to read the registered name without adding it to
+  options that might be forwarded to the backend.
   """
   @callback init_agent(opts :: keyword()) ::
               {:ok, backend_opts :: keyword(), agent_state()}
@@ -550,6 +557,18 @@ defmodule GenAgent do
   @type request_ref :: reference()
 
   @default_call_timeout :infinity
+
+  @doc """
+  Return the registered name from an agent callback, or `nil` elsewhere.
+
+  Available in `init_agent/1`, turn and lifecycle callbacks, and
+  `handle_stream_event/2`, which runs in the prompt task. The name is scoped
+  to those processes; tasks spawned by application callbacks do not inherit
+  it. This avoids duplicating `:name` in backend options or agent state just
+  to identify the current agent.
+  """
+  @spec current_name() :: name() | nil
+  def current_name, do: Process.get({__MODULE__, :current_name})
 
   @doc """
   Start an agent under the GenAgent supervision tree.

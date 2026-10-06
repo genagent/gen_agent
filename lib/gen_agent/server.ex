@@ -141,6 +141,7 @@ defmodule GenAgent.Server do
     Process.flag(:trap_exit, true)
 
     name = Keyword.fetch!(opts, :name)
+    Process.put({GenAgent, :current_name}, name)
     backend = Keyword.fetch!(opts, :backend)
     module = Keyword.fetch!(opts, :module)
     # Applications decide which metadata to render; a library must not change
@@ -1371,6 +1372,7 @@ defmodule GenAgent.Server do
     max_events_per_turn = data.max_events_per_turn
     max_event_bytes_per_turn = data.max_event_bytes_per_turn
     event_retention = data.event_retention
+    name = data.name
     owner = self()
     stream_tag = if stream_to, do: make_ref()
 
@@ -1382,6 +1384,8 @@ defmodule GenAgent.Server do
       try do
         {:ok,
          Task.Supervisor.async(task_supervisor, fn ->
+           Process.put({GenAgent, :current_name}, name)
+
            run_prompt(
              backend,
              backend_session,
