@@ -61,6 +61,7 @@ defmodule GenAgent.Telemetry do
   | `[:gen_agent, :mailbox, :queued]` | `depth` (count) | `agent` |
   | `[:gen_agent, :input, :rejected]` | `system_time` (native unit) | `agent`, raw `reason` |
   | `[:gen_agent, :halted]` | `system_time` (native unit) | `agent`, `agent_state` |
+  | `[:gen_agent, :terminated]` | `system_time` (native unit) | `agent`, raw `reason` |
 
   Rich `:prompt, :error` may describe a generated prompt rejected
   before dispatch, in which case it has no matching prompt start or
@@ -69,6 +70,11 @@ defmodule GenAgent.Telemetry do
   into metrics without filtering. The `attempt` field is additive for
   existing local observers; errors before dispatch default to attempt 1
   for independent generated prompts.
+
+  `:terminated` fires after agent and backend cleanup callbacks when the
+  agent process's termination callback runs. Its raw reason may contain
+  application data. Abrupt `:kill` exits and VM termination bypass this
+  callback; use a process monitor when observing every exit is required.
 
   Normalized token usage is on `GenAgent.Response.usage`; inspect it
   in `handle_response/3` or `post_turn/3`. Backend-specific usage or

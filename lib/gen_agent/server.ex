@@ -255,6 +255,7 @@ defmodule GenAgent.Server do
 
     safely_call(data.name, data.agent_module, :terminate_agent, [reason, data.agent_state])
     safely_call(data.name, data.backend, :terminate_session, [data.backend_session])
+    emit_terminated(data.name, reason)
     :ok
   end
 
@@ -2687,6 +2688,13 @@ defmodule GenAgent.Server do
     :telemetry.execute([:gen_agent, :halted], %{system_time: System.system_time()}, %{
       agent: name,
       agent_state: agent_state
+    })
+  end
+
+  defp emit_terminated(name, reason) do
+    :telemetry.execute([:gen_agent, :terminated], %{system_time: System.system_time()}, %{
+      agent: name,
+      reason: reason
     })
   end
 end
