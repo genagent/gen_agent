@@ -5,6 +5,8 @@ defmodule GenAgent.Response do
   A `Response` is built by the state machine after a terminal event
   (`:result` or `:error`) arrives from the backend. It carries:
 
+    * `:prompt` -- the prompt actually sent to the backend after `pre_turn/2`
+      rewriting. It is `nil` for responses built outside an agent turn.
     * `:text` -- the full assembled assistant text for the turn.
     * `:final_message` -- the terminal text when provided, otherwise the
       last boundary-marked assistant message (or all text if no boundary
@@ -25,6 +27,7 @@ defmodule GenAgent.Response do
   alias GenAgent.Event
 
   @type t :: %__MODULE__{
+          prompt: String.t() | nil,
           text: String.t(),
           final_message: String.t() | nil,
           events: [Event.t()],
@@ -36,7 +39,8 @@ defmodule GenAgent.Response do
           session_id: String.t() | nil
         }
 
-  defstruct text: "",
+  defstruct prompt: nil,
+            text: "",
             final_message: nil,
             events: [],
             terminal: nil,

@@ -293,6 +293,10 @@ defmodule GenAgent do
   @doc """
   A prompt->response turn completed successfully. Decide what to do next.
 
+  `response.prompt` contains the prompt actually dispatched to the backend,
+  including any rewrite by `pre_turn/2`. The request ref and prompt can be
+  recorded together for a transcript.
+
   An exception or malformed return stops the agent. Use one of the three
   `t:callback_return/0` shapes; in particular, a follow-up prompt must be a
   binary.

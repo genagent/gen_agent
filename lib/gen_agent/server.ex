@@ -2038,6 +2038,8 @@ defmodule GenAgent.Server do
   # ---------------------------------------------------------------------------
 
   defp finish_turn(data, current, response, new_session, new_agent_state) do
+    response = %{response | prompt: current.prompt}
+
     decision =
       data.agent_module.handle_response(current.request_ref, response, new_agent_state)
 
