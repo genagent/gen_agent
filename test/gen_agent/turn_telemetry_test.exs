@@ -69,6 +69,71 @@ defmodule GenAgent.TurnTelemetryTest do
 
   defp ask(pid, prompt), do: :gen_statem.call(pid, {:ask, prompt}, 5_000)
 
+  test "state, mailbox, and notification telemetry tracks a queued turn",
+       %{name: name, task_sup: task_sup} do
+    parent = self()
+    handler = "runtime-telemetry-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach_many(
+        handler,
+        [
+          [:gen_agent, :state, :changed],
+          [:gen_agent, :mailbox, :queued],
+          [:gen_agent, :event, :received]
+        ],
+        fn event, measurements, metadata, _ ->
+          if metadata.agent == name,
+            do: send(parent, {:runtime_telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    pid =
+      start_agent(name, task_sup, [
+        Mock.gate(:active, [Event.new(:result, %{text: "active"})]),
+        [Event.new(:result, %{text: "queued"})]
+      ])
+
+    assert_receive {:runtime_telemetry, [:gen_agent, :state, :changed], _,
+                    %{from: nil, to: :idle}}
+
+    assert {:ok, _} = :gen_statem.call(pid, {:tell, "active"})
+    assert_receive {:mock_blocked, :active, turn_pid}
+
+    assert_receive {:runtime_telemetry, [:gen_agent, :state, :changed], _,
+                    %{from: :idle, to: :processing}}
+
+    assert {:ok, queued_ref} = :gen_statem.call(pid, {:tell, "queued"})
+
+    assert_receive {:runtime_telemetry, [:gen_agent, :mailbox, :queued], %{depth: 1},
+                    %{agent: ^name}}
+
+    assert :ok = :gen_statem.call(pid, {:notify_ack, :note})
+
+    assert_receive {:runtime_telemetry, [:gen_agent, :event, :received], _,
+                    %{agent: ^name, event: :note}}
+
+    send(turn_pid, {:mock_release, :active})
+    assert {:ok, :completed, %{text: "queued"}} = wait_for_completion(pid, queued_ref)
+  end
+
+  defp wait_for_completion(pid, ref, attempts \\ 50)
+  defp wait_for_completion(_pid, _ref, 0), do: flunk("queued turn did not complete")
+
+  defp wait_for_completion(pid, ref, attempts) do
+    case :gen_statem.call(pid, {:poll, ref}) do
+      {:ok, :pending} ->
+        Process.sleep(10)
+        wait_for_completion(pid, ref, attempts - 1)
+
+      result ->
+        result
+    end
+  end
+
   test "completed turns emit content-free start and stop with matching refs and wall time",
        %{name: name, task_sup: task_sup} do
     pid = start_agent(name, task_sup, [[Event.new(:result, %{text: "ok"})]])
