@@ -3,6 +3,17 @@ defmodule GenAgent.Backends.MockTest do
 
   alias GenAgent.Backends.Mock
   alias GenAgent.Event
+  alias GenAgent.Support.TestAgent
+
+  defmodule ApplicationAgent do
+    use GenAgent
+
+    @impl true
+    def init_agent(opts), do: {:ok, opts, %{}}
+
+    @impl true
+    def handle_response(_ref, _response, state), do: {:noreply, state}
+  end
 
   describe "start_session/1" do
     test "starts with no scripts by default" do
@@ -14,6 +25,10 @@ defmodule GenAgent.Backends.MockTest do
     test "accepts an initial session_id" do
       {:ok, session} = Mock.start_session(session_id: "seed-1")
       assert session.session_id == "seed-1"
+    end
+
+    test "can fail startup without creating a session" do
+      assert {:error, :refused} = Mock.start_session(start_error: :refused)
     end
   end
 
@@ -47,6 +62,7 @@ defmodule GenAgent.Backends.MockTest do
     test "returns :no_script when the script list is exhausted" do
       {:ok, session} = Mock.start_session(scripts: [])
       assert {:error, :no_script} = Mock.prompt(session, "nope")
+      assert Mock.history(session) == ["nope"]
     end
   end
 
@@ -114,5 +130,64 @@ defmodule GenAgent.Backends.MockTest do
       Mock.terminate_session(session)
       assert :ok = Mock.terminate_session(session)
     end
+  end
+
+  test "public API runs a gated turn and reads its history by name" do
+    name = "mock-public-#{System.unique_integer([:positive])}"
+    events = [Event.new(:result, %{text: "released"})]
+
+    {:ok, pid} =
+      GenAgent.start_agent(ApplicationAgent,
+        name: name,
+        backend: Mock,
+        scripts: [Mock.gate(:first, events)]
+      )
+
+    on_exit(fn -> if Process.alive?(pid), do: GenAgent.stop(name) end)
+
+    {:ok, ref} = GenAgent.tell_with_completion(name, "work")
+    assert_receive {:mock_blocked, :first, turn_pid}
+    assert Mock.history(name) == ["work"]
+    assert GenAgent.runtime_snapshot(name).phase == :processing
+
+    send(turn_pid, {:mock_release, :first})
+    assert_receive {:gen_agent, :completion, ^name, ^ref, {:ok, response}}
+    assert response.text == "released"
+
+    assert :ok = GenAgent.stop(name)
+    assert Mock.history(name) == {:error, :not_found}
+  end
+
+  test "a scripted startup failure propagates through start_agent/2" do
+    assert {:error, {:backend_start_failed, :refused}} =
+             GenAgent.start_agent(ApplicationAgent,
+               name: "mock-start-error-#{System.unique_integer([:positive])}",
+               backend: Mock,
+               start_error: :refused
+             )
+  end
+
+  test "the test agent can observe stream and termination callbacks" do
+    name = "mock-hook-#{System.unique_integer([:positive])}"
+    observer = self()
+
+    {:ok, pid} =
+      GenAgent.start_agent(TestAgent,
+        name: name,
+        backend: Mock,
+        scripts: [[Event.new(:result, %{text: "done"})]],
+        stream_event_handler: fn event, state ->
+          send(observer, {:stream_hook, event.kind})
+          state
+        end,
+        terminate_handler: fn reason, _state -> send(observer, {:terminate_hook, reason}) end
+      )
+
+    on_exit(fn -> if Process.alive?(pid), do: GenAgent.stop(name) end)
+
+    assert {:ok, _} = GenAgent.ask(name, "work")
+    assert_receive {:stream_hook, :result}
+    assert :ok = GenAgent.stop(name)
+    assert_receive {:terminate_hook, :shutdown}
   end
 end
