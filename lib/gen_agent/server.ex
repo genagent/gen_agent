@@ -16,6 +16,7 @@ defmodule GenAgent.Server do
   @behaviour :gen_statem
 
   alias GenAgent.{Event, Response}
+  require Logger
 
   @default_watchdog_ms :timer.minutes(10)
   @default_max_tell_results 100
@@ -122,7 +123,6 @@ defmodule GenAgent.Server do
   catch
     kind, reason ->
       reason_kind = callback_failure_kind(reason)
-      require Logger
       Logger.error("GenAgent initialization failed (#{kind}: #{inspect(reason_kind)})")
       {:stop, {:init_failed, kind, reason_kind}}
   end
@@ -139,6 +139,10 @@ defmodule GenAgent.Server do
     name = Keyword.fetch!(opts, :name)
     backend = Keyword.fetch!(opts, :backend)
     module = Keyword.fetch!(opts, :module)
+    # Applications decide which metadata to render; a library must not change
+    # the VM-wide Logger formatter to make its own keys visible by default.
+    # credo:disable-for-next-line Credo.Check.Warning.MissedMetadataKeyInLoggerConfig
+    Logger.metadata(gen_agent: name, gen_agent_module: module)
     task_supervisor = Keyword.fetch!(opts, :task_supervisor)
     init_opts = Keyword.get(opts, :init_opts, [])
     watchdog_ms = Keyword.get(opts, :watchdog_ms, @default_watchdog_ms)
@@ -322,8 +326,12 @@ defmodule GenAgent.Server do
       # arguments in the OTP crash report, outside format_status/1's reach.
       # Stop with a content-free reason instead of exposing the live state.
       reason_kind = callback_failure_kind(reason)
-      require Logger
-      Logger.error("GenAgent state callback failed (#{kind}: #{inspect(reason_kind)})")
+
+      Logger.error(
+        "GenAgent #{inspect(data.name)} #{inspect(data.agent_module)} state callback failed " <>
+          "(#{kind}: #{inspect(reason_kind)})\n" <> redacted_stacktrace(__STACKTRACE__)
+      )
+
       {:stop, {:callback_failed, kind, reason_kind}, data}
   end
 
@@ -353,7 +361,7 @@ defmodule GenAgent.Server do
   end
 
   defp dispatch_event(:internal, :pre_run, :idle, %Data{} = data) do
-    case safely_pre_run(data.agent_module, data.agent_state) do
+    case safely_pre_run(data.name, data.agent_module, data.agent_state) do
       {:ok, new_agent_state} ->
         {:keep_state, %{data | agent_state: new_agent_state, pre_run_done: true}}
 
@@ -364,8 +372,10 @@ defmodule GenAgent.Server do
         {:stop, {:pre_run_crashed, callback_failure_kind(exception)}, data}
 
       _other ->
-        require Logger
-        Logger.error("GenAgent #{inspect(data.name)} pre_run/1 returned unexpected shape")
+        Logger.error(
+          "GenAgent #{inspect(data.name)} #{inspect(data.agent_module)}.pre_run/1 returned unexpected shape"
+        )
+
         {:stop, :pre_run_invalid, data}
     end
   end
@@ -1180,7 +1190,7 @@ defmodule GenAgent.Server do
     {stream_to, recipients} = Map.pop(data.stream_recipients, request_ref)
     data = %{data | stream_recipients: recipients}
 
-    case safely_pre_turn(data.agent_module, prompt, data.agent_state) do
+    case safely_pre_turn(data.name, data.agent_module, prompt, data.agent_state) do
       {:returned, {:ok, new_prompt, new_state}} when is_binary(new_prompt) ->
         data = %{data | agent_state: new_state}
 
@@ -1216,8 +1226,10 @@ defmodule GenAgent.Server do
 
       {:returned, _other} ->
         # Malformed pre_turn return -- treat as skip with a warning.
-        require Logger
-        Logger.error("GenAgent pre_turn/2 returned unexpected shape")
+        Logger.warning(
+          "GenAgent #{inspect(data.name)} #{inspect(data.agent_module)}.pre_turn/2 returned unexpected shape"
+        )
+
         pseudo_current = %{request_ref: request_ref, kind: kind}
         emit_turn_rejected(data.name, request_ref, kind, :pre_turn_invalid)
         {data, reply_actions} = reject_pre_turn(data, pseudo_current, :pre_turn_invalid)
@@ -1655,47 +1667,55 @@ defmodule GenAgent.Server do
         {:noreply, state}
       end
 
-    normalize_decision(decision, name, :handle_event, state)
+    normalize_decision(decision, name, module, :handle_event, state)
   rescue
     e ->
-      require Logger
-
       Logger.error(
-        "GenAgent #{inspect(name)} handle_event/2 raised #{inspect(callback_failure_kind(e))}"
+        "GenAgent #{inspect(name)} #{inspect(module)}.handle_event/2 raised " <>
+          "#{inspect(callback_failure_kind(e))}\n" <> redacted_stacktrace(__STACKTRACE__)
       )
 
       {:noreply, state}
   catch
     kind, reason ->
-      require Logger
-
       Logger.error(
-        "GenAgent #{inspect(name)} handle_event/2 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
+        "GenAgent #{inspect(name)} #{inspect(module)}.handle_event/2 threw " <>
+          "#{kind}: #{inspect(callback_failure_kind(reason))}\n" <>
+          redacted_stacktrace(__STACKTRACE__)
       )
 
       {:noreply, state}
   end
 
-  defp normalize_decision({:noreply, _state} = decision, _name, _callback, _old_state),
+  defp normalize_decision({:noreply, _state} = decision, _name, _module, _callback, _old_state),
     do: decision
 
-  defp normalize_decision({:halt, _state} = decision, _name, _callback, _old_state),
+  defp normalize_decision({:halt, _state} = decision, _name, _module, _callback, _old_state),
     do: decision
 
-  defp normalize_decision({:prompt, prompt, _state} = decision, _name, _callback, _old_state)
+  defp normalize_decision(
+         {:prompt, prompt, _state} = decision,
+         _name,
+         _module,
+         _callback,
+         _old_state
+       )
        when is_binary(prompt),
        do: decision
 
-  defp normalize_decision(_decision, name, callback, old_state) do
-    require Logger
+  defp normalize_decision(_decision, name, module, callback, old_state) do
     arity = if callback == :handle_event, do: 2, else: 3
-    Logger.error("GenAgent #{inspect(name)} #{callback}/#{arity} returned unexpected shape")
+
+    Logger.error(
+      "GenAgent #{inspect(name)} #{inspect(module)}.#{callback}/#{arity} returned unexpected shape"
+    )
+
     {:noreply, old_state}
   end
 
   # ---------------------------------------------------------------------------
   # Lifecycle hook wrappers. Each wraps a user callback in try/rescue/catch
-  # per the semantics in design/001-lifecycle-hooks.md:
+  # per the semantics in design/005-lifecycle-hooks.md:
   #
   #   pre_run raise   -> {:crashed, ex}           (server stops)
   #   pre_turn raise  -> :skip                    (skip turn, back to idle)
@@ -1703,22 +1723,17 @@ defmodule GenAgent.Server do
   #   post_run raise  -> :ok                      (log + terminate normally)
   # ---------------------------------------------------------------------------
 
-  defp safely_pre_run(module, state) do
+  defp safely_pre_run(name, module, state) do
     if function_exported?(module, :pre_run, 1) do
       try do
         module.pre_run(state)
       rescue
         e ->
-          require Logger
-          Logger.error("GenAgent pre_run/1 raised #{inspect(callback_failure_kind(e))}")
+          log_hook_failure(:error, name, module, "pre_run/1", :error, e, __STACKTRACE__)
           {:crashed, e}
       catch
         kind, reason ->
-          require Logger
-
-          Logger.error(
-            "GenAgent pre_run/1 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
-          )
+          log_hook_failure(:error, name, module, "pre_run/1", kind, reason, __STACKTRACE__)
 
           {:crashed, {kind, reason}}
       end
@@ -1727,26 +1742,18 @@ defmodule GenAgent.Server do
     end
   end
 
-  defp safely_pre_turn(module, prompt, state) do
+  defp safely_pre_turn(name, module, prompt, state) do
     if function_exported?(module, :pre_turn, 2) do
       try do
         {:returned, module.pre_turn(prompt, state)}
       rescue
         e ->
-          require Logger
-
-          Logger.error(
-            "GenAgent pre_turn/2 raised #{inspect(callback_failure_kind(e))} -- skipping turn"
-          )
+          log_hook_failure(:warning, name, module, "pre_turn/2", :error, e, __STACKTRACE__)
 
           {:crashed, callback_failure_kind(e)}
       catch
         kind, reason ->
-          require Logger
-
-          Logger.error(
-            "GenAgent pre_turn/2 threw #{kind}: #{inspect(callback_failure_kind(reason))} -- skipping turn"
-          )
+          log_hook_failure(:warning, name, module, "pre_turn/2", kind, reason, __STACKTRACE__)
 
           {:crashed, callback_failure_kind(reason)}
       end
@@ -1763,22 +1770,19 @@ defmodule GenAgent.Server do
             {:ok, new_state}
 
           _other ->
-            require Logger
-            Logger.error("GenAgent #{inspect(name)} post_turn/3 returned unexpected shape")
+            Logger.warning(
+              "GenAgent #{inspect(name)} #{inspect(module)}.post_turn/3 returned unexpected shape"
+            )
+
             {:ok, state}
         end
       rescue
         e ->
-          require Logger
-          Logger.error("GenAgent post_turn/3 raised #{inspect(callback_failure_kind(e))}")
+          log_hook_failure(:warning, name, module, "post_turn/3", :error, e, __STACKTRACE__)
           {:ok, state}
       catch
         kind, reason ->
-          require Logger
-
-          Logger.error(
-            "GenAgent post_turn/3 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
-          )
+          log_hook_failure(:warning, name, module, "post_turn/3", kind, reason, __STACKTRACE__)
 
           {:ok, state}
       end
@@ -1787,29 +1791,37 @@ defmodule GenAgent.Server do
     end
   end
 
-  defp safely_post_run(module, state) do
+  defp safely_post_run(name, module, state) do
     if function_exported?(module, :post_run, 1) do
       try do
         module.post_run(state)
         :ok
       rescue
         e ->
-          require Logger
-          Logger.error("GenAgent post_run/1 raised #{inspect(callback_failure_kind(e))}")
+          log_hook_failure(:warning, name, module, "post_run/1", :error, e, __STACKTRACE__)
           :ok
       catch
         kind, reason ->
-          require Logger
-
-          Logger.error(
-            "GenAgent post_run/1 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
-          )
+          log_hook_failure(:warning, name, module, "post_run/1", kind, reason, __STACKTRACE__)
 
           :ok
       end
     else
       :ok
     end
+  end
+
+  defp log_hook_failure(level, name, module, callback, kind, reason, stacktrace) do
+    failure =
+      if kind == :error,
+        do: "raised #{inspect(callback_failure_kind(reason))}",
+        else: "threw #{kind}: #{inspect(callback_failure_kind(reason))}"
+
+    Logger.log(
+      level,
+      "GenAgent #{inspect(name)} #{inspect(module)}.#{callback} #{failure}\n" <>
+        redacted_stacktrace(stacktrace)
+    )
   end
 
   # Centralized halt transition. Stop dispatch before draining, so nested
@@ -1822,7 +1834,7 @@ defmodule GenAgent.Server do
     # Release doomed tells before notification-generated prompts use capacity.
     data = fail_halt_aware_queued(%{data | halted: true})
     data = drain_pending_events(data)
-    :ok = safely_post_run(data.agent_module, data.agent_state)
+    :ok = safely_post_run(data.name, data.agent_module, data.agent_state)
     emit_halted(data.name, data.agent_state)
     data
   end
@@ -2018,13 +2030,12 @@ defmodule GenAgent.Server do
     if function_exported?(module, :handle_error, 3) do
       try do
         module.handle_error(ref, reason, state)
-        |> normalize_decision(name, :handle_error, state)
+        |> normalize_decision(name, module, :handle_error, state)
       catch
         kind, failure ->
-          require Logger
-
           Logger.error(
-            "GenAgent #{inspect(name)} handle_error/3 failed (#{kind}: #{inspect(callback_failure_kind(failure))})\n" <>
+            "GenAgent #{inspect(name)} #{inspect(module)}.handle_error/3 failed " <>
+              "(#{kind}: #{inspect(callback_failure_kind(failure))})\n" <>
               redacted_stacktrace(__STACKTRACE__)
           )
 
@@ -2122,8 +2133,6 @@ defmodule GenAgent.Server do
         apply(module, fun, args)
       catch
         kind, failure ->
-          require Logger
-
           Logger.error(
             "GenAgent #{inspect(name)} #{inspect(module)}.#{fun}/#{length(args)} failed " <>
               "(#{kind}: #{inspect(callback_failure_kind(failure))})\n" <>
