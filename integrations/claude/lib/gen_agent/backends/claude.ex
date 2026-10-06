@@ -52,7 +52,9 @@ defmodule GenAgent.Backends.Claude do
 
   require Logger
 
+  alias GenAgent.Backend.Error
   alias GenAgent.Backends.Claude.EventTranslator
+  @compile {:no_warn_undefined, Error}
 
   defstruct [
     :opts,
@@ -112,7 +114,12 @@ defmodule GenAgent.Backends.Claude do
 
     {:ok, stream, session}
   rescue
-    e -> {:error, {:stream_fn_raised, Exception.message(e)}}
+    e ->
+      reason = {:stream_fn_raised, Exception.message(e)}
+
+      if Code.ensure_loaded?(Error),
+        do: {:error, Error.normalize(:claude, reason)},
+        else: {:error, reason}
   end
 
   @impl GenAgent.Backend

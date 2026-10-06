@@ -121,7 +121,8 @@ responses remain referenceable.
 
 If the API rejects an established chain because the previous response is
 unavailable or the context window is exceeded, the failed turn returns
-`{:error, {:conversation_lost, body}}`. The backend clears the saved
+`{:error, %GenAgent.Backend.Error{kind: :conversation_lost}}` with the old
+`{:conversation_lost, body}` reason in `:raw`. The backend clears the saved
 `previous_response_id`, so the next prompt starts a fresh conversation
 without losing the agent process or its application state. It does not
 retry the failed prompt automatically. Set `truncation: "auto"` to let the
@@ -134,6 +135,13 @@ Call `GenAgent.reset_session(name)` between turns to discard the current
 `previous_response_id` and start a fresh conversation on the next prompt.
 The agent process and its application state remain in place. Reset returns
 `{:error, :busy}` during an active turn.
+Other HTTP failures use the same error struct with `:status`,
+`:retryable?`, and the original `Req.Response` (including headers) in
+`:raw`. The `:retry_after` field preserves the unparsed `Retry-After`
+header on rate limits. Invalid 200 response bodies are labeled
+`:invalid_response`, separately from exceptions in an injected `:http_fn`.
+When paired with a core version that predates `GenAgent.Backend.Error`,
+this adapter retains its earlier tuple reasons.
 
 ## Instructions do not persist across turns
 

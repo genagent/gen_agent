@@ -3,6 +3,7 @@ defmodule GenAgent.Backends.OpenAITest do
 
   alias GenAgent.Backends.OpenAI
   alias GenAgent.Event
+  alias GenAgent.Test.BackendErrorAssertions, as: Errors
 
   defp ok_response(text, opts \\ []) do
     fn _req ->
@@ -445,12 +446,16 @@ defmodule GenAgent.Backends.OpenAITest do
         {:ok, fresh} = OpenAI.start_session(http_fn: http_fn)
         session = OpenAI.update_session(fresh, %{response_id: "resp_old"})
 
-        assert {:ok, [%Event{kind: :error, data: %{reason: {:conversation_lost, ^body}}}], reset} =
+        assert {:ok, [%Event{kind: :error, data: %{reason: reason}}], reset} =
                  OpenAI.prompt(session, "next")
+
+        Errors.assert_error(reason, :openai, {:conversation_lost, body})
 
         assert reset.previous_response_id == nil
         assert reset.client_session_id == session.client_session_id
-        assert {:error, {:http_error, 400, ^body}} = OpenAI.prompt(fresh, "first")
+
+        assert {:error, reason} = OpenAI.prompt(fresh, "first")
+        Errors.assert_error(reason, :openai, {:http_error, 400, body})
       end
 
       for {status, code} <- [{400, "invalid_request_error"}, {429, "context_length_exceeded"}] do
@@ -459,7 +464,9 @@ defmodule GenAgent.Backends.OpenAITest do
         {:ok, fresh} = OpenAI.start_session(http_fn: http_fn)
         session = OpenAI.update_session(fresh, %{response_id: "resp_old"})
 
-        assert {:error, {:http_error, ^status, ^body}} = OpenAI.prompt(session, "next")
+        assert {:error, reason} = OpenAI.prompt(session, "next")
+        Errors.assert_error(reason, :openai, {:http_error, status, body})
+
         assert session.previous_response_id == "resp_old"
       end
     end
@@ -618,7 +625,7 @@ defmodule GenAgent.Backends.OpenAITest do
       {:ok, events, _} = OpenAI.prompt(session, "hi")
 
       assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
-      assert data.reason == {:response_failed, api_error}
+      Errors.assert_error(data.reason, :openai, {:response_failed, api_error})
       assert data.response_id == "resp_failed"
       assert data.status == "failed"
     end
@@ -637,7 +644,7 @@ defmodule GenAgent.Backends.OpenAITest do
       {:ok, events, _} = OpenAI.prompt(session, "hi")
 
       assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
-      assert data.reason == {:response_incomplete, details}
+      Errors.assert_error(data.reason, :openai, {:response_incomplete, details})
       assert data.status == "incomplete"
     end
 
@@ -653,7 +660,7 @@ defmodule GenAgent.Backends.OpenAITest do
       {:ok, events, _} = OpenAI.prompt(session, "hi")
 
       assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
-      assert data.reason == {:refusal, "I cannot help with that."}
+      Errors.assert_error(data.reason, :openai, {:refusal, "I cannot help with that."})
       assert data.status == "completed"
     end
 
@@ -662,21 +669,23 @@ defmodule GenAgent.Backends.OpenAITest do
       {:ok, events, _} = OpenAI.prompt(session, "hi")
 
       assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
-      assert data.reason == {:unexpected_response_status, "queued"}
+      Errors.assert_error(data.reason, :openai, {:unexpected_response_status, "queued"})
     end
 
     test "propagates HTTP errors" do
       failing = fn _req -> {:error, {:http_error, 429, %{"error" => "rate_limit"}}} end
       {:ok, session} = OpenAI.start_session(api_key: "sk-test", http_fn: failing)
 
-      assert {:error, {:http_error, 429, _}} = OpenAI.prompt(session, "hi")
+      assert {:error, reason} = OpenAI.prompt(session, "hi")
+      Errors.assert_error(reason, :openai, {:http_error, 429, %{"error" => "rate_limit"}})
     end
 
     test "wraps a raising http_fn" do
       raising = fn _req -> raise "boom" end
       {:ok, session} = OpenAI.start_session(api_key: "sk-test", http_fn: raising)
 
-      assert {:error, {:http_fn_raised, _}} = OpenAI.prompt(session, "hi")
+      assert {:error, reason} = OpenAI.prompt(session, "hi")
+      Errors.assert_error(reason, :openai, {:http_fn_raised, "boom"})
     end
   end
 

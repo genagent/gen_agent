@@ -110,11 +110,19 @@ returns `{:error, :busy}` during an active turn.
 `end_turn` and `stop_sequence` are successful stops. Their terminal event
 data includes `:stop_reason` and, when the API provides it,
 `:stop_details`; callers can read them through `response.terminal.data`.
-A refusal returns `{:error, {:refusal, stop_details}}`. A `max_tokens` or
-`model_context_window_exceeded` stop returns
-`{:error, {:response_incomplete, %{stop_reason: reason, stop_details: details}}}`.
-Other stops are rejected as `{:error, {:unexpected_stop_reason, reason}}`
-because this text-only backend cannot complete a paused or tool-use turn.
+A refusal, incomplete response, or unexpected stop returns
+`{:error, %GenAgent.Backend.Error{}}` when using a core version with that
+struct. Its `:kind` distinguishes `:refusal`, `:response_incomplete`, and
+`:unexpected_stop_reason`; `:raw` retains the prior tuple and stop details.
+Older core versions still receive the tuple. This text-only backend cannot
+complete a paused or tool-use turn.
+
+HTTP failures use the same error struct. A 429 response has
+`kind: :rate_limited`, `retryable?: true`, and the original `Req.Response`
+in `:raw`, including headers. The `:retry_after` field preserves the
+unparsed `Retry-After` header when present. A 200 response with an invalid
+body has `kind: :invalid_response`, distinct from an exception raised by
+the injected `:http_fn`.
 
 ## Backend options
 

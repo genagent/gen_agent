@@ -87,7 +87,12 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
 
     assert_receive :reached_turn_failed
     assert terminal.kind == :error
-    assert terminal.data == %{reason: Transcripts.failure(), data: List.last(events).data}
+
+    assert terminal.data ==
+             %{
+               reason: Transcripts.expected_error(Transcripts.failure()),
+               data: List.last(events).data
+             }
   end
 
   describe "thread_id capture" do
@@ -573,22 +578,26 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
     test ":final_message leaves failures and stream errors unchanged" do
       failed = [message("partial"), event("turn.failed", %{"error" => "rate limited"})]
 
-      assert [%Event{kind: :text}, %Event{kind: :error, data: %{reason: "rate limited"} = data}] =
+      assert [%Event{kind: :text}, %Event{kind: :error, data: %{reason: reason} = data}] =
                EventTranslator.translate(failed, response_text: :final_message)
 
+      assert reason == Transcripts.expected_error("rate limited")
       refute Map.has_key?(data, :text)
 
       dangling = [message("partial"), event("error", %{"message" => "network down"})]
 
-      assert [%Event{kind: :text}, %Event{kind: :error, data: %{reason: "network down"} = data}] =
+      assert [%Event{kind: :text}, %Event{kind: :error, data: %{reason: reason} = data}] =
                EventTranslator.translate(dangling, response_text: :final_message)
 
+      assert reason == Transcripts.expected_error("network down")
       refute Map.has_key?(data, :text)
 
       timed_out = [message("partial"), %CodexWrapper.StreamError{reason: {:idle_timeout, 5}}]
 
-      assert [%Event{kind: :text}, %Event{kind: :error, data: %{reason: {:idle_timeout, 5}}}] =
+      assert [%Event{kind: :text}, %Event{kind: :error, data: %{reason: reason}}] =
                EventTranslator.translate(timed_out, response_text: :final_message)
+
+      assert reason == Transcripts.expected_error({:idle_timeout, 5})
     end
 
     test ":final_message streams every :text event before the terminal event" do
@@ -631,8 +640,10 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
         event("turn.failed", %{"error" => "rate limited"})
       ]
 
-      assert [%Event{kind: :error, data: %{reason: "rate limited"}}] =
+      assert [%Event{kind: :error, data: %{reason: reason}}] =
                EventTranslator.translate(events)
+
+      assert reason == Transcripts.expected_error("rate limited")
     end
 
     test "error notification followed by completion does not fail the turn" do
@@ -652,8 +663,10 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
         event("turn.failed", %{"error" => %{"message" => "connection lost"}})
       ]
 
-      assert [%Event{kind: :error, data: %{reason: %{"message" => "connection lost"}}}] =
+      assert [%Event{kind: :error, data: %{reason: reason}}] =
                EventTranslator.translate(events)
+
+      assert reason == Transcripts.expected_error(%{"message" => "connection lost"})
     end
 
     test "turn.failed uses the latest notification when it has no reason" do
@@ -663,20 +676,26 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
         event("turn.failed", %{})
       ]
 
-      assert [%Event{kind: :error, data: %{reason: "last error"}}] =
+      assert [%Event{kind: :error, data: %{reason: reason}}] =
                EventTranslator.translate(events)
+
+      assert reason == Transcripts.expected_error("last error")
     end
 
     test "error notification at end of stream becomes a terminal error" do
       events = [event("error", %{"message" => "network down"})]
 
-      assert [%Event{kind: :error, data: %{reason: "network down"}}] =
+      assert [%Event{kind: :error, data: %{reason: reason}}] =
                EventTranslator.translate(events)
+
+      assert reason == Transcripts.expected_error("network down")
     end
 
     test "error notification with neither field falls back to :unknown at end of stream" do
-      assert [%Event{kind: :error, data: %{reason: :unknown}}] =
+      assert [%Event{kind: :error, data: %{reason: reason}}] =
                EventTranslator.translate([event("error", %{})])
+
+      assert reason == Transcripts.expected_error(:unknown)
     end
   end
 

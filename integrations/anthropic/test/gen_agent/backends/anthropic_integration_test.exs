@@ -8,6 +8,7 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
 
   use ExUnit.Case, async: true
   @compile {:no_warn_undefined, GenAgent}
+  alias GenAgent.Test.BackendErrorAssertions, as: Errors
 
   @moduletag capture_log: true
 
@@ -60,7 +61,8 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
   end
 
   defp assert_unanswered_outcome(name, reason) do
-    assert {:error, ^reason} = GenAgent.ask(name, "unanswered")
+    assert {:error, actual} = GenAgent.ask(name, "unanswered")
+    Errors.assert_error(actual, :anthropic, reason)
   end
 
   defp start_anthropic_agent(http_fn, extra_opts \\ []) do
@@ -285,8 +287,10 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
              {:response_incomplete,
               %{stop_reason: "model_context_window_exceeded", stop_details: nil}}}
           ] do
-        assert {:error, ^expected} = GenAgent.ask(name, prompt)
-        assert_receive {:anthropic_error, ^expected}
+        assert {:error, reason} = GenAgent.ask(name, prompt)
+        Errors.assert_error(reason, :anthropic, expected)
+        assert_receive {:anthropic_error, callback_reason}
+        Errors.assert_error(callback_reason, :anthropic, expected)
       end
 
       assert {:ok, %{text: "next reply"}} = GenAgent.ask(name, "next")
@@ -308,7 +312,8 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
 
       name = start_anthropic_agent(http_fn)
 
-      assert {:error, {:http_error, 401, _}} = GenAgent.ask(name, "hi")
+      assert {:error, reason} = GenAgent.ask(name, "hi")
+      Errors.assert_error(reason, :anthropic, {:http_error, 401, %{"error" => "invalid api key"}})
     end
 
     test "a transport error keeps the previous completed history" do
@@ -329,7 +334,10 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
       name = start_anthropic_agent(http_fn)
 
       assert {:ok, %{text: "first reply"}} = GenAgent.ask(name, "first")
-      assert {:error, :transport_failure} = GenAgent.ask(name, "failed")
+
+      assert {:error, reason} = GenAgent.ask(name, "failed")
+      Errors.assert_error(reason, :anthropic, :transport_failure)
+
       assert {:ok, %{text: "next reply"}} = GenAgent.ask(name, "next")
 
       assert_receive {^ref, [%{role: "user", content: "first"}]}

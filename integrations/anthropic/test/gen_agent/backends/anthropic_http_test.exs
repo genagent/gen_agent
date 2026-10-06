@@ -2,6 +2,7 @@ defmodule GenAgent.Backends.AnthropicHTTPTest do
   use ExUnit.Case, async: false
 
   alias GenAgent.Backends.Anthropic
+  alias GenAgent.Test.BackendErrorAssertions, as: Errors
 
   defmodule Adapter do
     @moduledoc false
@@ -66,7 +67,9 @@ defmodule GenAgent.Backends.AnthropicHTTPTest do
         )
       )
 
-      assert {:error, {:http_error, ^status, _body}} = Anthropic.prompt(session, "private prompt")
+      assert {:error, reason} = Anthropic.prompt(session, "private prompt")
+      Errors.assert_http_response(reason, :anthropic, status, "redirect")
+
       assert_receive {:req_request, request}
       assert URI.to_string(request.url) == "https://api.anthropic.com/v1/messages"
       assert Req.Request.get_header(request, "x-api-key") == ["test-key"]
@@ -91,7 +94,8 @@ defmodule GenAgent.Backends.AnthropicHTTPTest do
         connect_timeout: 2_345
       )
 
-    assert {:error, {:http_error, 529, ^error_body}} = Anthropic.prompt(session, "ping")
+    assert {:error, reason} = Anthropic.prompt(session, "ping")
+    Errors.assert_http_response(reason, :anthropic, 529, error_body)
     assert_receive {:req_request, request}
     assert request.options[:receive_timeout] == 12_345
     assert request.options[:connect_options] == [timeout: 2_345]
@@ -102,9 +106,48 @@ defmodule GenAgent.Backends.AnthropicHTTPTest do
     Process.put({Adapter, :reply}, error)
 
     {:ok, session} = Anthropic.start_session(api_key: "test-key")
-    assert {:error, ^error} = Anthropic.prompt(session, "ping")
+
+    assert {:error, reason} = Anthropic.prompt(session, "ping")
+    Errors.assert_error(reason, :anthropic, error)
+
     assert_receive {:req_request, _request}
     refute_receive {:req_request, _request}
+  end
+
+  test "retains retry-after and response headers on a rate limit" do
+    Process.put(
+      {Adapter, :reply},
+      Req.Response.new(
+        status: 429,
+        headers: %{"retry-after" => ["7"], "content-type" => ["application/json"]},
+        body: Jason.encode!(%{"error" => %{"message" => "slow down"}})
+      )
+    )
+
+    {:ok, session} = Anthropic.start_session(api_key: "test-key")
+
+    assert {:error, reason} = Anthropic.prompt(session, "ping")
+
+    Errors.assert_http_response(reason, :anthropic, 429, %{"error" => %{"message" => "slow down"}})
+
+    if Code.ensure_loaded?(GenAgent.Backend.Error) do
+      assert %{kind: :rate_limited, retryable?: true, retry_after: "7", message: "slow down"} =
+               reason
+
+      assert reason.raw.headers["retry-after"] == ["7"]
+    end
+  end
+
+  test "a successful HTTP status with an invalid body is a parsing error" do
+    Process.put(
+      {Adapter, :reply},
+      Req.Response.new(status: 200, headers: %{"content-type" => ["text/html"]}, body: "oops")
+    )
+
+    {:ok, session} = Anthropic.start_session(api_key: "test-key")
+
+    assert {:error, reason} = Anthropic.prompt(session, "ping")
+    Errors.assert_invalid_response(reason, :anthropic, "oops")
   end
 
   defp reply_json(status, body) do

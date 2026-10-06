@@ -100,7 +100,9 @@ defmodule GenAgent.Backends.OpenAI do
 
   require Logger
 
+  alias GenAgent.Backend.Error
   alias GenAgent.Event
+  @compile {:no_warn_undefined, Error}
 
   @endpoint "https://api.openai.com/v1/responses"
   @default_model "gpt-5"
@@ -246,21 +248,43 @@ defmodule GenAgent.Backends.OpenAI do
 
     case session.http_fn.(request) do
       {:ok, body} ->
-        events = response_to_events(body, session.client_session_id)
-        {:ok, events, session}
+        with {:ok, events} <- parse_response(body, session.client_session_id) do
+          {:ok, events, session}
+        end
 
       {:error, reason} ->
         case conversation_lost_body(session, reason) do
           {:ok, body} ->
-            error = Event.new(:error, %{reason: {:conversation_lost, body}})
+            error = Event.new(:error, %{reason: backend_error({:conversation_lost, body})})
             {:ok, [error], %{session | previous_response_id: nil}}
 
           :not_lost ->
-            {:error, reason}
+            {:error, backend_error(reason)}
         end
     end
   rescue
-    e -> {:error, {:http_fn_raised, Exception.message(e)}}
+    e -> {:error, backend_error({:http_fn_raised, Exception.message(e)})}
+  end
+
+  defp parse_response(body, client_session_id) when is_map(body) do
+    {:ok, response_to_events(body, client_session_id)}
+  rescue
+    e -> {:error, invalid_response(body, Exception.message(e))}
+  end
+
+  defp parse_response(body, _client_session_id),
+    do: {:error, invalid_response(body, "Expected a map response body")}
+
+  defp invalid_response(body, message) do
+    if Code.ensure_loaded?(Error),
+      do: Error.new(:openai, :invalid_response, body, message: message),
+      else: {:invalid_response, body}
+  end
+
+  defp backend_error(reason) do
+    if Code.ensure_loaded?(Error),
+      do: Error.normalize(:openai, reason),
+      else: reason
   end
 
   @impl GenAgent.Backend
@@ -328,6 +352,18 @@ defmodule GenAgent.Backends.OpenAI do
        else: :not_lost
   end
 
+  defp conversation_lost_body(
+         %__MODULE__{} = session,
+         %{__struct__: Error, status: status, raw: %Req.Response{body: body}}
+       ),
+       do: conversation_lost_body(session, {:http_error, status, body})
+
+  defp conversation_lost_body(
+         %__MODULE__{} = session,
+         %{__struct__: Error, status: status, raw: %{body: body}}
+       ),
+       do: conversation_lost_body(session, {:http_error, status, body})
+
   defp conversation_lost_body(_session, _reason), do: :not_lost
 
   # ---------------------------------------------------------------------------
@@ -362,7 +398,7 @@ defmodule GenAgent.Backends.OpenAI do
 
         reason ->
           error_data =
-            %{reason: reason, response_id: response_id, status: status}
+            %{reason: backend_error(reason), response_id: response_id, status: status}
             |> drop_nil_values()
 
           Event.new(:error, error_data)
@@ -452,9 +488,18 @@ defmodule GenAgent.Backends.OpenAI do
       |> maybe_put_opt(:connect_options, connect_options(request[:connect_timeout]))
 
     case Req.post(url, req_opts) do
-      {:ok, %Req.Response{status: 200, body: body}} -> {:ok, body}
-      {:ok, %Req.Response{status: status, body: body}} -> {:error, {:http_error, status, body}}
-      {:error, reason} -> {:error, reason}
+      {:ok, %Req.Response{status: 200, body: body}} ->
+        {:ok, body}
+
+      {:ok, %Req.Response{status: status, body: body, headers: headers} = response} ->
+        if Code.ensure_loaded?(Error) do
+          {:error, Error.http(:openai, status, body, headers, response)}
+        else
+          {:error, {:http_error, status, body}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
