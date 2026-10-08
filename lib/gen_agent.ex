@@ -186,6 +186,11 @@ defmodule GenAgent do
   Agents use `restart: :temporary`. A crashed or stopped agent must be
   started explicitly; GenAgent does not restore its previous state.
 
+  `{:halt, state}` marks work complete but keeps the agent registered so its
+  final state can be read and it can be resumed. An external owner should
+  read any final state it needs, then call `stop/1` (or `stop/2` for a
+  caller-owned supervisor) to release the agent and backend session.
+
   Each turn runs in a supervised prompt task. Task failures are delivered
   to `c:handle_error/3` without taking down the agent. When the agent exits,
   its active prompt task is stopped, including when an abrupt exit bypasses
@@ -1245,13 +1250,26 @@ defmodule GenAgent do
   agent whose callbacks or cleanup can take longer. A blocked callback can
   also delay unrelated operations on the same supervisor during
   `stop/2`.
-  Returns `:ok` or `{:error, :not_found}`.
+
+  Do not call `stop/1` or `stop/2` for the same agent from one of its
+  callbacks. The supervisor waits for that process to exit, so a synchronous
+  self-stop would block until the child shutdown timeout and skip cleanup.
+  Such a call returns `{:error, :self_stop}` immediately. Return
+  `{:halt, state}` instead, let an external owner inspect final state, then
+  have it call `stop/1` or `stop/2`. If immediate teardown is intended and
+  final state and cached results are not needed, `post_run/1` can spawn a
+  separate process to call `stop/1` as the halt completes.
+
+  Returns `:ok`, `{:error, :not_found}`, or `{:error, :self_stop}`.
   """
-  @spec stop(name(), GenServer.server()) :: :ok | {:error, :not_found}
+  @spec stop(name(), GenServer.server()) :: :ok | {:error, :not_found | :self_stop}
   def stop(name, supervisor \\ GenAgent.AgentSupervisor) do
     case whereis(name) do
       nil ->
         {:error, :not_found}
+
+      pid when pid == self() ->
+        {:error, :self_stop}
 
       pid ->
         case DynamicSupervisor.terminate_child(supervisor, pid) do

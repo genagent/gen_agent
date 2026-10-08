@@ -195,6 +195,23 @@ idle <--- handle_response --- processing (turn done)
   including results also sent by `tell_with_completion/4`. The oldest
   results are evicted first; a result larger than the budget is not retained.
 
+Halting does not terminate the agent. It remains registered with its final
+state and backend session. An external owner can read `GenAgent.status(name)`
+after completion, persist the state it needs, then call `GenAgent.stop(name)`
+to release resources. Use `stop/2` with the owning supervisor for a
+caller-owned agent. Calling `stop/1` or `stop/2` for that same agent from one
+of its callbacks returns `{:error, :self_stop}` because waiting for one's own
+exit would block cleanup. If final state and cached results are not needed, a
+`post_run/1` callback can spawn a separate process to stop a global agent:
+
+```elixir
+def post_run(_state) do
+  name = GenAgent.current_name()
+  spawn(fn -> GenAgent.stop(name) end)
+  :ok
+end
+```
+
 ## Lifecycle hooks
 
 In addition to the core callbacks, v0.2 adds four optional lifecycle
