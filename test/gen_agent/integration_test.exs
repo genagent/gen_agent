@@ -59,6 +59,18 @@ defmodule GenAgent.IntegrationTest do
     end
   end
 
+  defmodule CustomSpecAgent do
+    use GenAgent
+
+    def child_spec(opts), do: super(opts) |> Map.put(:shutdown, 1_234)
+
+    @impl true
+    def init_agent(_opts), do: {:ok, [], %{}}
+
+    @impl true
+    def handle_response(_ref, _response, state), do: {:noreply, state}
+  end
+
   defmodule MinimalAgent do
     @behaviour GenAgent
 
@@ -324,6 +336,73 @@ defmodule GenAgent.IntegrationTest do
   end
 
   describe "caller-owned supervision" do
+    test "use GenAgent provides an overridable child_spec/1 for tuple children" do
+      opts = [
+        name: unique_name("tuple-spec"),
+        backend: GenAgent.Backends.Mock,
+        task_supervisor: self()
+      ]
+
+      assert Supervisor.child_spec({SimpleAgent, opts}, []) ==
+               GenAgent.child_spec(SimpleAgent, opts)
+
+      assert Supervisor.child_spec({CustomSpecAgent, opts}, []).shutdown == 1_234
+
+      assert_raise KeyError, fn ->
+        Supervisor.child_spec({SimpleAgent, Keyword.delete(opts, :task_supervisor)}, [])
+      end
+    end
+
+    test "a static tuple child handles prompts and stop/2 terminates it" do
+      task_supervisor = start_supervised!(Task.Supervisor)
+      name = unique_name("static")
+
+      opts = [
+        name: name,
+        backend: GenAgent.Backends.Mock,
+        task_supervisor: task_supervisor,
+        scripts: [[Event.new(:result, %{text: "static"})]]
+      ]
+
+      {:ok, supervisor} = Supervisor.start_link([{SimpleAgent, opts}], strategy: :one_for_one)
+      Process.unlink(supervisor)
+      on_exit(fn -> if Process.alive?(supervisor), do: Supervisor.stop(supervisor) end)
+
+      pid = GenAgent.whereis(name)
+      monitor = Process.monitor(pid)
+      assert {:ok, %{text: "static"}} = GenAgent.ask(name, "hi")
+      assert {:error, :not_found} = GenAgent.stop(name)
+      assert Process.alive?(pid)
+      assert :ok = GenAgent.stop(name, supervisor)
+      assert_receive {:DOWN, ^monitor, :process, ^pid, _}
+      assert Supervisor.which_children(supervisor) == []
+      assert {:error, :not_found} = Supervisor.restart_child(supervisor, name)
+    end
+
+    test "a crashed static tuple child is removed instead of restarting" do
+      task_supervisor = start_supervised!(Task.Supervisor)
+      name = unique_name("static-crash")
+
+      {:ok, supervisor} =
+        Supervisor.start_link(
+          [
+            {SimpleAgent,
+             name: name, backend: GenAgent.Backends.Mock, task_supervisor: task_supervisor}
+          ],
+          strategy: :one_for_one
+        )
+
+      Process.unlink(supervisor)
+      on_exit(fn -> if Process.alive?(supervisor), do: Supervisor.stop(supervisor) end)
+
+      pid = GenAgent.whereis(name)
+      monitor = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^monitor, :process, ^pid, :killed}
+      assert Supervisor.which_children(supervisor) == []
+      assert {:error, :not_found} = Supervisor.restart_child(supervisor, name)
+    end
+
     test "child_spec/2 passes through and validates the shutdown timeout" do
       opts = [
         name: unique_name("shutdown-spec"),
