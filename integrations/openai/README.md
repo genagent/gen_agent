@@ -182,7 +182,7 @@ every turn after the first.
   HTTP. The configured host receives the API key and conversation content.
 - `:headers` -- additional headers as a string-keyed map or list of
   `{name, value}` pairs. Auth, content type, and transport headers cannot
-  be overridden.
+  be overridden. Values must contain only printable ASCII or horizontal tabs.
 - `:request_fields` -- extra JSON body fields such as `%{temperature: 0.2}`.
   Backend-owned fields (input, storage, continuation, reasoning, streaming,
   and tools) cannot be overridden.

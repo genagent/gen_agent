@@ -139,7 +139,8 @@ the injected `:http_fn`.
 - `:api_version` -- `anthropic-version` header, default `"2023-06-01"`.
 - `:headers` -- additional headers as a string-keyed map or list of
   `{name, value}` pairs. Auth, version, content type, and transport headers
-  cannot be overridden.
+  cannot be overridden. Values must contain only printable ASCII or
+  horizontal tabs.
 - `:request_fields` -- extra JSON body fields such as `%{temperature: 0.2}`.
   For extended thinking, use a supported model with `max_output_tokens: 2048`
   and `request_fields: %{thinking: %{type: "enabled", budget_tokens: 1024}}`.

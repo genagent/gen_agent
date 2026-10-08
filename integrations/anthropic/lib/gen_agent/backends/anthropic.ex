@@ -53,7 +53,8 @@ defmodule GenAgent.Backends.Anthropic do
       `"2023-06-01"` and must be an ISO date.
     * `:headers` -- map or list of `{name, value}` pairs with string keys and
       values. Auth, version, content type, and transport headers cannot be
-      overridden; names are matched case-insensitively.
+      overridden; names are matched case-insensitively. Values must contain
+      only printable ASCII or horizontal tabs.
     * `:request_fields` -- map of additional JSON request fields, such as
       `%{temperature: 0.2}`. For extended thinking, use a supported model with
       `max_output_tokens: 2048` and
@@ -237,7 +238,7 @@ defmodule GenAgent.Backends.Anthropic do
     if Enum.all?(pairs, fn
          {name, header_value} when is_binary(name) and is_binary(header_value) ->
            String.match?(name, ~r/^[A-Za-z0-9-]+$/) and
-             not String.contains?(header_value, ["\r", "\n", <<0>>]) and
+             valid_header_value?(header_value) and
              String.downcase(name) not in @reserved_headers
 
          _ ->
@@ -251,6 +252,12 @@ defmodule GenAgent.Backends.Anthropic do
   end
 
   defp normalize_headers(_value), do: {:error, {:invalid_option, :headers, :invalid}}
+
+  defp valid_header_value?(value) do
+    value
+    |> :binary.bin_to_list()
+    |> Enum.all?(&(&1 == 9 or &1 in 32..126))
+  end
 
   @reserved_request_fields ~w(model max_tokens messages system cache_control stream tools tool_choice)
   defp normalize_request_fields(value) when is_map(value) do

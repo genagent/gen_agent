@@ -282,11 +282,20 @@ defmodule GenAgent.Backends.AnthropicTest do
       for headers <- [
             %{"X-API-KEY" => "replacement"},
             [{"X-Tenant", "a"}, {"x-tenant", "b"}],
-            %{"X-Tenant" => "value\r\nInjected: bad"}
+            %{"X-Tenant" => "value\r\nInjected: bad"},
+            %{"X-Tenant" => "café"},
+            %{"X-Tenant" => <<1>>},
+            %{"X-Tenant" => <<255>>}
           ] do
         assert {:error, {:invalid_option, :headers, :invalid}} =
                  Anthropic.start_session(headers: headers, http_fn: ok_response("ok"))
       end
+
+      assert {:ok, _} =
+               Anthropic.start_session(
+                 headers: %{"X-Tenant" => "team a\tb"},
+                 http_fn: ok_response("ok")
+               )
 
       for fields <- [
             %{messages: []},

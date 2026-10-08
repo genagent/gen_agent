@@ -77,7 +77,8 @@ defmodule GenAgent.Backends.OpenAI do
       The configured host receives the API key and conversation content.
     * `:headers` -- map or list of `{name, value}` pairs with string keys and
       values. Auth, content type, and transport headers cannot be overridden;
-      names are matched case-insensitively.
+      names are matched case-insensitively. Values must contain only printable
+      ASCII or horizontal tabs.
     * `:request_fields` -- map of additional JSON request fields, such as
       `%{temperature: 0.2}`. Fields managed by the backend, including input,
       storage, continuation, reasoning, streaming, and tools, cannot be
@@ -254,7 +255,7 @@ defmodule GenAgent.Backends.OpenAI do
     if Enum.all?(pairs, fn
          {name, header_value} when is_binary(name) and is_binary(header_value) ->
            String.match?(name, ~r/^[A-Za-z0-9-]+$/) and
-             not String.contains?(header_value, ["\r", "\n", <<0>>]) and
+             valid_header_value?(header_value) and
              String.downcase(name) not in @reserved_headers
 
          _ ->
@@ -268,6 +269,12 @@ defmodule GenAgent.Backends.OpenAI do
   end
 
   defp normalize_headers(_value), do: {:error, {:invalid_option, :headers, :invalid}}
+
+  defp valid_header_value?(value) do
+    value
+    |> :binary.bin_to_list()
+    |> Enum.all?(&(&1 == 9 or &1 in 32..126))
+  end
 
   @reserved_request_fields ~w(model input instructions previous_response_id conversation store include max_output_tokens truncation reasoning stream background tools tool_choice)
   defp normalize_request_fields(value) when is_map(value) do
