@@ -10,7 +10,12 @@
         "integrations/codex",
         "integrations/anthropic",
         "integrations/openai",
-        "extensions/ensemble"
+        "extensions/ensemble",
+        ".github",
+        "scripts",
+        "design",
+        "RELEASING.md",
+        "MIGRATION.md"
       ],
       "extra-files": ["README.md", "lib/gen_agent.ex"]
     },

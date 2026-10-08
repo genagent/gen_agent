@@ -40,11 +40,22 @@ if [[ -z "${app}" || -z "${version}" ]]; then
   exit 1
 fi
 
-if curl --fail --silent --output /dev/null "https://hex.pm/api/packages/${app}/releases/${version}"; then
-  echo "${app} ${version} is already on Hex"
-  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then echo 'already_published=true' >> "${GITHUB_OUTPUT}"; fi
-  exit 0
+if ! release_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  --connect-timeout 10 --max-time 30 \
+  "https://hex.pm/api/packages/${app}/releases/${version}")"; then
+  echo "Unable to check Hex release ${app} ${version}" >&2
+  exit 1
 fi
+
+case "${release_status}" in
+  200)
+    echo "${app} ${version} is already on Hex"
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then echo 'already_published=true' >> "${GITHUB_OUTPUT}"; fi
+    exit 0
+    ;;
+  404) ;;
+  *) echo "Unable to check Hex release ${app} ${version}: HTTP ${release_status}" >&2; exit 1 ;;
+esac
 
 mix deps.get
 mix hex.audit
@@ -52,8 +63,17 @@ mix compile --warnings-as-errors
 mix test
 mix docs --warnings-as-errors
 mix hex.build
-if tar -xOf "${app}-${version}.tar" metadata.config | grep -q '<<"path">>'; then
-  echo "Path dependency found in ${app}-${version}.tar" >&2
+archive="${app}-${version}.tar"
+if [[ ! -f "${archive}" ]]; then
+  echo "Missing Hex archive: ${archive}" >&2
+  exit 1
+fi
+if ! metadata="$(tar -xOf "${archive}" metadata.config)"; then
+  echo "Unable to read metadata from ${archive}" >&2
+  exit 1
+fi
+if [[ "${metadata}" == *'<<"path">>'* ]]; then
+  echo "Path dependency found in ${archive}" >&2
   exit 1
 fi
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then echo 'already_published=false' >> "${GITHUB_OUTPUT}"; fi
