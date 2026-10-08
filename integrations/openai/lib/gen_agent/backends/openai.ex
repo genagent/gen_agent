@@ -72,6 +72,16 @@ defmodule GenAgent.Backends.OpenAI do
     * `:api_key` -- OpenAI API key. Defaults to `System.get_env("OPENAI_API_KEY")`.
       `start_session/1` returns `{:error, :missing_api_key}` when neither
       provides a non-empty key, unless a one-arity `:http_fn` is supplied.
+    * `:base_url` -- API prefix. Defaults to `"https://api.openai.com/v1"`;
+      `/responses` is appended. HTTPS is required except for loopback HTTP.
+      The configured host receives the API key and conversation content.
+    * `:headers` -- map or list of `{name, value}` pairs with string keys and
+      values. Auth, content type, and transport headers cannot be overridden;
+      names are matched case-insensitively.
+    * `:request_fields` -- map of additional JSON request fields, such as
+      `%{temperature: 0.2}`. Fields managed by the backend, including input,
+      storage, continuation, reasoning, streaming, and tools, cannot be
+      overridden.
     * `:model` -- model name. Defaults to `"gpt-5"`.
     * `:store` -- whether OpenAI stores responses for server-side continuation.
       Defaults to `true`. With `false`, completed turns are held in the local
@@ -108,7 +118,7 @@ defmodule GenAgent.Backends.OpenAI do
   alias GenAgent.Event
   @compile {:no_warn_undefined, Error}
 
-  @endpoint "https://api.openai.com/v1/responses"
+  @default_base_url "https://api.openai.com/v1"
   @default_model "gpt-5"
   @default_receive_timeout 60_000
   @conversation_error_codes [
@@ -118,6 +128,9 @@ defmodule GenAgent.Backends.OpenAI do
   ]
   @known_options [
     :api_key,
+    :base_url,
+    :headers,
+    :request_fields,
     :model,
     :store,
     :system_prompt,
@@ -134,6 +147,9 @@ defmodule GenAgent.Backends.OpenAI do
 
   defstruct [
     :api_key,
+    :base_url,
+    :headers,
+    :request_fields,
     :model,
     :store,
     :instructions,
@@ -154,6 +170,9 @@ defmodule GenAgent.Backends.OpenAI do
 
   @type t :: %__MODULE__{
           api_key: String.t() | nil,
+          base_url: String.t(),
+          headers: [{String.t(), String.t()}],
+          request_fields: map(),
           model: String.t(),
           store: boolean(),
           instructions: String.t() | nil,
@@ -174,6 +193,10 @@ defmodule GenAgent.Backends.OpenAI do
     with :ok <- validate_opts(opts),
          :ok <- validate_store(Keyword.get(opts, :store, true)),
          :ok <- validate_truncation(Keyword.get(opts, :truncation)),
+         {:ok, base_url} <- normalize_base_url(Keyword.get(opts, :base_url, @default_base_url)),
+         {:ok, headers} <- normalize_headers(Keyword.get(opts, :headers, [])),
+         {:ok, request_fields} <-
+           normalize_request_fields(Keyword.get(opts, :request_fields, %{})),
          {:ok, opts} <- normalize_opts(opts) do
       api_key = present(Keyword.get(opts, :api_key)) || present(System.get_env("OPENAI_API_KEY"))
 
@@ -182,7 +205,7 @@ defmodule GenAgent.Backends.OpenAI do
       if is_nil(api_key) and not is_function(Keyword.get(opts, :http_fn), 1) do
         {:error, :missing_api_key}
       else
-        build_session(api_key, opts)
+        build_session(api_key, opts, base_url, headers, request_fields)
       end
     end
   end
@@ -205,6 +228,82 @@ defmodule GenAgent.Backends.OpenAI do
 
   defp validate_store(value) when is_boolean(value), do: :ok
   defp validate_store(value), do: {:error, {:invalid_option, :store, value}}
+
+  defp normalize_base_url(value) when is_binary(value) do
+    case URI.new(value) do
+      {:ok, %URI{scheme: scheme, host: host, userinfo: nil, query: nil, fragment: nil}}
+      when scheme in ["https", "http"] and is_binary(host) and host != "" ->
+        if not String.match?(value, ~r/\s/) and
+             (scheme == "https" or String.downcase(host) in ["localhost", "127.0.0.1", "::1"]) do
+          {:ok, String.trim_trailing(value, "/")}
+        else
+          {:error, {:invalid_option, :base_url, :invalid}}
+        end
+
+      _ ->
+        {:error, {:invalid_option, :base_url, :invalid}}
+    end
+  end
+
+  defp normalize_base_url(_value), do: {:error, {:invalid_option, :base_url, :invalid}}
+
+  @reserved_headers ~w(authorization content-type host content-length transfer-encoding)
+  defp normalize_headers(value) when is_map(value) or is_list(value) do
+    pairs = if is_map(value), do: Map.to_list(value), else: value
+
+    if Enum.all?(pairs, fn
+         {name, header_value} when is_binary(name) and is_binary(header_value) ->
+           String.match?(name, ~r/^[A-Za-z0-9-]+$/) and
+             not String.contains?(header_value, ["\r", "\n", <<0>>]) and
+             String.downcase(name) not in @reserved_headers
+
+         _ ->
+           false
+       end) and
+         Enum.uniq_by(pairs, fn {name, _} -> String.downcase(name) end) == pairs do
+      {:ok, Enum.map(pairs, fn {name, header_value} -> {String.downcase(name), header_value} end)}
+    else
+      {:error, {:invalid_option, :headers, :invalid}}
+    end
+  end
+
+  defp normalize_headers(_value), do: {:error, {:invalid_option, :headers, :invalid}}
+
+  @reserved_request_fields ~w(model input instructions previous_response_id conversation store include max_output_tokens truncation reasoning stream background tools tool_choice)
+  defp normalize_request_fields(value) when is_map(value) do
+    if valid_json_map?(value) and
+         Enum.all?(Map.keys(value), &(json_key(&1) not in @reserved_request_fields)) do
+      {:ok, Map.new(value, fn {key, field_value} -> {json_key(key), field_value} end)}
+    else
+      {:error, {:invalid_option, :request_fields, :invalid}}
+    end
+  end
+
+  defp normalize_request_fields(_value),
+    do: {:error, {:invalid_option, :request_fields, :invalid}}
+
+  defp valid_json_map?(value) do
+    keys = Map.keys(value)
+
+    not is_struct(value) and Enum.all?(keys, &valid_json_key?/1) and
+      length(Enum.uniq(Enum.map(keys, &json_key/1))) == length(keys) and
+      Enum.all?(Map.values(value), &valid_json?/1)
+  end
+
+  defp valid_json?(value) when is_map(value), do: valid_json_map?(value)
+  defp valid_json?(value) when is_list(value), do: Enum.all?(value, &valid_json?/1)
+
+  defp valid_json?(value) when is_binary(value) or is_number(value) or is_atom(value),
+    do: true
+
+  defp valid_json?(_value), do: false
+
+  defp valid_json_key?(key) when is_binary(key), do: key != ""
+  defp valid_json_key?(key) when is_atom(key), do: key not in [nil, true, false]
+  defp valid_json_key?(_key), do: false
+
+  defp json_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp json_key(key), do: key
 
   defp normalize_opts(opts) do
     case normalize_aliases(opts, :system_prompt, [:instructions, :system]) do
@@ -231,11 +330,14 @@ defmodule GenAgent.Backends.OpenAI do
     end
   end
 
-  defp build_session(api_key, opts) do
+  defp build_session(api_key, opts, base_url, headers, request_fields) do
     http_fn = Keyword.get(opts, :http_fn, &default_http/1)
 
     session = %__MODULE__{
       api_key: api_key,
+      base_url: base_url,
+      headers: headers,
+      request_fields: request_fields,
       model: Keyword.get(opts, :model, @default_model),
       store: Keyword.get(opts, :store, true),
       instructions: Keyword.get(opts, :system_prompt),
@@ -352,13 +454,15 @@ defmodule GenAgent.Backends.OpenAI do
       |> maybe_put(:max_output_tokens, session.max_output_tokens)
       |> maybe_put(:truncation, session.truncation)
       |> maybe_put_reasoning(session.reasoning_effort)
+      |> Map.merge(session.request_fields)
 
     %{
-      url: @endpoint,
-      headers: [
-        {"authorization", "Bearer #{session.api_key || ""}"},
-        {"content-type", "application/json"}
-      ],
+      url: session.base_url <> "/responses",
+      headers:
+        [
+          {"authorization", "Bearer #{session.api_key || ""}"},
+          {"content-type", "application/json"}
+        ] ++ session.headers,
       body: body,
       receive_timeout: session.receive_timeout,
       connect_timeout: session.connect_timeout

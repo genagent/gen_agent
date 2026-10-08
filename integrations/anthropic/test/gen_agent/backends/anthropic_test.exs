@@ -161,6 +161,145 @@ defmodule GenAgent.Backends.AnthropicTest do
       assert_receive {^ref, %{body: %{system: "Be terse.", max_tokens: 256}}}
     end
 
+    test "accepts a proxy URL, API version, extra headers, and request fields" do
+      ref = make_ref()
+
+      {:ok, session} =
+        Anthropic.start_session(
+          api_key: "secret-key",
+          base_url: "https://proxy.example/api/v1/",
+          api_version: "2023-01-01",
+          headers: %{"Anthropic-Beta" => "test-feature", "X-Tenant" => "team-a"},
+          request_fields: %{temperature: 0.2},
+          http_fn: recording_fn(ref, ok_response("answer"))
+        )
+
+      {:ok, events, session} = Anthropic.prompt(session, "first")
+      assert_receive {^ref, first}
+      assert first.url == "https://proxy.example/api/v1/messages"
+
+      assert Map.new(first.headers) == %{
+               "x-api-key" => "secret-key",
+               "anthropic-version" => "2023-01-01",
+               "content-type" => "application/json",
+               "anthropic-beta" => "test-feature",
+               "x-tenant" => "team-a"
+             }
+
+      assert first.body["temperature"] == 0.2
+      assert first.body.messages == [%{role: "user", content: "first"}]
+
+      %{data: result} = Enum.find(events, &(&1.kind == :result))
+      session = Anthropic.update_session(session, result)
+      {:ok, _, _} = Anthropic.prompt(session, "second")
+      assert_receive {^ref, second}
+      assert second.body["temperature"] == 0.2
+      assert Enum.map(second.body.messages, & &1.role) == ["user", "assistant", "user"]
+      refute inspect(session) =~ "secret-key"
+      refute inspect(session) =~ "test-feature"
+    end
+
+    test "passes a supported extended-thinking configuration" do
+      ref = make_ref()
+
+      {:ok, session} =
+        Anthropic.start_session(
+          api_key: "secret-key",
+          max_output_tokens: 2048,
+          request_fields: %{thinking: %{type: "enabled", budget_tokens: 1024}},
+          http_fn: recording_fn(ref, ok_response("answer"))
+        )
+
+      {:ok, _, _} = Anthropic.prompt(session, "first")
+      assert_receive {^ref, request}
+      assert request.body.max_tokens == 2048
+      assert request.body["thinking"] == %{type: "enabled", budget_tokens: 1024}
+      refute Map.has_key?(request.body, :temperature)
+    end
+
+    test "replays complete thinking blocks on the next turn without exposing them in the result" do
+      ref = make_ref()
+
+      content = [
+        %{"type" => "thinking", "thinking" => "private reasoning", "signature" => "signed"},
+        %{"type" => "redacted_thinking", "data" => "encrypted"},
+        %{"type" => "text", "text" => "answer"}
+      ]
+
+      test_pid = self()
+
+      http_fn = fn request ->
+        send(test_pid, {ref, request})
+
+        {:ok,
+         %{
+           "id" => "msg_thinking",
+           "model" => "claude-sonnet-4-5",
+           "stop_reason" => "end_turn",
+           "content" => content
+         }}
+      end
+
+      {:ok, session} =
+        Anthropic.start_session(
+          api_key: "secret-key",
+          max_output_tokens: 2048,
+          request_fields: %{thinking: %{type: "enabled", budget_tokens: 1024}},
+          http_fn: http_fn
+        )
+
+      {:ok, events, session} = Anthropic.prompt(session, "first")
+      assert_receive {^ref, _first}
+      %{data: result} = Enum.find(events, &(&1.kind == :result))
+      assert result.text == "answer"
+      refute Map.has_key?(result, :content)
+
+      session = Anthropic.update_session(session, result)
+      assert session.pending_content == nil
+      assert List.last(session.messages) == %{role: "assistant", content: content}
+
+      {:ok, _, _} = Anthropic.prompt(session, "second")
+      assert_receive {^ref, second}
+      assert Enum.at(second.body.messages, 1) == %{role: "assistant", content: content}
+    end
+
+    test "rejects unsafe request customization at session startup" do
+      for url <- [
+            "http://proxy.example/v1",
+            "https://user:pass@proxy.example/v1",
+            "https://proxy.example/v1?x=1",
+            "not a URL"
+          ] do
+        assert {:error, {:invalid_option, :base_url, :invalid}} =
+                 Anthropic.start_session(base_url: url, http_fn: ok_response("ok"))
+      end
+
+      for version <- ["", "2023-13-01", 20_230_601] do
+        assert {:error, {:invalid_option, :api_version, ^version}} =
+                 Anthropic.start_session(api_version: version, http_fn: ok_response("ok"))
+      end
+
+      for headers <- [
+            %{"X-API-KEY" => "replacement"},
+            [{"X-Tenant", "a"}, {"x-tenant", "b"}],
+            %{"X-Tenant" => "value\r\nInjected: bad"}
+          ] do
+        assert {:error, {:invalid_option, :headers, :invalid}} =
+                 Anthropic.start_session(headers: headers, http_fn: ok_response("ok"))
+      end
+
+      for fields <- [
+            %{messages: []},
+            %{"max_tokens" => 10},
+            %{"temperature" => 0.4, temperature: 0.2},
+            %{metadata: %{1 => "bad"}},
+            %{temperature: fn -> :bad end}
+          ] do
+        assert {:error, {:invalid_option, :request_fields, :invalid}} =
+                 Anthropic.start_session(request_fields: fields, http_fn: ok_response("ok"))
+      end
+    end
+
     test "rejects unknown and malformed options before credential lookup" do
       assert {:error, {:unknown_option, :modle}} = Anthropic.start_session(modle: "wrong")
 

@@ -54,6 +54,31 @@ defmodule GenAgent.Backends.OpenAIHTTPTest do
     assert request.options[:redirect] == false
   end
 
+  test "default Req transport sends configured URL, headers, and fields" do
+    reply_json(200, %{
+      id: "resp_test",
+      model: "gpt-test",
+      status: "completed",
+      output: [%{type: "message", content: [%{type: "output_text", text: "hello"}]}]
+    })
+
+    {:ok, session} =
+      OpenAI.start_session(
+        api_key: "test-key",
+        base_url: "http://127.0.0.1:8080/proxy/v1/",
+        headers: [{"X-Tenant", "team-a"}],
+        request_fields: %{temperature: 0.3}
+      )
+
+    assert {:ok, _, _} = OpenAI.prompt(session, "ping")
+    assert_receive {:req_request, request}
+    assert URI.to_string(request.url) == "http://127.0.0.1:8080/proxy/v1/responses"
+    assert Req.Request.get_header(request, "authorization") == ["Bearer test-key"]
+    assert Req.Request.get_header(request, "x-tenant") == ["team-a"]
+    assert Jason.decode!(request.body)["temperature"] == 0.3
+    assert request.options[:redirect] == false
+  end
+
   test "cross-host redirects never forward the API key or conversation" do
     {:ok, session} = OpenAI.start_session(api_key: "test-key")
 

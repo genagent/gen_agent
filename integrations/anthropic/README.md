@@ -98,6 +98,9 @@ terminal `:result` event carries non-blank text. If that text is empty or
 only whitespace, the unanswered user message is removed. Refusals and
 incomplete responses also leave prior history intact, so a later turn does
 not resend a failed prompt.
+When extended thinking is enabled, the backend retains the full assistant
+content blocks, including signatures and redacted blocks, for the next turn;
+the result event still exposes only the answer text.
 
 Set `:max_history_turns` to a nonnegative integer to retain only that many
 completed user/assistant pairs for the next request. The default,
@@ -130,6 +133,18 @@ the injected `:http_fn`.
   returns `{:error, :missing_api_key}` (through `GenAgent.start_agent/2`,
   `{:error, {:backend_start_failed, :missing_api_key}}`), unless a one-arity
   `:http_fn` is supplied.
+- `:base_url` -- API prefix, default `"https://api.anthropic.com/v1"`.
+  The backend appends `/messages`. HTTPS is required except for loopback
+  HTTP. The configured host receives the API key and conversation content.
+- `:api_version` -- `anthropic-version` header, default `"2023-06-01"`.
+- `:headers` -- additional headers as a string-keyed map or list of
+  `{name, value}` pairs. Auth, version, content type, and transport headers
+  cannot be overridden.
+- `:request_fields` -- extra JSON body fields such as `%{temperature: 0.2}`.
+  For extended thinking, use a supported model with `max_output_tokens: 2048`
+  and `request_fields: %{thinking: %{type: "enabled", budget_tokens: 1024}}`.
+  Backend-owned fields (messages, model, token limit, caching, streaming,
+  and tools) cannot be overridden.
 - `:model` -- model name. Defaults to `"claude-sonnet-4-5"`.
 - `:max_output_tokens` -- max tokens per turn. Defaults to `1024`.
   `:max_tokens` remains a deprecated alias.
