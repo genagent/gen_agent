@@ -44,12 +44,12 @@ Inside this repository, sibling packages use local path dependencies. Set
 its archive contains ordinary Hex requirements. `scripts/package-check.sh`
 builds all six archives in that mode and checks their dependency metadata for
 path entries. `scripts/consumer-check.sh` compiles a fresh project against
-the published Hex packages. Run the consumer check after publishing a new
-combination of packages.
-
-The consumer check takes its six requirements from
-`.release-please-manifest.json` using `jq`, so run it after all intended
-versions have been published.
+the latest published stable versions of all six Hex packages. This default
+mode is safe to run in CI while a release PR contains versions that have not
+been published yet. After publishing a new combination of packages, run
+`scripts/consumer-check.sh --manifest` to verify and compile the exact versions
+in `.release-please-manifest.json`. Both modes use `jq`; the default mode also
+queries the Hex API with `curl`.
 
 The publishing workflow needs a `HEX_API_KEY` that can publish all six
 packages. `RELEASE_PLEASE_TOKEN`, when configured, lets release PRs trigger

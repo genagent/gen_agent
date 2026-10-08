@@ -153,20 +153,57 @@ defmodule GenAgent.ReleaseWorkflowTest do
     end
   end
 
-  test "consumer check uses release manifest requirements" do
+  test "consumer check uses exact manifest versions only in post-publish mode" do
     manifest =
       @root |> Path.join(".release-please-manifest.json") |> File.read!() |> JSON.decode!()
 
     {output, 0} =
-      System.cmd("bash", [Path.join(@root, "scripts/consumer-check.sh"), "--print-requirements"])
+      System.cmd("bash", [
+        Path.join(@root, "scripts/consumer-check.sh"),
+        "--manifest",
+        "--print-requirements"
+      ])
 
     lines = String.split(output, "\n", trim: true)
     assert length(lines) == map_size(manifest)
 
     for {path, version} <- manifest do
       package = if path == ".", do: "gen_agent", else: "gen_agent_#{Path.basename(path)}"
-      assert Enum.any?(lines, &String.contains?(&1, ~s({:#{package}, "~> #{version}"})))
+      assert Enum.any?(lines, &String.contains?(&1, ~s({:#{package}, "== #{version}"})))
     end
+  end
+
+  test "CI consumer mode queries published Hex versions instead of manifest versions" do
+    stub_dir =
+      Path.join(System.tmp_dir!(), "consumer-check-curl-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(stub_dir)
+    on_exit(fn -> File.rm_rf!(stub_dir) end)
+
+    File.write!(Path.join(stub_dir, "curl"), """
+    #!/usr/bin/env bash
+    printf '%s\\n' "${!#}" >> "$CONSUMER_CURL_LOG"
+    printf '{"latest_stable_version":"9.9.9"}\\n'
+    """)
+
+    File.chmod!(Path.join(stub_dir, "curl"), 0o755)
+    log = Path.join(stub_dir, "requests")
+
+    {output, 0} =
+      System.cmd("bash", [Path.join(@root, "scripts/consumer-check.sh"), "--print-requirements"],
+        env: [
+          {"PATH", "#{stub_dir}:#{System.fetch_env!("PATH")}"},
+          {"CONSUMER_CURL_LOG", log}
+        ]
+      )
+
+    lines = String.split(output, "\n", trim: true)
+    assert length(lines) == 6
+    assert Enum.all?(lines, &String.contains?(&1, "== 9.9.9"))
+
+    requests = File.read!(log)
+    assert length(String.split(requests, "\n", trim: true)) == 6
+    assert requests =~ "https://hex.pm/api/packages/gen_agent_claude"
   end
 
   test "release guide covers Hex lock refresh and changelogs have no empty tail" do
@@ -183,7 +220,7 @@ defmodule GenAgent.ReleaseWorkflowTest do
         ] do
       changelog = File.read!(Path.join([@root, path, "CHANGELOG.md"]))
       assert String.starts_with?(changelog, "# Changelog\n")
-      assert length(Regex.scan(~r/^## Changelog$/m, changelog)) == 0
+      refute Regex.match?(~r/^## Changelog$/m, changelog)
       refute changelog =~ "compare/v0.1.0...v0.1.0"
       assert changelog =~ "releases/tag/v0.1.0"
     end
