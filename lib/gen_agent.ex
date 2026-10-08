@@ -1243,7 +1243,7 @@ defmodule GenAgent do
   when the agent processes the orderly shutdown. Accepted
   `tell_with_completion/4` requests do not receive a synthetic completion;
   recipients should monitor the agent to detect that uncertainty.
-  A callback runs inside the agent process and can delay shutdown. If it
+  Most callbacks run inside the agent process and can delay shutdown. If one
   exceeds the child spec's `:shutdown` timeout (default `5_000` ms), the
   supervisor kills the agent and `terminate_agent/2` and backend
   `terminate_session/1` cannot run. Configure `:shutdown` when starting an
@@ -1252,13 +1252,15 @@ defmodule GenAgent do
   `stop/2`.
 
   Do not call `stop/1` or `stop/2` for the same agent from one of its
-  callbacks. The supervisor waits for that process to exit, so a synchronous
+  callbacks, including `handle_stream_event/2` in the linked prompt task.
+  The supervisor waits for the agent process to exit, so a synchronous
   self-stop would block until the child shutdown timeout and skip cleanup.
-  Such a call returns `{:error, :self_stop}` immediately. Return
-  `{:halt, state}` instead, let an external owner inspect final state, then
-  have it call `stop/1` or `stop/2`. If immediate teardown is intended and
-  final state and cached results are not needed, `post_run/1` can spawn a
-  separate process to call `stop/1` as the halt completes.
+  Such a call returns `{:error, :self_stop}` immediately. To retain final
+  state, return `{:halt, state}` from a decision callback, let an external
+  owner inspect it, then have that owner call `stop/1` or `stop/2`. If
+  immediate teardown is intended and final state and cached results are not
+  needed, `post_run/1` can spawn a separate process to call `stop/1` as the
+  halt completes.
 
   Returns `:ok`, `{:error, :not_found}`, or `{:error, :self_stop}`.
   """
@@ -1272,10 +1274,18 @@ defmodule GenAgent do
         {:error, :self_stop}
 
       pid ->
-        case DynamicSupervisor.terminate_child(supervisor, pid) do
-          {:error, :not_found} -> stop_static_child(supervisor, name, pid)
-          result -> result
+        if Process.get({__MODULE__, :current_agent_pid}) == pid do
+          {:error, :self_stop}
+        else
+          stop_supervised_child(supervisor, name, pid)
         end
+    end
+  end
+
+  defp stop_supervised_child(supervisor, name, pid) do
+    case DynamicSupervisor.terminate_child(supervisor, pid) do
+      {:error, :not_found} -> stop_static_child(supervisor, name, pid)
+      result -> result
     end
   end
 

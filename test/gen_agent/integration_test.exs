@@ -373,6 +373,41 @@ defmodule GenAgent.IntegrationTest do
       refute Process.alive?(backend_pid)
     end
 
+    test "a stream callback rejects its own stop but can stop another agent" do
+      parent = self()
+      other_name = start_simple([])
+      name = unique_name("stream-self-stop")
+
+      stream_event_handler = fn _event, state ->
+        send(parent, {:other_stop, GenAgent.stop(other_name)})
+        send(parent, {:stream_self_stop, GenAgent.stop(name)})
+        state
+      end
+
+      {:ok, pid} =
+        GenAgent.start_agent(GenAgent.Support.TestAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          scripts: [[Event.new(:result, %{text: "done"})]],
+          stream_event_handler: stream_event_handler,
+          notify_pid: parent
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+      backend_pid = :gen_statem.call(pid, :get_backend_session).agent
+
+      assert {:ok, %{text: "done"}} = GenAgent.ask(name, "go", 1_000)
+      assert_received {:other_stop, :ok}
+      assert_received {:stream_self_stop, {:error, :self_stop}}
+      assert GenAgent.whereis(other_name) == nil
+      assert Process.alive?(pid)
+      assert Process.alive?(backend_pid)
+
+      assert :ok = GenAgent.stop(name)
+      assert_received {:test_agent, :terminate_agent, :shutdown}
+      refute Process.alive?(backend_pid)
+    end
+
     test "post_run can ask a separate process to stop after completion" do
       parent = self()
       name = unique_name("spawned-stop")

@@ -200,8 +200,9 @@ state and backend session. An external owner can read `GenAgent.status(name)`
 after completion, persist the state it needs, then call `GenAgent.stop(name)`
 to release resources. Use `stop/2` with the owning supervisor for a
 caller-owned agent. Calling `stop/1` or `stop/2` for that same agent from one
-of its callbacks returns `{:error, :self_stop}` because waiting for one's own
-exit would block cleanup. If final state and cached results are not needed, a
+of its callbacks, including `handle_stream_event/2` in the prompt task,
+returns `{:error, :self_stop}` because waiting for its exit would block
+cleanup. If final state and cached results are not needed, a
 `post_run/1` callback can spawn a separate process to stop a global agent:
 
 ```elixir
