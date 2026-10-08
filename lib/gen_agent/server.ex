@@ -1611,6 +1611,7 @@ defmodule GenAgent.Server do
         {:ok,
          Task.Supervisor.async(task_supervisor, fn ->
            Process.put({GenAgent, :current_name}, name)
+           Process.put({GenAgent, :current_agent_pid}, owner)
 
            run_prompt(
              backend,

@@ -333,6 +333,110 @@ defmodule GenAgent.IntegrationTest do
     test "returns {:error, :not_found} for unknown names" do
       assert {:error, :not_found} = GenAgent.stop("nope-#{System.unique_integer()}")
     end
+
+    test "a callback cannot synchronously stop its own agent" do
+      parent = self()
+      name = unique_name("self-stop")
+
+      responder = fn _ref, _response, state ->
+        send(parent, {:response_self_stop, GenAgent.stop(name)})
+        {:halt, state}
+      end
+
+      post_run = fn _state ->
+        send(parent, {:post_run_self_stop, GenAgent.stop(name)})
+        :ok
+      end
+
+      {:ok, pid} =
+        GenAgent.start_agent(GenAgent.Support.TestAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          scripts: [[Event.new(:result, %{text: "done"})]],
+          responder: responder,
+          post_run: post_run,
+          notify_pid: parent
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+      backend_pid = :gen_statem.call(pid, :get_backend_session).agent
+
+      assert {:ok, %{text: "done"}} = GenAgent.ask(name, "go", 1_000)
+      assert_received {:response_self_stop, {:error, :self_stop}}
+      assert_received {:post_run_self_stop, {:error, :self_stop}}
+      assert %{halted: true} = GenAgent.status(name)
+      assert Process.alive?(backend_pid)
+      refute_received {:test_agent, :terminate_agent, _}
+
+      assert :ok = GenAgent.stop(name)
+      assert_received {:test_agent, :terminate_agent, :shutdown}
+      refute Process.alive?(backend_pid)
+    end
+
+    test "a stream callback rejects its own stop but can stop another agent" do
+      parent = self()
+      other_name = start_simple([])
+      name = unique_name("stream-self-stop")
+
+      stream_event_handler = fn _event, state ->
+        send(parent, {:other_stop, GenAgent.stop(other_name)})
+        send(parent, {:stream_self_stop, GenAgent.stop(name)})
+        state
+      end
+
+      {:ok, pid} =
+        GenAgent.start_agent(GenAgent.Support.TestAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          scripts: [[Event.new(:result, %{text: "done"})]],
+          stream_event_handler: stream_event_handler,
+          notify_pid: parent
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+      backend_pid = :gen_statem.call(pid, :get_backend_session).agent
+
+      assert {:ok, %{text: "done"}} = GenAgent.ask(name, "go", 1_000)
+      assert_received {:other_stop, :ok}
+      assert_received {:stream_self_stop, {:error, :self_stop}}
+      assert GenAgent.whereis(other_name) == nil
+      assert Process.alive?(pid)
+      assert Process.alive?(backend_pid)
+
+      assert :ok = GenAgent.stop(name)
+      assert_received {:test_agent, :terminate_agent, :shutdown}
+      refute Process.alive?(backend_pid)
+    end
+
+    test "post_run can ask a separate process to stop after completion" do
+      parent = self()
+      name = unique_name("spawned-stop")
+
+      post_run = fn _state ->
+        spawn(fn -> send(parent, {:spawned_stop, GenAgent.stop(name)}) end)
+        :ok
+      end
+
+      {:ok, pid} =
+        GenAgent.start_agent(GenAgent.Support.TestAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          scripts: [[Event.new(:result, %{text: "done"})]],
+          responder: fn _ref, _response, state -> {:halt, state} end,
+          post_run: post_run,
+          notify_pid: parent
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+      backend_pid = :gen_statem.call(pid, :get_backend_session).agent
+      monitor = Process.monitor(pid)
+
+      assert {:ok, _ref} = GenAgent.tell(name, "go")
+      assert_receive {:DOWN, ^monitor, :process, ^pid, :shutdown}, 1_000
+      assert_receive {:spawned_stop, :ok}
+      assert_received {:test_agent, :terminate_agent, :shutdown}
+      refute Process.alive?(backend_pid)
+    end
   end
 
   describe "caller-owned supervision" do
