@@ -96,7 +96,7 @@
 * fail supervisor runs when a worker dies ([#20](https://github.com/genagent/gen_agent_ensemble/issues/20)) ([71171ae](https://github.com/genagent/gen_agent_ensemble/commit/71171ae2350f1ed2d667684028e116faed328a77))
 * fence ensemble responses by run token ([#18](https://github.com/genagent/gen_agent_ensemble/issues/18)) ([43bf5ea](https://github.com/genagent/gen_agent_ensemble/commit/43bf5eae3185a7166f09d60726445e009cfa8e08))
 
-## [0.1.0](https://github.com/genagent/gen_agent_ensemble/compare/v0.1.0...v0.1.0) (2026-04-18)
+## [0.1.0](https://github.com/genagent/gen_agent_ensemble/releases/tag/v0.1.0) (2026-04-18)
 
 
 ### ⚠ BREAKING CHANGES
@@ -130,5 +130,3 @@
 ### Code Refactoring
 
 * drop in-iex chat REPL, lean on native iex with .iex.exs ([77aa4a6](https://github.com/genagent/gen_agent_ensemble/commit/77aa4a6d73cb57a3f911e54fe54c674b74263c7e))
-
-## Changelog

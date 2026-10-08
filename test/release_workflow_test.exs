@@ -113,6 +113,82 @@ defmodule GenAgent.ReleaseWorkflowTest do
     assert release_please =~ "needs.verify-ci.outputs.current == 'true'"
   end
 
+  test "each Release Please component owns its installation version" do
+    config = @root |> Path.join("release-please-config.json") |> File.read!() |> JSON.decode!()
+
+    manifest =
+      @root |> Path.join(".release-please-manifest.json") |> File.read!() |> JSON.decode!()
+
+    assert config["packages"]["."]["extra-files"] == ["README.md", "lib/gen_agent.ex"]
+
+    for {path, version} <- manifest do
+      package = if path == ".", do: "gen_agent", else: "gen_agent_#{Path.basename(path)}"
+      readme = File.read!(Path.join([@root, path, "README.md"]))
+      expected = ~s({:#{package}, "~> #{version}"})
+
+      assert readme =~ expected
+      assert length(Regex.scan(~r/x-release-please-version/, readme)) == 1
+
+      assert Enum.any?(String.split(readme, "\n"), fn line ->
+               String.contains?(line, expected) and
+                 String.contains?(line, "x-release-please-version")
+             end)
+
+      if path == "." do
+        moduledoc = File.read!(Path.join(@root, "lib/gen_agent.ex"))
+        assert moduledoc =~ expected
+        assert length(Regex.scan(~r/x-release-please-version/, moduledoc)) == 1
+
+        assert Enum.any?(String.split(moduledoc, "\n"), fn line ->
+                 String.contains?(line, expected) and
+                   String.contains?(line, "x-release-please-version")
+               end)
+
+        refute readme =~ ~r/\{:gen_agent_(?:claude|codex|anthropic|openai), "~>/
+        refute moduledoc =~ ~r/\{:gen_agent_(?:claude|codex|anthropic|openai), "~>/
+      else
+        assert config["packages"][path]["extra-files"] == ["README.md"]
+        refute readme =~ ~r/\{:gen_agent, "~>/
+      end
+    end
+  end
+
+  test "consumer check uses release manifest requirements" do
+    manifest =
+      @root |> Path.join(".release-please-manifest.json") |> File.read!() |> JSON.decode!()
+
+    {output, 0} =
+      System.cmd("bash", [Path.join(@root, "scripts/consumer-check.sh"), "--print-requirements"])
+
+    lines = String.split(output, "\n", trim: true)
+    assert length(lines) == map_size(manifest)
+
+    for {path, version} <- manifest do
+      package = if path == ".", do: "gen_agent", else: "gen_agent_#{Path.basename(path)}"
+      assert Enum.any?(lines, &String.contains?(&1, ~s({:#{package}, "~> #{version}"})))
+    end
+  end
+
+  test "release guide covers Hex lock refresh and changelogs have no empty tail" do
+    guide = File.read!(Path.join(@root, "RELEASING.md"))
+    assert guide =~ "GEN_AGENT_HEX=1 mix deps.update gen_agent"
+    assert guide =~ "scripts/publish-package.sh"
+
+    for path <- [
+          "integrations/claude",
+          "integrations/codex",
+          "integrations/anthropic",
+          "integrations/openai",
+          "extensions/ensemble"
+        ] do
+      changelog = File.read!(Path.join([@root, path, "CHANGELOG.md"]))
+      assert String.starts_with?(changelog, "# Changelog\n")
+      assert length(Regex.scan(~r/^## Changelog$/m, changelog)) == 0
+      refute changelog =~ "compare/v0.1.0...v0.1.0"
+      assert changelog =~ "releases/tag/v0.1.0"
+    end
+  end
+
   defp index!(text, needle) do
     {index, _length} = :binary.match(text, needle)
     index

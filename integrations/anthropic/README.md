@@ -34,12 +34,11 @@ environment, or pass `:api_key` as a backend option.
 
 ## Installation
 
+Add `gen_agent` using the current requirement in the [core installation guide](https://github.com/genagent/gen_agent#installation).
+
 ```elixir
 def deps do
-  [
-    {:gen_agent, "~> 0.3.0"},
-    {:gen_agent_anthropic, "~> 0.2.0"}
-  ]
+  [{:gen_agent_anthropic, "~> 0.4.2"}] # x-release-please-version
 end
 ```
 
