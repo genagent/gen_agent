@@ -3,6 +3,8 @@ defmodule GenAgent.ResponseTest do
 
   alias GenAgent.{Event, Response}
 
+  doctest Response
+
   test "manually constructed responses leave final_message unspecified" do
     assert %Response{text: "synthetic"}.final_message == nil
     assert %Response{text: "synthetic"}.prompt == nil

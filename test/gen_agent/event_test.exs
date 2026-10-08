@@ -3,6 +3,8 @@ defmodule GenAgent.EventTest do
 
   alias GenAgent.Event
 
+  doctest Event
+
   describe "new/2" do
     test "builds an event with the given kind and data" do
       event = Event.new(:text, %{text: "hello"})
