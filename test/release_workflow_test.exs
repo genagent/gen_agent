@@ -3,6 +3,33 @@ defmodule GenAgent.ReleaseWorkflowTest do
 
   @root Path.expand("..", __DIR__)
 
+  test "manifest versions match package mix files and release configuration" do
+    manifest =
+      @root
+      |> Path.join(".release-please-manifest.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    config =
+      @root
+      |> Path.join("release-please-config.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert Map.keys(manifest) |> Enum.sort() == Map.keys(config["packages"]) |> Enum.sort()
+
+    for {path, version} <- manifest do
+      mix_file = File.read!(Path.join([@root, path, "mix.exs"]))
+      assert [_, ^version] = Regex.run(~r/@version\s+"([^"]+)"/, mix_file)
+    end
+
+    core_excludes = config["packages"]["."]["exclude-paths"]
+
+    for path <- [".github", "scripts", "design", "RELEASING.md", "MIGRATION.md"] do
+      assert path in core_excludes
+    end
+  end
+
   test "publish jobs have read-only repository access and immutable actions" do
     release = File.read!(Path.join(@root, ".github/workflows/release.yml"))
     recovery = File.read!(Path.join(@root, ".github/workflows/publish-recovery.yml"))
@@ -49,6 +76,16 @@ defmodule GenAgent.ReleaseWorkflowTest do
 
   test "only the publish command inherits the Hex key" do
     {output, status} = System.cmd("bash", [Path.join(@root, "scripts/test-publish-package.sh")])
+    assert status == 0, output
+  end
+
+  test "package archive checks fail with clear diagnostics" do
+    {output, status} = System.cmd("bash", [Path.join(@root, "scripts/test-package-check.sh")])
+    assert status == 0, output
+  end
+
+  test "example scope only skips documentation-only PRs" do
+    {output, status} = System.cmd("bash", [Path.join(@root, "scripts/test-ci-example-scope.sh")])
     assert status == 0, output
   end
 

@@ -9,10 +9,33 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  scope:
+    name: Change scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run_examples: ${{ steps.classify.outputs.run_examples }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Classify example-relevant changes
+        id: classify
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/ci-example-scope.sh
+
   test:
     name: Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -41,33 +64,13 @@ jobs:
           restore-keys: |
             mix-${{ matrix.elixir }}-${{ matrix.otp }}-
 
-      - name: Install dependencies
-        run: mix deps.get
-
-      - name: Check for unused dependencies
-        run: mix deps.unlock --check-unused
-
-      - name: Audit dependencies
-        run: mix hex.audit
-
-      - name: Compile (warnings as errors)
-        run: mix compile --warnings-as-errors
-
-      - name: Check formatting
-        run: mix format --check-formatted
-
-      - name: Credo
-        run: mix credo --strict
-
-      - name: Dialyzer
-        run: mix dialyzer
-
-      - name: Run tests
-        run: mix test
+      - name: Run core quality gates
+        run: bash scripts/quality.sh .
 
   docs:
     name: Docs
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -93,6 +96,9 @@ jobs:
   example:
     name: GenAgent app example
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.run_examples == 'true') }}
     defaults:
       run:
         working-directory: examples/gen_agent_app
@@ -124,6 +130,9 @@ jobs:
   primitives:
     name: GenAgent primitive examples
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.run_examples == 'true') }}
     defaults:
       run:
         working-directory: examples/primitives
@@ -150,6 +159,9 @@ jobs:
   chaos_lab:
     name: GenAgent chaos lab
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.run_examples == 'true') }}
     defaults:
       run:
         working-directory: examples/chaos_lab
@@ -179,6 +191,9 @@ jobs:
   log_triage:
     name: GenAgent log triage
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.run_examples == 'true') }}
     defaults:
       run:
         working-directory: examples/log_triage
@@ -205,6 +220,9 @@ jobs:
   consensus_review:
     name: GenAgent consensus review
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.run_examples == 'true') }}
     defaults:
       run:
         working-directory: examples/consensus_review
@@ -231,6 +249,9 @@ jobs:
   claude_repo_review:
     name: GenAgent Claude repository review
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.run_examples == 'true') }}
     defaults:
       run:
         working-directory: examples/claude_repo_review
@@ -257,6 +278,7 @@ jobs:
   packages:
     name: ${{ matrix.package }}
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -277,36 +299,24 @@ jobs:
           elixir-version: "1.20"
           otp-version: "29"
 
-      - name: Install dependencies
-        run: mix deps.get
+      - name: Restore package deps and PLT cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ matrix.package }}/deps
+            ${{ matrix.package }}/_build
+            ${{ matrix.package }}/priv/plts
+          key: mix-package-${{ matrix.package }}-1.20-29-${{ hashFiles(format('{0}/mix.lock', matrix.package), format('{0}/mix.exs', matrix.package)) }}
+          restore-keys: |
+            mix-package-${{ matrix.package }}-1.20-29-
 
-      - name: Check for unused dependencies
-        run: mix deps.unlock --check-unused
-
-      - name: Audit dependencies
-        run: mix hex.audit
-
-      - name: Compile (warnings as errors)
-        run: mix compile --warnings-as-errors
-
-      - name: Check formatting
-        run: mix format --check-formatted
-
-      - name: Credo
-        run: mix credo --strict
-
-      - name: Dialyzer
-        run: mix dialyzer
-
-      - name: Run tests
-        run: mix test
-
-      - name: Build docs
-        run: mix docs --warnings-as-errors
+      - name: Run package quality gates
+        run: bash "$GITHUB_WORKSPACE/scripts/quality.sh" "${{ matrix.package }}"
 
   publish-toolchain:
     name: ${{ matrix.package }} / Elixir 1.19 / OTP 27
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -326,6 +336,16 @@ jobs:
         with:
           elixir-version: "1.19"
           otp-version: "27"
+
+      - name: Restore publish-toolchain deps cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ matrix.package }}/deps
+            ${{ matrix.package }}/_build
+          key: mix-publish-${{ matrix.package }}-1.19-27-${{ hashFiles(format('{0}/mix.lock', matrix.package), format('{0}/mix.exs', matrix.package)) }}
+          restore-keys: |
+            mix-publish-${{ matrix.package }}-1.19-27-
 
       - name: Install dependencies
         run: mix deps.get
@@ -352,6 +372,7 @@ jobs:
   packaging:
     name: Hex archives
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     needs: [test, docs, packages, publish-toolchain]
     steps:
       - uses: actions/checkout@v7
@@ -367,6 +388,7 @@ jobs:
   published-consumer:
     name: Published package consumer
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -381,6 +403,7 @@ jobs:
   minimum-core:
     name: ${{ matrix.package }} / minimum Hex core
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

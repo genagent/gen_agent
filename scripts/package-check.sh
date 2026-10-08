@@ -53,10 +53,12 @@ for package in "${packages[@]}"; do
     app="$(sed -n 's/^[[:space:]]*app: :\([a-z_]*\),/\1/p' mix.exs | head -1)"
     version="$(sed -n 's/^[[:space:]]*@version "\([0-9.]*\)"/\1/p' mix.exs | head -1)"
     archive="${app}-${version}.tar"
-    metadata="$(tar -xOf "${archive}" metadata.config)"
-
     if [[ -z "${app}" || -z "${version}" || ! -f "${archive}" ]]; then
       echo "Missing archive or package identity for ${package}" >&2
+      exit 1
+    fi
+    if ! metadata="$(tar -xOf "${archive}" metadata.config)"; then
+      echo "Unable to read metadata from ${archive}" >&2
       exit 1
     fi
 
