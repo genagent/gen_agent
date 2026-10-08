@@ -36,26 +36,19 @@ per-strategy gotchas.
 
 ## Install
 
+Add a backend from its own installation guide when using Ensemble:
+[Claude](https://github.com/genagent/gen_agent/tree/main/integrations/claude),
+[Codex](https://github.com/genagent/gen_agent/tree/main/integrations/codex),
+[Anthropic](https://github.com/genagent/gen_agent/tree/main/integrations/anthropic),
+or [OpenAI](https://github.com/genagent/gen_agent/tree/main/integrations/openai).
+
+The package resolves a compatible GenAgent core version through its dependency.
+
 ```elixir
 def deps do
-  [
-    {:gen_agent, "~> 0.3.0"},
-    {:gen_agent_ensemble, "~> 0.1"},
-    # Plus at least one backend:
-    {:gen_agent_anthropic, "~> 0.2"},
-    # and/or:
-    {:gen_agent_claude, "~> 0.1"},
-    {:gen_agent_openai, "~> 0.2"},
-    {:gen_agent_codex, "~> 0.2"}
-  ]
+  [{:gen_agent_ensemble, "~> 0.6.1"}] # x-release-please-version
 end
 ```
-
-Ensemble 0.1.2 accepts both GenAgent 0.2 and 0.3. Current source requires
-GenAgent 0.3 for caller-owned agent supervision and request-scoped completion
-delivery. These keep agents and prompt tasks tied to the ensemble's lifetime,
-including abrupt server loss. Provider subprocess settlement remains the
-backend's responsibility.
 
 ## Quickstart (zero-setup demo)
 

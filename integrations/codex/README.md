@@ -27,12 +27,11 @@ Forcola runner (see [Cancellation](#cancellation)) is POSIX-only.
 
 ## Installation
 
+Add `gen_agent` using the current requirement in the [core installation guide](https://github.com/genagent/gen_agent#installation).
+
 ```elixir
 def deps do
-  [
-    {:gen_agent, "~> 0.3.0"},
-    {:gen_agent_codex, "~> 0.2.0"}
-  ]
+  [{:gen_agent_codex, "~> 0.5.0"}] # x-release-please-version
 end
 ```
 

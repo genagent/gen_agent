@@ -29,13 +29,27 @@ workflow publishes core, then any released integrations, then Ensemble. It
 skips package versions already present on Hex so a failed publish run can be
 retried.
 
+After publishing core, refresh each dependent package's Hex-mode lock before
+testing or building it against the new core. From the dependent directory run
+`GEN_AGENT_HEX=1 mix deps.update gen_agent` (for example,
+`cd integrations/claude && GEN_AGENT_HEX=1 mix deps.update gen_agent`). Repeat
+for each integration or extension being released, and check that its `mix.lock`
+resolves the intended published core version. Local path mode does not refresh
+these Hex lock entries. The CI and manual `scripts/publish-package.sh
+<directory> prepare` paths already perform this update before testing and
+building; run it explicitly when preparing a package outside that script.
+
 Inside this repository, sibling packages use local path dependencies. Set
 `GEN_AGENT_HEX=1` for each sibling's `mix hex.build` or `mix hex.publish` so
 its archive contains ordinary Hex requirements. `scripts/package-check.sh`
 builds all six archives in that mode and checks their dependency metadata for
 path entries. `scripts/consumer-check.sh` compiles a fresh project against
-the published Hex packages. Run the consumer check after publishing a new
-combination of packages.
+the latest published stable versions of all six Hex packages. This default
+mode is safe to run in CI while a release PR contains versions that have not
+been published yet. After publishing a new combination of packages, run
+`scripts/consumer-check.sh --manifest` to verify and compile the exact versions
+in `.release-please-manifest.json`. Both modes use `jq`; the default mode also
+queries the Hex API with `curl`.
 
 The publishing workflow needs a `HEX_API_KEY` that can publish all six
 packages. `RELEASE_PLEASE_TOKEN`, when configured, lets release PRs trigger
