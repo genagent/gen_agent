@@ -782,6 +782,31 @@ defmodule GenAgent.IntegrationTest do
   end
 
   describe "resume/1" do
+    test "an ask accepted while halted waits for resume" do
+      name = unique_name("halted-ask")
+
+      {:ok, _} =
+        GenAgent.start_agent(EventDrivenAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          scripts: [[Event.new(:result, %{text: "after resume"})]]
+        )
+
+      on_exit(fn ->
+        if GenAgent.whereis(name), do: GenAgent.stop(name)
+      end)
+
+      GenAgent.notify(name, :halt_me)
+      wait_until(fn -> GenAgent.status(name).halted end)
+
+      caller = Task.async(fn -> GenAgent.ask(name, "queued") end)
+      wait_until(fn -> GenAgent.runtime_snapshot(name).pending_prompts == 1 end)
+      assert Task.yield(caller, 0) == nil
+
+      assert :ok = GenAgent.resume(name)
+      assert {:ok, %{text: "after resume"}} = Task.await(caller)
+    end
+
     test "unhalts an agent and drains the mailbox" do
       name = unique_name("event")
 

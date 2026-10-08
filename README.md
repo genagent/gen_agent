@@ -214,6 +214,13 @@ def post_run(_state) do
 end
 ```
 
+An ordinary `ask/3` sent to a halted agent waits until `resume/1`, and its
+watchdog does not bound that wait. `tell/3` and `tell_with_completion/4`
+accept requests while halted, but `poll/3` reports `{:ok, :pending}` until
+they run. Check `status/2` or `runtime_snapshot/2` to distinguish a halt
+from an active turn. Callers that cannot resume the agent can use
+`tell_with_completion/5` with `on_halt: :fail`.
+
 ## Lifecycle hooks
 
 In addition to the core callbacks, v0.2 adds four optional lifecycle

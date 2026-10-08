@@ -366,6 +366,9 @@ jobs:
         env:
           GEN_AGENT_HEX: "1"
         run: |
+          # The earlier path-dependency build and restored cache can leave local
+          # sibling sources under deps/ after switching to Hex dependencies.
+          mix deps.clean --all
           mix deps.get
           mix hex.build
 

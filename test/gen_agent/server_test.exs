@@ -967,7 +967,14 @@ defmodule GenAgent.ServerTest do
       assert length(status(pid).agent_state.errors) == 1
 
       {:ok, replacement} = Task.Supervisor.start_link(name: sup_name)
-      on_exit(fn -> if Process.alive?(replacement), do: Supervisor.stop(replacement) end)
+
+      on_exit(fn ->
+        try do
+          Supervisor.stop(replacement)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
 
       assert {:ok, %{text: "recovered"}} = ask(pid, "again")
     end
