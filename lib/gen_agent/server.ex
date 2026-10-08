@@ -58,12 +58,6 @@ defmodule GenAgent.Server do
       halted: false,
       halt_pending: false,
       draining: false,
-      # Flipped to true after `c:GenAgent.pre_run/1` has run successfully.
-      # No prompts are dispatched before pre_run completes -- since pre_run
-      # runs synchronously inside the agent process at init time, in practice
-      # external calls that arrive during pre_run are held in the gen_statem
-      # message queue and processed once pre_run returns.
-      pre_run_done: false,
       self_chain: nil,
       mailbox: :queue.new(),
       ask_monitors: %{},
@@ -388,14 +382,10 @@ defmodule GenAgent.Server do
   # any user-visible turn. See `c:GenAgent.pre_run/1`.
   # ---------------------------------------------------------------------------
 
-  defp dispatch_event(:internal, :pre_run, :idle, %Data{pre_run_done: true}) do
-    :keep_state_and_data
-  end
-
   defp dispatch_event(:internal, :pre_run, :idle, %Data{} = data) do
     case safely_pre_run(data.name, data.agent_module, data.agent_state) do
       {:ok, new_agent_state} ->
-        {:keep_state, %{data | agent_state: new_agent_state, pre_run_done: true}}
+        {:keep_state, %{data | agent_state: new_agent_state}}
 
       {:error, reason} ->
         {:stop, {:pre_run_failed, reason}, data}
