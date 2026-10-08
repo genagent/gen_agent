@@ -431,11 +431,35 @@ spec =
 :ok = GenAgent.stop("worker-1", MyApp.Agents)
 ```
 
+For an agent that starts with your application, a module that uses
+`GenAgent` can also be a static supervisor child:
+
+```elixir
+children = [
+  {Task.Supervisor, name: MyApp.AgentTasks},
+  {MyApp.Watcher,
+   name: "watcher",
+   backend: MyBackend,
+   task_supervisor: MyApp.AgentTasks}
+]
+
+{:ok, owner} = Supervisor.start_link(children, strategy: :rest_for_one)
+{:ok, response} = GenAgent.ask("watcher", "Hello")
+:ok = GenAgent.stop("watcher", owner)
+```
+
+`use GenAgent` provides an overridable `child_spec/1` for this tuple form.
+It delegates to `GenAgent.child_spec/2`, so the options and validation are
+the same. The child ID is its registered name. A static agent also has
+`restart: :temporary`: after a stop or crash, the supervisor removes it
+and does not restart it. Start a new agent explicitly if needed; its
+previous state is not restored.
+
 `child_spec/2` requires an explicit, running task supervisor; it never
 silently uses the global one. Both globally and caller-owned agents use
 `GenAgent.Registry`, so names must be unique across them and normal
 name-based calls work for either. `stop/1` targets only the global agent
-supervisor; pass the caller's `DynamicSupervisor` to `stop/2`.
+supervisor; pass the owning supervisor to `stop/2`.
 The agent child is temporary and is never automatically replayed after
 a crash. With `:rest_for_one`, failure of the task supervisor also stops
 the agent supervisor. On ordinary shutdown, the agent supervisor stops

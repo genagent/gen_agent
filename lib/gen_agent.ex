@@ -144,7 +144,8 @@ defmodule GenAgent do
       `c:pre_turn/2`. For completion side effects.
 
   The `use GenAgent` macro provides default implementations of most optional
-  callbacks and lifecycle hooks. It deliberately leaves `handle_info/2`
+  callbacks and lifecycle hooks, plus an overridable `child_spec/1` that
+  delegates to `child_spec/2`. It deliberately leaves `handle_info/2`
   undefined so unexpected OTP messages can be logged.
 
   ### Where callbacks run
@@ -572,6 +573,8 @@ defmodule GenAgent do
       @impl GenAgent
       def post_run(_state), do: :ok
 
+      def child_spec(opts), do: GenAgent.child_spec(__MODULE__, opts)
+
       defoverridable handle_error: 3,
                      handle_event: 2,
                      handle_stream_event: 2,
@@ -579,7 +582,8 @@ defmodule GenAgent do
                      pre_run: 1,
                      pre_turn: 2,
                      post_turn: 3,
-                     post_run: 1
+                     post_run: 1,
+                     child_spec: 1
     end
   end
 
@@ -698,10 +702,15 @@ defmodule GenAgent do
   to `GenAgent.TaskSupervisor`. Other options have the same meaning as in
   `start_agent/2`.
 
-  Start the spec with `DynamicSupervisor.start_child/2`. The agent is
-  registered in `GenAgent.Registry`, so the regular name-based APIs work.
+  Start the spec with `DynamicSupervisor.start_child/2`, or place
+  `{MyAgent, opts}` in a static `Supervisor` child list when `MyAgent` uses
+  `GenAgent`. The tuple calls the module's overridable `child_spec/1`, which
+  delegates here. The agent is registered in `GenAgent.Registry`, so the
+  regular name-based APIs work.
   Names must be unique across both caller-owned and global agents. Use
-  `stop/2` with the owning supervisor to stop an individual agent.
+  `stop/2` with the owning supervisor to stop an individual agent. Static
+  children retain `restart: :temporary`: once stopped or crashed, they are
+  removed from the supervisor and must be started explicitly again.
 
   Put the task supervisor before the agent supervisor in the caller's
   supervision tree so agents shut down before their prompt-task supervisor.
@@ -1220,9 +1229,11 @@ defmodule GenAgent do
   @doc """
   Stop an agent.
 
-  Terminates the agent process via its owning `DynamicSupervisor`.
+  Terminates the agent process via its owning supervisor.
   Pass the supervisor as the second argument for an agent started with
-  `child_spec/2`; the default is `GenAgent.AgentSupervisor`.
+  `child_spec/2` or a `{MyAgent, opts}` tuple; the default is
+  `GenAgent.AgentSupervisor`. For a static `Supervisor`, the child ID is
+  the agent's registered name.
   Active and queued `ask/3` callers receive an `:agent_terminated` error
   when the agent processes the orderly shutdown. Accepted
   `tell_with_completion/4` requests do not receive a synthetic completion;
@@ -1232,15 +1243,32 @@ defmodule GenAgent do
   supervisor kills the agent and `terminate_agent/2` and backend
   `terminate_session/1` cannot run. Configure `:shutdown` when starting an
   agent whose callbacks or cleanup can take longer. A blocked callback can
-  also delay unrelated operations on the same `DynamicSupervisor` during
+  also delay unrelated operations on the same supervisor during
   `stop/2`.
   Returns `:ok` or `{:error, :not_found}`.
   """
   @spec stop(name(), GenServer.server()) :: :ok | {:error, :not_found}
   def stop(name, supervisor \\ GenAgent.AgentSupervisor) do
     case whereis(name) do
-      nil -> {:error, :not_found}
-      pid -> DynamicSupervisor.terminate_child(supervisor, pid)
+      nil ->
+        {:error, :not_found}
+
+      pid ->
+        case DynamicSupervisor.terminate_child(supervisor, pid) do
+          {:error, :not_found} -> stop_static_child(supervisor, name, pid)
+          result -> result
+        end
+    end
+  end
+
+  defp stop_static_child(supervisor, name, pid) do
+    if Enum.any?(Supervisor.which_children(supervisor), fn
+         {^name, ^pid, _, _} -> true
+         _ -> false
+       end) do
+      Supervisor.terminate_child(supervisor, name)
+    else
+      {:error, :not_found}
     end
   end
 
