@@ -63,6 +63,16 @@ defmodule GenAgent.Response do
   assistant message after a blank line. `:final_message` selects the terminal
   text when present, otherwise the last boundary-marked message. Usage is
   taken from the most recent `:usage` event, if any.
+
+  ## Examples
+
+      iex> events = [
+      ...>   GenAgent.Event.new(:text, %{text: "hello"}),
+      ...>   GenAgent.Event.new(:result, %{text: "hello"})
+      ...> ]
+      iex> response = GenAgent.Response.from_events(events)
+      iex> {response.text, response.final_message, response.event_coverage.mode}
+      {"hello", "hello", :exact}
   """
   @spec from_events([Event.t()], keyword()) :: t()
   def from_events(events, opts \\ []) when is_list(events) do

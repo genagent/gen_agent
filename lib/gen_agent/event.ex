@@ -47,6 +47,12 @@ defmodule GenAgent.Event do
   The timestamp is stamped from `System.monotonic_time/1` in milliseconds,
   so event timestamps are suitable for computing durations within a single
   turn but are not wall-clock values.
+
+  ## Examples
+
+      iex> event = GenAgent.Event.new(:text, %{text: "hello"})
+      iex> {event.kind, event.data, is_integer(event.timestamp)}
+      {:text, %{text: "hello"}, true}
   """
   @spec new(kind(), map()) :: t()
   def new(kind, data \\ %{}) when is_atom(kind) and is_map(data) do
@@ -62,6 +68,13 @@ defmodule GenAgent.Event do
 
   Terminal events mark the end of a turn. The stream from
   `c:GenAgent.Backend.prompt/2` should emit exactly one terminal event.
+
+  ## Examples
+
+      iex> GenAgent.Event.terminal?(GenAgent.Event.new(:result, %{text: "done"}))
+      true
+      iex> GenAgent.Event.terminal?(GenAgent.Event.new(:text, %{text: "partial"}))
+      false
   """
   @spec terminal?(t()) :: boolean()
   def terminal?(%__MODULE__{kind: kind}), do: kind in [:result, :error]
