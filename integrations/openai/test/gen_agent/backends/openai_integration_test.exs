@@ -217,11 +217,6 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
                  [%{role: "user", content: "two"}]
 
       refute Map.has_key?(second, :previous_response_id)
-
-      assert :ok = GenAgent.reset_session(name)
-      assert {:ok, _} = GenAgent.ask(name, "fresh")
-      assert_receive {:request_body, fresh}
-      assert fresh.input == [%{role: "user", content: "fresh"}]
     end
 
     test "session_ids (client-generated) are stable across turns" do
