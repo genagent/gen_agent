@@ -58,6 +58,35 @@ defmodule GenAgent.Backends.OpenAITest do
   end
 
   describe "start_session/1" do
+    test "validates Finch pool options and rejects a named-pool connect timeout" do
+      for finch <- [
+            MyFinch,
+            [name: nil],
+            [name: "MyFinch"],
+            [name: MyFinch, size: 100],
+            [name: MyFinch, count: 2],
+            [size: 0],
+            [count: -1],
+            [pool_timeout: -1],
+            [pool_timeout: "later"],
+            [size: 10, size: 20],
+            [unknown: true]
+          ] do
+        assert {:error, {:invalid_option, :finch, :invalid}} =
+                 OpenAI.start_session(finch: finch, http_fn: ok_response("ok"))
+      end
+
+      assert {:error, {:conflicting_options, [:finch, :connect_timeout]}} =
+               OpenAI.start_session(
+                 finch: [name: MyFinch],
+                 connect_timeout: 2_000,
+                 http_fn: ok_response("ok")
+               )
+
+      assert {:error, {:invalid_option, :connect_timeout, -1}} =
+               OpenAI.start_session(connect_timeout: -1, http_fn: ok_response("ok"))
+    end
+
     test "Inspect shows session metadata without credentials or conversation content" do
       {:ok, session} =
         OpenAI.start_session(

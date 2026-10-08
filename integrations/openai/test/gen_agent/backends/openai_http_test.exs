@@ -50,6 +50,7 @@ defmodule GenAgent.Backends.OpenAIHTTPTest do
 
     assert request.options[:receive_timeout] == 60_000
     refute Map.has_key?(request.options, :connect_options)
+    refute Map.has_key?(request.options, :finch)
     assert request.options[:retry] == false
     assert request.options[:redirect] == false
   end
@@ -77,6 +78,58 @@ defmodule GenAgent.Backends.OpenAIHTTPTest do
     assert Req.Request.get_header(request, "x-tenant") == ["team-a"]
     assert Jason.decode!(request.body)["temperature"] == 0.3
     assert request.options[:redirect] == false
+  end
+
+  test "passes per-session Finch pool options without conflicting connect options" do
+    reply_json(200, %{
+      id: "resp_test",
+      status: "completed",
+      output: [%{type: "message", content: [%{type: "output_text", text: "hello"}]}]
+    })
+
+    {:ok, dynamic} =
+      OpenAI.start_session(
+        api_key: "test-key",
+        finch: [size: 100, count: 2, pool_timeout: 20_000],
+        connect_timeout: 2_000
+      )
+
+    assert {:ok, _, _} = OpenAI.prompt(dynamic, "ping")
+    assert_receive {:req_request, request}
+
+    assert Map.new(request.options[:finch]) == %{
+             size: 100,
+             count: 2,
+             pool_timeout: 20_000,
+             conn_opts: [transport_opts: [timeout: 2_000]]
+           }
+
+    refute Map.has_key?(request.options, :connect_options)
+
+    {:ok, named} =
+      OpenAI.start_session(api_key: "test-key", finch: [name: MyFinch, pool_timeout: 20_000])
+
+    assert {:ok, _, _} = OpenAI.prompt(named, "ping")
+    assert_receive {:req_request, request}
+    assert request.options[:finch] == [name: MyFinch, pool_timeout: 20_000]
+    refute Map.has_key?(request.options, :connect_options)
+  end
+
+  test "connect timeout overrides a VM-global named Finch setting" do
+    reply_json(200, %{
+      id: "resp_test",
+      status: "completed",
+      output: [%{type: "message", content: [%{type: "output_text", text: "hello"}]}]
+    })
+
+    Req.default_options(Keyword.put(Req.default_options(), :finch, name: GlobalFinch))
+    {:ok, session} = OpenAI.start_session(api_key: "test-key", connect_timeout: 2_000)
+
+    assert {:ok, _, _} = OpenAI.prompt(session, "ping")
+    assert_receive {:req_request, request}
+    assert Map.has_key?(request.options, :finch)
+    assert request.options[:finch] == nil
+    assert request.options[:connect_options] == [timeout: 2_000]
   end
 
   test "cross-host redirects never forward the API key or conversation" do
