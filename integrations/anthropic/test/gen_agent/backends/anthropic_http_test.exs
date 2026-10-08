@@ -54,6 +54,33 @@ defmodule GenAgent.Backends.AnthropicHTTPTest do
     assert request.options[:redirect] == false
   end
 
+  test "default Req transport sends configured URL, headers, version, and fields" do
+    reply_json(200, %{
+      id: "msg_test",
+      model: "claude-test",
+      stop_reason: "end_turn",
+      content: [%{type: "text", text: "hello"}]
+    })
+
+    {:ok, session} =
+      Anthropic.start_session(
+        api_key: "test-key",
+        base_url: "http://localhost:8080/proxy/v1/",
+        api_version: "2023-01-01",
+        headers: [{"Anthropic-Beta", "test-feature"}],
+        request_fields: %{temperature: 0.3}
+      )
+
+    assert {:ok, _, _} = Anthropic.prompt(session, "ping")
+    assert_receive {:req_request, request}
+    assert URI.to_string(request.url) == "http://localhost:8080/proxy/v1/messages"
+    assert Req.Request.get_header(request, "x-api-key") == ["test-key"]
+    assert Req.Request.get_header(request, "anthropic-version") == ["2023-01-01"]
+    assert Req.Request.get_header(request, "anthropic-beta") == ["test-feature"]
+    assert Jason.decode!(request.body)["temperature"] == 0.3
+    assert request.options[:redirect] == false
+  end
+
   test "cross-host redirects never forward the API key or conversation" do
     {:ok, session} = Anthropic.start_session(api_key: "test-key")
 

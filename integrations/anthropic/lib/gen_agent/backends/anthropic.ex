@@ -23,6 +23,8 @@ defmodule GenAgent.Backends.Anthropic do
   2. When the state machine delivers the terminal `:result` event,
      it calls `update_session/2` with the event's data, and this
      backend appends the assistant's message to `session.messages`.
+     With extended thinking enabled, it replays the complete assistant
+     content blocks on later turns while result events expose only answer text.
      If the response is empty, it removes the unanswered user message instead.
   3. The next `prompt/2` sends the updated history to the API.
 
@@ -44,6 +46,21 @@ defmodule GenAgent.Backends.Anthropic do
     * `:api_key` -- Anthropic API key. Defaults to `System.get_env("ANTHROPIC_API_KEY")`.
       `start_session/1` returns `{:error, :missing_api_key}` when neither
       provides a non-empty key, unless a one-arity `:http_fn` is supplied.
+    * `:base_url` -- API prefix. Defaults to `"https://api.anthropic.com/v1"`;
+      `/messages` is appended. HTTPS is required except for loopback HTTP.
+      The configured host receives the API key and conversation content.
+    * `:api_version` -- value of the `anthropic-version` header. Defaults to
+      `"2023-06-01"` and must be an ISO date.
+    * `:headers` -- map or list of `{name, value}` pairs with string keys and
+      values. Auth, version, content type, and transport headers cannot be
+      overridden; names are matched case-insensitively. Values must contain
+      only printable ASCII or horizontal tabs.
+    * `:request_fields` -- map of additional JSON request fields, such as
+      `%{temperature: 0.2}`. For extended thinking, use a supported model with
+      `max_output_tokens: 2048` and
+      `request_fields: %{thinking: %{type: "enabled", budget_tokens: 1024}}`.
+      Fields managed by the backend, including messages, model, token limit,
+      caching, streaming, and tools, cannot be overridden.
     * `:model` -- model name. Defaults to `"claude-sonnet-4-5"`.
     * `:max_output_tokens` -- max tokens per turn. Defaults to `1024`.
       `:max_tokens` remains a deprecated alias.
@@ -78,13 +95,17 @@ defmodule GenAgent.Backends.Anthropic do
   alias GenAgent.Event
   @compile {:no_warn_undefined, Error}
 
-  @endpoint "https://api.anthropic.com/v1/messages"
-  @anthropic_version "2023-06-01"
+  @default_base_url "https://api.anthropic.com/v1"
+  @default_api_version "2023-06-01"
   @default_model "claude-sonnet-4-5"
   @default_max_tokens 1024
   @default_receive_timeout 60_000
   @known_options [
     :api_key,
+    :base_url,
+    :api_version,
+    :headers,
+    :request_fields,
     :model,
     :max_tokens,
     :max_output_tokens,
@@ -100,6 +121,11 @@ defmodule GenAgent.Backends.Anthropic do
 
   defstruct [
     :api_key,
+    :base_url,
+    :api_version,
+    :headers,
+    :request_fields,
+    :pending_content,
     :model,
     :max_tokens,
     :system,
@@ -112,10 +138,15 @@ defmodule GenAgent.Backends.Anthropic do
     messages: []
   ]
 
-  @type message :: %{role: String.t(), content: String.t()}
+  @type message :: %{role: String.t(), content: String.t() | [map()]}
 
   @type t :: %__MODULE__{
           api_key: String.t() | nil,
+          base_url: String.t(),
+          api_version: String.t(),
+          headers: [{String.t(), String.t()}],
+          request_fields: map(),
+          pending_content: [map()] | nil,
           model: String.t(),
           max_tokens: pos_integer(),
           system: String.t() | nil,
@@ -133,6 +164,11 @@ defmodule GenAgent.Backends.Anthropic do
     with :ok <- validate_opts(opts),
          :ok <- validate_cache(Keyword.get(opts, :cache, false)),
          :ok <- validate_max_history_turns(Keyword.get(opts, :max_history_turns, :infinity)),
+         {:ok, base_url} <- normalize_base_url(Keyword.get(opts, :base_url, @default_base_url)),
+         :ok <- validate_api_version(Keyword.get(opts, :api_version, @default_api_version)),
+         {:ok, headers} <- normalize_headers(Keyword.get(opts, :headers, [])),
+         {:ok, request_fields} <-
+           normalize_request_fields(Keyword.get(opts, :request_fields, %{})),
          {:ok, opts} <- normalize_opts(opts) do
       api_key =
         present(Keyword.get(opts, :api_key)) || present(System.get_env("ANTHROPIC_API_KEY"))
@@ -142,7 +178,7 @@ defmodule GenAgent.Backends.Anthropic do
       if is_nil(api_key) and not is_function(Keyword.get(opts, :http_fn), 1) do
         {:error, :missing_api_key}
       else
-        build_session(api_key, opts)
+        build_session(api_key, opts, base_url, headers, request_fields)
       end
     end
   end
@@ -167,6 +203,97 @@ defmodule GenAgent.Backends.Anthropic do
 
   defp validate_max_history_turns(value),
     do: {:error, {:invalid_option, :max_history_turns, value}}
+
+  defp normalize_base_url(value) when is_binary(value) do
+    case URI.new(value) do
+      {:ok, %URI{scheme: scheme, host: host, userinfo: nil, query: nil, fragment: nil}}
+      when scheme in ["https", "http"] and is_binary(host) and host != "" ->
+        if not String.match?(value, ~r/\s/) and
+             (scheme == "https" or String.downcase(host) in ["localhost", "127.0.0.1", "::1"]) do
+          {:ok, String.trim_trailing(value, "/")}
+        else
+          {:error, {:invalid_option, :base_url, :invalid}}
+        end
+
+      _ ->
+        {:error, {:invalid_option, :base_url, :invalid}}
+    end
+  end
+
+  defp normalize_base_url(_value), do: {:error, {:invalid_option, :base_url, :invalid}}
+
+  defp validate_api_version(value) when is_binary(value) do
+    case Date.from_iso8601(value) do
+      {:ok, _date} -> :ok
+      _ -> {:error, {:invalid_option, :api_version, value}}
+    end
+  end
+
+  defp validate_api_version(value), do: {:error, {:invalid_option, :api_version, value}}
+
+  @reserved_headers ~w(authorization x-api-key anthropic-version content-type host content-length transfer-encoding)
+  defp normalize_headers(value) when is_map(value) or is_list(value) do
+    pairs = if is_map(value), do: Map.to_list(value), else: value
+
+    if Enum.all?(pairs, fn
+         {name, header_value} when is_binary(name) and is_binary(header_value) ->
+           String.match?(name, ~r/^[A-Za-z0-9-]+$/) and
+             valid_header_value?(header_value) and
+             String.downcase(name) not in @reserved_headers
+
+         _ ->
+           false
+       end) and
+         Enum.uniq_by(pairs, fn {name, _} -> String.downcase(name) end) == pairs do
+      {:ok, Enum.map(pairs, fn {name, header_value} -> {String.downcase(name), header_value} end)}
+    else
+      {:error, {:invalid_option, :headers, :invalid}}
+    end
+  end
+
+  defp normalize_headers(_value), do: {:error, {:invalid_option, :headers, :invalid}}
+
+  defp valid_header_value?(value) do
+    value
+    |> :binary.bin_to_list()
+    |> Enum.all?(&(&1 == 9 or &1 in 32..126))
+  end
+
+  @reserved_request_fields ~w(model max_tokens messages system cache_control stream tools tool_choice)
+  defp normalize_request_fields(value) when is_map(value) do
+    if valid_json_map?(value) and
+         Enum.all?(Map.keys(value), &(json_key(&1) not in @reserved_request_fields)) do
+      {:ok, Map.new(value, fn {key, field_value} -> {json_key(key), field_value} end)}
+    else
+      {:error, {:invalid_option, :request_fields, :invalid}}
+    end
+  end
+
+  defp normalize_request_fields(_value),
+    do: {:error, {:invalid_option, :request_fields, :invalid}}
+
+  defp valid_json_map?(value) do
+    keys = Map.keys(value)
+
+    not is_struct(value) and Enum.all?(keys, &valid_json_key?/1) and
+      length(Enum.uniq(Enum.map(keys, &json_key/1))) == length(keys) and
+      Enum.all?(Map.values(value), &valid_json?/1)
+  end
+
+  defp valid_json?(value) when is_map(value), do: valid_json_map?(value)
+  defp valid_json?(value) when is_list(value), do: Enum.all?(value, &valid_json?/1)
+
+  defp valid_json?(value) when is_binary(value) or is_number(value) or is_atom(value),
+    do: true
+
+  defp valid_json?(_value), do: false
+
+  defp valid_json_key?(key) when is_binary(key), do: key != ""
+  defp valid_json_key?(key) when is_atom(key), do: key not in [nil, true, false]
+  defp valid_json_key?(_key), do: false
+
+  defp json_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp json_key(key), do: key
 
   defp normalize_opts(opts) do
     case normalize_aliases(opts, :system_prompt, [:system, :instructions]) do
@@ -193,11 +320,15 @@ defmodule GenAgent.Backends.Anthropic do
     end
   end
 
-  defp build_session(api_key, opts) do
+  defp build_session(api_key, opts, base_url, headers, request_fields) do
     http_fn = Keyword.get(opts, :http_fn, &default_http/1)
 
     session = %__MODULE__{
       api_key: api_key,
+      base_url: base_url,
+      api_version: Keyword.get(opts, :api_version, @default_api_version),
+      headers: headers,
+      request_fields: request_fields,
       model: Keyword.get(opts, :model, @default_model),
       max_tokens: Keyword.get(opts, :max_output_tokens, @default_max_tokens),
       system: Keyword.get(opts, :system_prompt),
@@ -220,7 +351,7 @@ defmodule GenAgent.Backends.Anthropic do
 
   @impl GenAgent.Backend
   def prompt(%__MODULE__{} = session, prompt) when is_binary(prompt) do
-    pending_session = append_message(session, "user", prompt)
+    pending_session = session |> clear_pending_content() |> append_message("user", prompt)
     request = build_request(pending_session)
 
     case session.http_fn.(request) do
@@ -236,10 +367,27 @@ defmodule GenAgent.Backends.Anthropic do
 
   defp handle_http_body(body, session, pending_session) do
     with {:ok, events} <- parse_response(body, session.client_session_id) do
-      next_session = if List.last(events).kind == :error, do: session, else: pending_session
+      next_session =
+        if List.last(events).kind == :error do
+          session
+        else
+          maybe_preserve_content(pending_session, body)
+        end
+
       {:ok, events, next_session}
     end
   end
+
+  defp maybe_preserve_content(%__MODULE__{request_fields: %{"thinking" => _}} = session, %{
+         "content" => content
+       })
+       when is_list(content) do
+    if Enum.all?(content, &is_map/1),
+      do: %{session | pending_content: content},
+      else: session
+  end
+
+  defp maybe_preserve_content(session, _body), do: session
 
   defp parse_response(body, client_session_id) when is_map(body) do
     {:ok, response_to_events(body, client_session_id)}
@@ -267,16 +415,21 @@ defmodule GenAgent.Backends.Anthropic do
   # remove the unanswered user message so history keeps alternating.
   def update_session(%__MODULE__{} = session, %{text: text}) when is_binary(text) do
     if String.trim(text) == "",
-      do: drop_last_user_message(session),
-      else: session |> append_message("assistant", text) |> trim_history()
+      do: session |> drop_last_user_message() |> clear_pending_content(),
+      else:
+        session
+        |> append_message("assistant", session.pending_content || text)
+        |> clear_pending_content()
+        |> trim_history()
   end
 
-  def update_session(%__MODULE__{} = session, _data), do: session
+  def update_session(%__MODULE__{} = session, _data), do: clear_pending_content(session)
 
   if {:reset_session, 1} in GenAgent.Backend.behaviour_info(:callbacks),
     do: @impl(GenAgent.Backend)
 
-  def reset_session(%__MODULE__{} = session), do: {:ok, %{session | messages: []}}
+  def reset_session(%__MODULE__{} = session),
+    do: {:ok, %{session | messages: [], pending_content: nil}}
 
   @impl GenAgent.Backend
   def terminate_session(%__MODULE__{}), do: :ok
@@ -288,6 +441,8 @@ defmodule GenAgent.Backends.Anthropic do
   defp append_message(%__MODULE__{messages: messages} = session, role, content) do
     %{session | messages: messages ++ [%{role: role, content: content}]}
   end
+
+  defp clear_pending_content(session), do: %{session | pending_content: nil}
 
   defp drop_last_user_message(%__MODULE__{messages: messages} = session) do
     case Enum.reverse(messages) do
@@ -311,14 +466,16 @@ defmodule GenAgent.Backends.Anthropic do
       }
       |> maybe_put(:system, session.system)
       |> maybe_cache(session.cache)
+      |> Map.merge(session.request_fields)
 
     %{
-      url: @endpoint,
-      headers: [
-        {"x-api-key", session.api_key || ""},
-        {"anthropic-version", @anthropic_version},
-        {"content-type", "application/json"}
-      ],
+      url: session.base_url <> "/messages",
+      headers:
+        [
+          {"x-api-key", session.api_key || ""},
+          {"anthropic-version", session.api_version},
+          {"content-type", "application/json"}
+        ] ++ session.headers,
       body: body,
       receive_timeout: session.receive_timeout,
       connect_timeout: session.connect_timeout

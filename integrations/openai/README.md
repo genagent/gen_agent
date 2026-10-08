@@ -177,6 +177,15 @@ every turn after the first.
   returns `{:error, :missing_api_key}` (through `GenAgent.start_agent/2`,
   `{:error, {:backend_start_failed, :missing_api_key}}`), unless a one-arity
   `:http_fn` is supplied.
+- `:base_url` -- API prefix, default `"https://api.openai.com/v1"`.
+  The backend appends `/responses`. HTTPS is required except for loopback
+  HTTP. The configured host receives the API key and conversation content.
+- `:headers` -- additional headers as a string-keyed map or list of
+  `{name, value}` pairs. Auth, content type, and transport headers cannot
+  be overridden. Values must contain only printable ASCII or horizontal tabs.
+- `:request_fields` -- extra JSON body fields such as `%{temperature: 0.2}`.
+  Backend-owned fields (input, storage, continuation, reasoning, streaming,
+  and tools) cannot be overridden.
 - `:model` -- model name. Defaults to `"gpt-5"`.
 - `:store` -- whether OpenAI stores responses for server-side continuation.
   Defaults to `true`. Set `false` to replay local context each turn.

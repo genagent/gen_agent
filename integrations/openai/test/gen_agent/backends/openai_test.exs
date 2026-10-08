@@ -219,6 +219,97 @@ defmodule GenAgent.Backends.OpenAITest do
       assert_receive {^ref, %{body: %{instructions: "Be terse.", max_output_tokens: 256}}}
     end
 
+    test "custom request options preserve stored and stateless continuation" do
+      for store <- [true, false] do
+        ref = make_ref()
+
+        {:ok, session} =
+          OpenAI.start_session(
+            api_key: "secret-key",
+            base_url: "https://proxy.example/api/v1/",
+            headers: %{"X-Tenant" => "team-a"},
+            request_fields: %{temperature: 0.2, metadata: %{source: "agent"}},
+            store: store,
+            http_fn: recording_fn(ref, ok_response("answer"))
+          )
+
+        {:ok, events, session} = OpenAI.prompt(session, "first")
+        assert_receive {^ref, first}
+        assert first.url == "https://proxy.example/api/v1/responses"
+
+        assert Map.new(first.headers) == %{
+                 "authorization" => "Bearer secret-key",
+                 "content-type" => "application/json",
+                 "x-tenant" => "team-a"
+               }
+
+        assert first.body["temperature"] == 0.2
+        assert first.body["metadata"] == %{source: "agent"}
+        assert first.body.store == store
+
+        %{data: result} = Enum.find(events, &(&1.kind == :result))
+        session = OpenAI.update_session(session, result)
+        {:ok, _, _} = OpenAI.prompt(session, "second")
+        assert_receive {^ref, second}
+        assert second.body["temperature"] == 0.2
+        assert second.body["metadata"] == %{source: "agent"}
+
+        if store do
+          assert second.body.previous_response_id == result.response_id
+          assert second.body.input == [%{role: "user", content: "second"}]
+        else
+          refute Map.has_key?(second.body, :previous_response_id)
+          assert second.body.include == ["reasoning.encrypted_content"]
+          assert length(second.body.input) == 3
+        end
+
+        refute inspect(session) =~ "secret-key"
+        refute inspect(session) =~ "team-a"
+      end
+    end
+
+    test "rejects unsafe request customization at session startup" do
+      for url <- [
+            "http://proxy.example/v1",
+            "https://user:pass@proxy.example/v1",
+            "https://proxy.example/v1#fragment",
+            "not a URL"
+          ] do
+        assert {:error, {:invalid_option, :base_url, :invalid}} =
+                 OpenAI.start_session(base_url: url, http_fn: ok_response("ok"))
+      end
+
+      for headers <- [
+            %{"Authorization" => "replacement"},
+            [{"X-Tenant", "a"}, {"x-tenant", "b"}],
+            %{"X-Tenant" => "value\r\nInjected: bad"},
+            %{"X-Tenant" => "café"},
+            %{"X-Tenant" => <<1>>},
+            %{"X-Tenant" => <<255>>}
+          ] do
+        assert {:error, {:invalid_option, :headers, :invalid}} =
+                 OpenAI.start_session(headers: headers, http_fn: ok_response("ok"))
+      end
+
+      assert {:ok, _} =
+               OpenAI.start_session(
+                 headers: %{"X-Tenant" => "team a\tb"},
+                 http_fn: ok_response("ok")
+               )
+
+      for fields <- [
+            %{input: []},
+            %{"store" => false},
+            %{include: []},
+            %{"temperature" => 0.4, temperature: 0.2},
+            %{metadata: %{1 => "bad"}},
+            %{temperature: fn -> :bad end}
+          ] do
+        assert {:error, {:invalid_option, :request_fields, :invalid}} =
+                 OpenAI.start_session(request_fields: fields, http_fn: ok_response("ok"))
+      end
+    end
+
     test "rejects unknown and malformed options before credential lookup" do
       assert {:error, {:unknown_option, :modle}} = OpenAI.start_session(modle: "wrong")
 
