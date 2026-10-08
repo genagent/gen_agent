@@ -50,6 +50,7 @@ defmodule GenAgent.Backends.AnthropicHTTPTest do
 
     assert request.options[:receive_timeout] == 60_000
     refute Map.has_key?(request.options, :connect_options)
+    refute Map.has_key?(request.options, :finch)
     assert request.options[:retry] == false
     assert request.options[:redirect] == false
   end
@@ -79,6 +80,58 @@ defmodule GenAgent.Backends.AnthropicHTTPTest do
     assert Req.Request.get_header(request, "anthropic-beta") == ["test-feature"]
     assert Jason.decode!(request.body)["temperature"] == 0.3
     assert request.options[:redirect] == false
+  end
+
+  test "passes per-session Finch pool options without conflicting connect options" do
+    reply_json(200, %{
+      id: "msg_test",
+      stop_reason: "end_turn",
+      content: [%{type: "text", text: "hello"}]
+    })
+
+    {:ok, dynamic} =
+      Anthropic.start_session(
+        api_key: "test-key",
+        finch: [size: 100, count: 2, pool_timeout: 20_000],
+        connect_timeout: 2_000
+      )
+
+    assert {:ok, _, _} = Anthropic.prompt(dynamic, "ping")
+    assert_receive {:req_request, request}
+
+    assert Map.new(request.options[:finch]) == %{
+             size: 100,
+             count: 2,
+             pool_timeout: 20_000,
+             conn_opts: [transport_opts: [timeout: 2_000]]
+           }
+
+    refute Map.has_key?(request.options, :connect_options)
+
+    {:ok, named} =
+      Anthropic.start_session(api_key: "test-key", finch: [name: MyFinch, pool_timeout: 20_000])
+
+    assert {:ok, _, _} = Anthropic.prompt(named, "ping")
+    assert_receive {:req_request, request}
+    assert request.options[:finch] == [name: MyFinch, pool_timeout: 20_000]
+    refute Map.has_key?(request.options, :connect_options)
+  end
+
+  test "connect timeout overrides a VM-global named Finch setting" do
+    reply_json(200, %{
+      id: "msg_test",
+      stop_reason: "end_turn",
+      content: [%{type: "text", text: "hello"}]
+    })
+
+    Req.default_options(Keyword.put(Req.default_options(), :finch, name: GlobalFinch))
+    {:ok, session} = Anthropic.start_session(api_key: "test-key", connect_timeout: 2_000)
+
+    assert {:ok, _, _} = Anthropic.prompt(session, "ping")
+    assert_receive {:req_request, request}
+    assert Map.has_key?(request.options, :finch)
+    assert request.options[:finch] == nil
+    assert request.options[:connect_options] == [timeout: 2_000]
   end
 
   test "cross-host redirects never forward the API key or conversation" do

@@ -78,7 +78,17 @@ defmodule GenAgent.Backends.Anthropic do
       picks a safer default. Set higher for large debates or longer
       generations.
     * `:connect_timeout` -- HTTP connect timeout in milliseconds.
-      Defaults to Req's default when unset.
+      Defaults to Req's default when unset. With a named Finch pool,
+      configure this when starting Finch; the two session options cannot
+      be combined.
+    * `:finch` -- per-session Finch options: `:pool_timeout` (milliseconds or
+      `:infinity`), `:size` and `:count` (positive integers for a dynamically
+      started pool), or `:name` (an already started Finch pool). A named pool
+      cannot also set `:size` or `:count`. Without this option, Req uses its
+      default HTTP/1 pool of 50 connections per host with a 5-second checkout
+      timeout. For example, `finch: [size: 100, pool_timeout: 20_000]` selects
+      a larger pool and wait limit. Req shares dynamic pools with identical
+      pool configuration across sessions; `:size` is per pool shard.
     * `:http_fn` -- a 1-arity function `(request_map) -> {:ok, response_map} | {:error, term}`
       that replaces the default `Req`-backed HTTP call. Intended for tests.
 
@@ -106,6 +116,7 @@ defmodule GenAgent.Backends.Anthropic do
     :api_version,
     :headers,
     :request_fields,
+    :finch,
     :model,
     :max_tokens,
     :max_output_tokens,
@@ -125,6 +136,7 @@ defmodule GenAgent.Backends.Anthropic do
     :api_version,
     :headers,
     :request_fields,
+    :finch,
     :pending_content,
     :model,
     :max_tokens,
@@ -146,6 +158,7 @@ defmodule GenAgent.Backends.Anthropic do
           api_version: String.t(),
           headers: [{String.t(), String.t()}],
           request_fields: map(),
+          finch: keyword() | nil,
           pending_content: [map()] | nil,
           model: String.t(),
           max_tokens: pos_integer(),
@@ -169,6 +182,9 @@ defmodule GenAgent.Backends.Anthropic do
          {:ok, headers} <- normalize_headers(Keyword.get(opts, :headers, [])),
          {:ok, request_fields} <-
            normalize_request_fields(Keyword.get(opts, :request_fields, %{})),
+         {:ok, finch} <- normalize_finch(Keyword.get(opts, :finch)),
+         :ok <- validate_connect_timeout(Keyword.get(opts, :connect_timeout)),
+         {:ok, finch} <- resolve_finch(finch, Keyword.get(opts, :connect_timeout)),
          {:ok, opts} <- normalize_opts(opts) do
       api_key =
         present(Keyword.get(opts, :api_key)) || present(System.get_env("ANTHROPIC_API_KEY"))
@@ -178,7 +194,7 @@ defmodule GenAgent.Backends.Anthropic do
       if is_nil(api_key) and not is_function(Keyword.get(opts, :http_fn), 1) do
         {:error, :missing_api_key}
       else
-        build_session(api_key, opts, base_url, headers, request_fields)
+        build_session(api_key, opts, base_url, headers, request_fields, finch)
       end
     end
   end
@@ -295,6 +311,61 @@ defmodule GenAgent.Backends.Anthropic do
   defp json_key(key) when is_atom(key), do: Atom.to_string(key)
   defp json_key(key), do: key
 
+  defp normalize_finch(nil), do: {:ok, nil}
+
+  defp normalize_finch(options) when is_list(options) do
+    valid? =
+      Keyword.keyword?(options) and
+        unique_finch_keys?(options) and
+        Enum.all?(options, &valid_finch_option?/1) and
+        not named_pool_config_conflict?(options)
+
+    if valid?, do: {:ok, if(options == [], do: nil, else: options)}, else: invalid_finch()
+  end
+
+  defp normalize_finch(_value), do: invalid_finch()
+  defp invalid_finch, do: {:error, {:invalid_option, :finch, :invalid}}
+
+  defp unique_finch_keys?(options) do
+    keys = Keyword.keys(options)
+    length(keys) == length(Enum.uniq(keys))
+  end
+
+  defp valid_finch_option?({:name, name}), do: is_atom(name) and not is_nil(name)
+  defp valid_finch_option?({:pool_timeout, timeout}), do: valid_timeout?(timeout)
+
+  defp valid_finch_option?({key, size}) when key in [:size, :count],
+    do: is_integer(size) and size > 0
+
+  defp valid_finch_option?(_), do: false
+
+  defp named_pool_config_conflict?(options) do
+    Keyword.has_key?(options, :name) and
+      (Keyword.has_key?(options, :size) or Keyword.has_key?(options, :count))
+  end
+
+  defp validate_connect_timeout(nil), do: :ok
+
+  defp validate_connect_timeout(timeout) do
+    if valid_timeout?(timeout),
+      do: :ok,
+      else: {:error, {:invalid_option, :connect_timeout, timeout}}
+  end
+
+  defp valid_timeout?(:infinity), do: true
+  defp valid_timeout?(timeout), do: is_integer(timeout) and timeout >= 0
+
+  defp resolve_finch(nil, _timeout), do: {:ok, nil}
+  defp resolve_finch(finch, nil), do: {:ok, finch}
+
+  defp resolve_finch(finch, timeout) do
+    if Keyword.has_key?(finch, :name) do
+      {:error, {:conflicting_options, [:finch, :connect_timeout]}}
+    else
+      {:ok, Keyword.put(finch, :conn_opts, transport_opts: [timeout: timeout])}
+    end
+  end
+
   defp normalize_opts(opts) do
     case normalize_aliases(opts, :system_prompt, [:system, :instructions]) do
       {:ok, opts} -> normalize_aliases(opts, :max_output_tokens, [:max_tokens])
@@ -320,7 +391,7 @@ defmodule GenAgent.Backends.Anthropic do
     end
   end
 
-  defp build_session(api_key, opts, base_url, headers, request_fields) do
+  defp build_session(api_key, opts, base_url, headers, request_fields, finch) do
     http_fn = Keyword.get(opts, :http_fn, &default_http/1)
 
     session = %__MODULE__{
@@ -329,6 +400,7 @@ defmodule GenAgent.Backends.Anthropic do
       api_version: Keyword.get(opts, :api_version, @default_api_version),
       headers: headers,
       request_fields: request_fields,
+      finch: finch,
       model: Keyword.get(opts, :model, @default_model),
       max_tokens: Keyword.get(opts, :max_output_tokens, @default_max_tokens),
       system: Keyword.get(opts, :system_prompt),
@@ -478,7 +550,8 @@ defmodule GenAgent.Backends.Anthropic do
         ] ++ session.headers,
       body: body,
       receive_timeout: session.receive_timeout,
-      connect_timeout: session.connect_timeout
+      connect_timeout: session.connect_timeout,
+      finch: session.finch
     }
   end
 
@@ -554,7 +627,8 @@ defmodule GenAgent.Backends.Anthropic do
     req_opts =
       [headers: headers, json: body, retry: false, redirect: false]
       |> maybe_put_opt(:receive_timeout, request[:receive_timeout])
-      |> maybe_put_opt(:connect_options, connect_options(request[:connect_timeout]))
+      |> maybe_put_opt(:finch, request[:finch])
+      |> maybe_put_connect_timeout(request[:finch], request[:connect_timeout])
 
     case Req.post(url, req_opts) do
       {:ok, %Req.Response{status: 200, body: body}} ->
@@ -575,8 +649,12 @@ defmodule GenAgent.Backends.Anthropic do
   defp maybe_put_opt(opts, _key, nil), do: opts
   defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
-  defp connect_options(nil), do: nil
-  defp connect_options(timeout), do: [timeout: timeout]
+  defp maybe_put_connect_timeout(opts, _finch, nil), do: opts
+  defp maybe_put_connect_timeout(opts, finch, _timeout) when not is_nil(finch), do: opts
+
+  defp maybe_put_connect_timeout(opts, nil, timeout) do
+    opts |> Keyword.put(:finch, nil) |> Keyword.put(:connect_options, timeout: timeout)
+  end
 
   defp generate_session_id do
     "anthropic-" <>

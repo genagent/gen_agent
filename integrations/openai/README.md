@@ -204,7 +204,17 @@ every turn after the first.
 - `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
   to `60_000`. The 60-second default can be short for long reasoning turns.
 - `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults
-  to `nil` (Req's default).
+  to `nil` (Req's default). Configure it when starting a named Finch pool;
+  `:connect_timeout` cannot be combined with `finch: [name: MyFinch]`.
+- `:finch` -- per-session Finch options. Use
+  `finch: [size: 100, pool_timeout: 20_000]` for a dynamic pool, or start
+  a Finch child with a larger pool and pass `finch: [name: MyFinch]`.
+  `:count` is also supported for dynamic pools; `:pool_timeout` is accepted
+  with either kind. Req's default HTTP/1 pool has 50 connections per host
+  and a 5-second checkout timeout. Named pools set connection options at
+  startup; pool `:size` and `:count` cannot be combined with `:name`.
+  Dynamic pools with identical pool configuration are shared across sessions;
+  `:size` limits connections per shard.
 - `:http_fn` -- a 1-arity function
   `(request_map) -> {:ok, response_map} | {:error, term}`
   that replaces the default `Req`-backed HTTP call. Intended for
