@@ -153,6 +153,19 @@ defmodule GenAgent.Backends.OpenAITest do
     test "uses default model" do
       {:ok, session} = OpenAI.start_session(http_fn: ok_response("hi"))
       assert session.model == "gpt-5"
+      assert session.store == true
+    end
+
+    test "accepts boolean store and rejects other values" do
+      for store <- [true, false] do
+        assert {:ok, %{store: ^store}} =
+                 OpenAI.start_session(store: store, http_fn: ok_response("hi"))
+      end
+
+      for store <- [nil, "false", 0] do
+        assert {:error, {:invalid_option, :store, ^store}} =
+                 OpenAI.start_session(store: store, http_fn: ok_response("hi"))
+      end
     end
 
     test "receive_timeout defaults to 60_000 and connect_timeout uses Req's default" do
@@ -347,19 +360,90 @@ defmodule GenAgent.Backends.OpenAITest do
       refute Map.has_key?(request.body, :previous_response_id)
     end
 
-    test "always sends store: true" do
+    test "sends store: true by default and when explicit" do
+      for opts <- [[], [store: true]] do
+        ref = make_ref()
+
+        {:ok, session} =
+          OpenAI.start_session(
+            api_key: "sk-test",
+            http_fn: recording_fn(ref, ok_response("k")),
+            store: Keyword.get(opts, :store, true)
+          )
+
+        {:ok, _events, _session} = OpenAI.prompt(session, "hi")
+
+        assert_receive {^ref, request}
+        assert request.body.store == true
+        refute Map.has_key?(request.body, :include)
+      end
+    end
+
+    test "store: false sends local history, requests encrypted reasoning, and never sends a response id" do
       ref = make_ref()
+
+      output = [
+        %{"type" => "reasoning", "encrypted_content" => "encrypted-state"},
+        hd(default_output("first answer"))
+      ]
 
       {:ok, session} =
         OpenAI.start_session(
-          api_key: "sk-test",
-          http_fn: recording_fn(ref, ok_response("k"))
+          store: false,
+          system_prompt: "Be brief.",
+          http_fn: recording_fn(ref, ok_response("first answer", output: output))
         )
 
-      {:ok, _events, _session} = OpenAI.prompt(session, "hi")
+      {:ok, events, session} = OpenAI.prompt(session, "first question")
+      assert_receive {^ref, %{body: first}}
+      assert first.store == false
+      assert first.input == [%{role: "user", content: "first question"}]
+      assert first.include == ["reasoning.encrypted_content"]
+      refute Map.has_key?(first, :previous_response_id)
 
-      assert_receive {^ref, request}
-      assert request.body.store == true
+      %{data: result} = Enum.find(events, &(&1.kind == :result))
+      session = OpenAI.update_session(session, result)
+      assert session.previous_response_id == nil
+      assert session.history == first.input ++ output
+
+      {:ok, _events, _session} = OpenAI.prompt(session, "second question")
+      assert_receive {^ref, %{body: second}}
+      assert second.store == false
+      assert second.instructions == "Be brief."
+
+      assert second.input ==
+               first.input ++ output ++ [%{role: "user", content: "second question"}]
+
+      refute Map.has_key?(second, :previous_response_id)
+
+      {:ok, reset} = OpenAI.reset_session(session)
+      assert reset.history == []
+      {:ok, _events, _session} = OpenAI.prompt(reset, "fresh question")
+      assert_receive {^ref, %{body: fresh}}
+      assert fresh.input == [%{role: "user", content: "fresh question"}]
+    end
+
+    test "store: false ignores response IDs even if a stale one is present" do
+      ref = make_ref()
+
+      {:ok, session} =
+        OpenAI.start_session(store: false, http_fn: recording_fn(ref, ok_response("ok")))
+
+      session = %{session | previous_response_id: "stale-id"}
+      {:ok, events, session} = OpenAI.prompt(session, "hi")
+      assert_receive {^ref, %{body: body}}
+      refute Map.has_key?(body, :previous_response_id)
+      %{data: result} = Enum.find(events, &(&1.kind == :result))
+      assert OpenAI.update_session(session, result).previous_response_id == nil
+    end
+
+    test "store: false does not add failed responses to local history" do
+      response = ok_response("ignored", status: "failed")
+      {:ok, session} = OpenAI.start_session(store: false, http_fn: response)
+      {:ok, events, session} = OpenAI.prompt(session, "failed question")
+      assert Enum.any?(events, &(&1.kind == :error))
+      assert session.history == []
+      assert session.pending_turn == nil
     end
 
     test "passes truncation through only when configured" do

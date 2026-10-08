@@ -23,8 +23,8 @@ this backend:
 - Talks HTTP, not a subprocess
 - Has **no tool use** by default (pure text in/text out)
 - Tracks conversation state via the API's server-side
-  `previous_response_id`, so multi-turn works without resending
-  the full history each turn
+  `previous_response_id` by default, or via a local session history
+  when `store: false`
 - Is the simplest backend to use for HTTP-only workflows or when
   you do not want a CLI dependency
 
@@ -34,9 +34,10 @@ This backend targets the **Responses API** (`/v1/responses`), not
 Chat Completions. The Responses API is OpenAI's newer agent-first
 primitive and is a much cleaner fit for `GenAgent`:
 
-- Server-side state via `previous_response_id` means the session
-  struct only has to track one id across turns, not a messages
-  array.
+- With the default `store: true`, server-side state via
+  `previous_response_id` means the session tracks one id across turns.
+  With `store: false`, it keeps input and output items locally and
+  resends them on each turn.
 - Reasoning models (o1/o3/o4/gpt-5) surface reasoning items in the
   output array; this backend ignores them for text extraction but
   surfaces `reasoning_tokens` in the `:usage` event so patterns
@@ -99,9 +100,10 @@ IO.puts(response.text)
 
 ## Session continuation
 
-The Responses API is **stateful server-side**. Each response is
-stored for 30 days and can be referenced via `previous_response_id`
-in the next request. This backend threads one id across turns:
+By default this backend sends `store: true`. OpenAI stores each response
+as application state for at least 30 days, so it can be referenced via
+`previous_response_id` in the next request. The backend threads one id
+across turns:
 
 ```elixir
 # Turn 1: fresh conversation, no previous_response_id
@@ -115,8 +117,25 @@ in the next request. This backend threads one id across turns:
 
 The `previous_response_id` lives on the session struct and is
 updated via `update_session/2` when each terminal `:result` event
-lands. `store: true` is sent on every request (the default) so
-responses remain referenceable.
+lands.
+
+Set `store: false` in the backend options to disable response storage:
+
+```elixir
+backend_opts = [system_prompt: "Be concise.", store: false]
+```
+
+The backend then keeps completed input and output items in its local
+session and resends them with each new prompt. It requests encrypted
+reasoning content for models that return reasoning items. No
+`previous_response_id` is sent in this mode. History grows with each
+turn, increasing request size and input-token usage; reset the session
+to discard it. Failed and incomplete turns are not added to history.
+This setting controls response application-state storage, not the
+separate abuse-monitoring logs described in OpenAI's
+[data controls](https://developers.openai.com/api/docs/guides/your-data).
+Use `store: false` explicitly for organizations where OpenAI enforces
+Zero Data Retention, so the backend uses local continuation.
 
 If the API rejects an established chain because the previous response is
 unavailable or the context window is exceeded, the failed turn returns
@@ -126,12 +145,11 @@ unavailable or the context window is exceeded, the failed turn returns
 without losing the agent process or its application state. It does not
 retry the failed prompt automatically. Set `truncation: "auto"` to let the
 API drop older items before the context window fills; the default is the
-API's `"disabled"` behavior. Other HTTP errors retain the chain. The backend
-always sends `store: true` and does not support local transcript replay for
-organizations where response storage is disabled.
+API's `"disabled"` behavior. Other HTTP errors retain the chain.
 
 Call `GenAgent.reset_session(name)` between turns to discard the current
-`previous_response_id` and start a fresh conversation on the next prompt.
+`previous_response_id` or local history and start a fresh conversation on
+the next prompt.
 The agent process and its application state remain in place. Reset returns
 `{:error, :busy}` during an active turn.
 Other HTTP failures use the same error struct with `:status`,
@@ -160,6 +178,8 @@ every turn after the first.
   `{:error, {:backend_start_failed, :missing_api_key}}`), unless a one-arity
   `:http_fn` is supplied.
 - `:model` -- model name. Defaults to `"gpt-5"`.
+- `:store` -- whether OpenAI stores responses for server-side continuation.
+  Defaults to `true`. Set `false` to replay local context each turn.
 - `:system_prompt` -- system prompt (string). Resent every turn as API
   `instructions`; `:instructions` and `:system` remain deprecated aliases.
 - `:reasoning_effort` -- an atom or string passed through as

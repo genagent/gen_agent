@@ -32,6 +32,7 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
         Keyword.take(opts, [
           :api_key,
           :model,
+          :store,
           :instructions,
           :max_output_tokens,
           :truncation,
@@ -188,6 +189,34 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
 
       # Turn 3: previous_response_id == "resp_002" (from turn 2).
       assert_receive {^ref, %{input: [%{content: "three"}], previous_response_id: "resp_002"}}
+    end
+
+    test "the state machine replays local history when store is false" do
+      observer = self()
+
+      http_fn = fn request ->
+        send(observer, {:request_body, request.body})
+        {:ok, api_response("answer")}
+      end
+
+      name = start_openai_agent(http_fn, store: false)
+      assert {:ok, %{text: "answer"}} = GenAgent.ask(name, "one")
+      assert {:ok, %{text: "answer"}} = GenAgent.ask(name, "two")
+
+      assert_receive {:request_body, first}
+      assert first.store == false
+      assert first.input == [%{role: "user", content: "one"}]
+      refute Map.has_key?(first, :previous_response_id)
+
+      assert_receive {:request_body, second}
+      assert second.store == false
+
+      assert second.input ==
+               first.input ++
+                 api_response("answer")["output"] ++
+                 [%{role: "user", content: "two"}]
+
+      refute Map.has_key?(second, :previous_response_id)
     end
 
     test "session_ids (client-generated) are stable across turns" do

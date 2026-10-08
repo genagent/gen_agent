@@ -5,38 +5,38 @@ defmodule GenAgent.Backends.OpenAI do
 
   Unlike the CLI-backed backends (`GenAgent.Backends.Claude`,
   `GenAgent.Backends.Codex`), this backend talks directly to an HTTP
-  API. Unlike `GenAgent.Backends.Anthropic`, it does **not** resend
-  the full conversation history on every turn -- OpenAI holds
-  conversation state server-side, and the backend threads one
-  `previous_response_id` value across turns.
+  API. By default, OpenAI holds conversation state server-side and the
+  backend threads one `previous_response_id` value across turns. With
+  `store: false`, the backend keeps the conversation in the session and
+  resends its input and output items on each turn instead.
 
-  This makes the OpenAI backend structurally simpler than the
-  Anthropic one: there's no messages array to manage, and
-  multi-turn just works as long as `update_session/2` runs after
-  each terminal `:result` event.
+  This backend uses response IDs for stored conversations and a local
+  list of input and output items for stateless conversations. Multi-turn
+  works as long as `update_session/2` runs after each terminal `:result`
+  event.
 
   ## How the two halves of a turn land in the session
 
-  1. `prompt/2` POSTs `{input: [{role: "user", content: prompt}],
-     previous_response_id: session.previous_response_id, instructions,
-     store: true}`, parses the response, and returns `{:ok, events,
-     session}`. The session itself is **not** mutated here -- the
-     request body is built from `session.previous_response_id` as it
-     stood entering the turn.
+  1. `prompt/2` builds the request from the incoming session, parses the
+     response, and returns `{:ok, events, session}`. For `store: false`,
+     the returned session also holds the completed turn pending delivery
+     of its terminal event.
   2. When the state machine delivers the terminal `:result` event,
-     it calls `update_session/2` with the event's data. The event's
-     `:response_id` becomes `session.previous_response_id` for the
-     next turn.
-  3. The next `prompt/2` uses the new `previous_response_id` and
-     OpenAI replays all prior context on the server side.
+     it calls `update_session/2` with the event's data. This records the
+     response ID or appends the completed input and output items to the
+     local history, depending on the `:store` setting.
+  3. With `store: true`, the next `prompt/2` uses the new
+     `previous_response_id` and OpenAI replays prior context. With
+     `store: false`, it sends the locally retained input and output items
+     instead; no `previous_response_id` is sent.
 
   If the API reports `previous_response_not_found` or a context-window
   failure for an established chain, the turn emits `{:conversation_lost,
   body}` as a terminal error and clears `previous_response_id`. The next
   prompt starts a fresh conversation without restarting the agent process.
   The failed prompt is not retried automatically. Other HTTP failures leave
-  the conversation ID intact. This backend requires stored responses; it
-  does not replay a local transcript for `store: false` organizations.
+  the conversation ID intact. In stateless mode, only successful turns are
+  added to the local history; resetting the session clears that history.
 
   ## Instructions do not persist across previous_response_id chains
 
@@ -73,6 +73,10 @@ defmodule GenAgent.Backends.OpenAI do
       `start_session/1` returns `{:error, :missing_api_key}` when neither
       provides a non-empty key, unless a one-arity `:http_fn` is supplied.
     * `:model` -- model name. Defaults to `"gpt-5"`.
+    * `:store` -- whether OpenAI stores responses for server-side continuation.
+      Defaults to `true`. With `false`, completed turns are held in the local
+      session and resent on each request; prompts grow with the conversation.
+      This does not change OpenAI's separate abuse-monitoring retention policy.
     * `:system_prompt` -- system prompt (string). Resent every turn as API
       `instructions`; `:instructions` and `:system` remain deprecated aliases.
     * `:reasoning_effort` -- an atom or string passed through as
@@ -115,6 +119,7 @@ defmodule GenAgent.Backends.OpenAI do
   @known_options [
     :api_key,
     :model,
+    :store,
     :system_prompt,
     :system,
     :instructions,
@@ -130,6 +135,7 @@ defmodule GenAgent.Backends.OpenAI do
   defstruct [
     :api_key,
     :model,
+    :store,
     :instructions,
     :reasoning_effort,
     :max_output_tokens,
@@ -138,7 +144,9 @@ defmodule GenAgent.Backends.OpenAI do
     :connect_timeout,
     :http_fn,
     :client_session_id,
-    :previous_response_id
+    :previous_response_id,
+    :history,
+    :pending_turn
   ]
 
   @typedoc "Passed through as `reasoning.effort`; accepted values depend on the model."
@@ -147,6 +155,7 @@ defmodule GenAgent.Backends.OpenAI do
   @type t :: %__MODULE__{
           api_key: String.t() | nil,
           model: String.t(),
+          store: boolean(),
           instructions: String.t() | nil,
           reasoning_effort: reasoning_effort(),
           max_output_tokens: pos_integer() | nil,
@@ -155,12 +164,15 @@ defmodule GenAgent.Backends.OpenAI do
           connect_timeout: timeout() | nil,
           http_fn: (map() -> {:ok, map()} | {:error, term()}),
           client_session_id: String.t(),
-          previous_response_id: String.t() | nil
+          previous_response_id: String.t() | nil,
+          history: [map()],
+          pending_turn: {[map()], [map()]} | nil
         }
 
   @impl GenAgent.Backend
   def start_session(opts) do
     with :ok <- validate_opts(opts),
+         :ok <- validate_store(Keyword.get(opts, :store, true)),
          :ok <- validate_truncation(Keyword.get(opts, :truncation)),
          {:ok, opts} <- normalize_opts(opts) do
       api_key = present(Keyword.get(opts, :api_key)) || present(System.get_env("OPENAI_API_KEY"))
@@ -190,6 +202,9 @@ defmodule GenAgent.Backends.OpenAI do
 
   defp validate_truncation(value) when value in [nil, "auto", "disabled"], do: :ok
   defp validate_truncation(value), do: {:error, {:invalid_option, :truncation, value}}
+
+  defp validate_store(value) when is_boolean(value), do: :ok
+  defp validate_store(value), do: {:error, {:invalid_option, :store, value}}
 
   defp normalize_opts(opts) do
     case normalize_aliases(opts, :system_prompt, [:instructions, :system]) do
@@ -222,6 +237,7 @@ defmodule GenAgent.Backends.OpenAI do
     session = %__MODULE__{
       api_key: api_key,
       model: Keyword.get(opts, :model, @default_model),
+      store: Keyword.get(opts, :store, true),
       instructions: Keyword.get(opts, :system_prompt),
       reasoning_effort: Keyword.get(opts, :reasoning_effort),
       max_output_tokens: Keyword.get(opts, :max_output_tokens),
@@ -230,7 +246,9 @@ defmodule GenAgent.Backends.OpenAI do
       connect_timeout: Keyword.get(opts, :connect_timeout),
       http_fn: http_fn,
       client_session_id: generate_session_id(),
-      previous_response_id: nil
+      previous_response_id: nil,
+      history: [],
+      pending_turn: nil
     }
 
     {:ok, session}
@@ -249,7 +267,7 @@ defmodule GenAgent.Backends.OpenAI do
     case session.http_fn.(request) do
       {:ok, body} ->
         with {:ok, events} <- parse_response(body, session.client_session_id) do
-          {:ok, events, session}
+          {:ok, events, remember_pending_turn(session, prompt, body, events)}
         end
 
       {:error, reason} ->
@@ -288,8 +306,19 @@ defmodule GenAgent.Backends.OpenAI do
   end
 
   @impl GenAgent.Backend
+  def update_session(%__MODULE__{store: false, pending_turn: {input, output}} = session, %{
+        text: _text
+      }) do
+    %{
+      session
+      | previous_response_id: nil,
+        history: session.history ++ input ++ output,
+        pending_turn: nil
+    }
+  end
+
   def update_session(%__MODULE__{} = session, %{response_id: response_id})
-      when is_binary(response_id) and response_id != "" do
+      when session.store and is_binary(response_id) and response_id != "" do
     %{session | previous_response_id: response_id}
   end
 
@@ -299,7 +328,7 @@ defmodule GenAgent.Backends.OpenAI do
     do: @impl(GenAgent.Backend)
 
   def reset_session(%__MODULE__{} = session),
-    do: {:ok, %{session | previous_response_id: nil}}
+    do: {:ok, %{session | previous_response_id: nil, history: [], pending_turn: nil}}
 
   @impl GenAgent.Backend
   def terminate_session(%__MODULE__{}), do: :ok
@@ -309,14 +338,17 @@ defmodule GenAgent.Backends.OpenAI do
   # ---------------------------------------------------------------------------
 
   defp build_request(%__MODULE__{} = session, prompt) do
+    input = [%{role: "user", content: prompt}]
+
     body =
       %{
         model: session.model,
-        input: [%{role: "user", content: prompt}],
-        store: true
+        input: if(session.store, do: input, else: session.history ++ input),
+        store: session.store
       }
       |> maybe_put(:instructions, session.instructions)
-      |> maybe_put(:previous_response_id, session.previous_response_id)
+      |> maybe_put_previous_response_id(session)
+      |> maybe_include_reasoning(session)
       |> maybe_put(:max_output_tokens, session.max_output_tokens)
       |> maybe_put(:truncation, session.truncation)
       |> maybe_put_reasoning(session.reasoning_effort)
@@ -336,11 +368,33 @@ defmodule GenAgent.Backends.OpenAI do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
+  defp maybe_put_previous_response_id(map, %__MODULE__{store: true} = session),
+    do: maybe_put(map, :previous_response_id, session.previous_response_id)
+
+  defp maybe_put_previous_response_id(map, _session), do: map
+
+  defp maybe_include_reasoning(map, %__MODULE__{store: false}),
+    do: Map.put(map, :include, ["reasoning.encrypted_content"])
+
+  defp maybe_include_reasoning(map, _session), do: map
+
+  defp remember_pending_turn(%__MODULE__{store: false} = session, prompt, body, events) do
+    if Enum.any?(events, &(&1.kind == :result)) do
+      input = [%{role: "user", content: prompt}]
+      output = if is_list(body["output"]), do: body["output"], else: []
+      %{session | pending_turn: {input, output}}
+    else
+      session
+    end
+  end
+
+  defp remember_pending_turn(session, _prompt, _body, _events), do: session
+
   defp maybe_put_reasoning(map, nil), do: map
   defp maybe_put_reasoning(map, effort), do: Map.put(map, :reasoning, %{effort: effort})
 
   defp conversation_lost_body(
-         %__MODULE__{previous_response_id: previous_id},
+         %__MODULE__{store: true, previous_response_id: previous_id},
          {:http_error, status, %{"error" => %{} = error} = body}
        )
        when is_binary(previous_id) and status in [400, 404] do
