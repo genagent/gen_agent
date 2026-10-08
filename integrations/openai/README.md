@@ -34,9 +34,10 @@ This backend targets the **Responses API** (`/v1/responses`), not
 Chat Completions. The Responses API is OpenAI's newer agent-first
 primitive and is a much cleaner fit for `GenAgent`:
 
-- Server-side state via `previous_response_id` means the session
-  struct only has to track one id across turns, not a messages
-  array.
+- With the default `store: true`, server-side state via
+  `previous_response_id` means the session tracks one id across turns.
+  With `store: false`, it keeps input and output items locally and
+  resends them on each turn.
 - Reasoning models (o1/o3/o4/gpt-5) surface reasoning items in the
   output array; this backend ignores them for text extraction but
   surfaces `reasoning_tokens` in the `:usage` event so patterns
