@@ -24,6 +24,9 @@ The [`claude_wrapper`](https://github.com/genagent/claude_wrapper_ex) and
 [`codex_wrapper`](https://github.com/genagent/codex_wrapper_ex) repositories
 remain independent.
 
+If you are deciding between calling a wrapper directly, running a GenAgent,
+or enqueuing an Oban job, see [Choosing a layer](guides/choosing_a_layer.md).
+
 Each agent is a `:gen_statem` process wrapping a persistent LLM session.
 Every interaction is a prompt-response turn, and the implementation decides
 what happens between turns.
@@ -276,6 +279,8 @@ policies; `:raw` retains the provider's original reason. A retry is always
 the application's decision.
 
 See the [Backends guide](guides/backends.md) for backend implementation rules and a capability and option comparison.
+For the tradeoffs between wrappers, GenAgent, and Oban workers, see
+[Choosing a layer](guides/choosing_a_layer.md).
 
 ## Public API
 

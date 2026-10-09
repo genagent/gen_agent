@@ -50,6 +50,7 @@ defmodule GenAgent.MixProject do
         "MIGRATION.md",
         "CHANGELOG.md",
         "LICENSE",
+        "guides/choosing_a_layer.md": [title: "Choosing a Layer"],
         "guides/backends.md": [title: "Backends"],
         "guides/patterns/overview.md": [title: "Patterns Overview"],
         "guides/patterns/solo.md": [title: "Solo"],
