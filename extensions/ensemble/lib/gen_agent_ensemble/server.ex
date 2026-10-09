@@ -40,14 +40,10 @@ defmodule GenAgentEnsemble.Server do
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
 
-    case GenServer.start(__MODULE__, opts, name: via(name)) do
-      {:ok, pid} = result ->
-        Process.link(pid)
-        result
-
-      error ->
-        error
-    end
+    # GenServer.start/3 keeps init failures as {:error, reason} returns rather
+    # than exit signals to the caller; init/1 links the caller itself so a
+    # caller that dies during a slow init still takes the session with it.
+    GenServer.start(__MODULE__, {:linked, self(), opts}, name: via(name))
   end
 
   def tell(name, prompt, opts \\ []), do: GenServer.call(via(name), {:tell, prompt, opts})
@@ -125,6 +121,19 @@ defmodule GenAgentEnsemble.Server do
   defp redact_status_reason(_), do: :redacted
 
   @impl true
+  def init({:linked, owner, opts}) do
+    # Link before starting the AgentTree. If the owner is already dead, the
+    # link kills this process before any children exist.
+    Process.link(owner)
+
+    with {:stop, _reason} = stop <- init(opts) do
+      # Unlinking first means the {:stop, reason} exit cannot kill the
+      # owner, which receives {:error, reason} from start_link/1 instead.
+      Process.unlink(owner)
+      stop
+    end
+  end
+
   def init(opts) do
     init_impl(opts)
   catch

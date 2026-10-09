@@ -143,6 +143,63 @@ defmodule GenAgentEnsemble.OwnershipTest do
     assert is_pid(start_solo(name))
   end
 
+  test "a caller that dies during initialization takes the session and its tree with it", %{
+    name: name
+  } do
+    # The session start event fires inside init/1 after the tree and agents
+    # exist, so blocking it parks a fully built session before start returns.
+    handler = "ownership-test-block-init:#{name}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:gen_agent_ensemble, :session, :start],
+        &__MODULE__.block_session_start/4,
+        {name, self()}
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler)
+
+      # On regression the server is still parked in init; release it so the
+      # setup cleanup can stop it.
+      case Registry.lookup(GenAgentEnsemble.Registry, name) do
+        [{server, _}] -> send(server, :release_session_start)
+        [] -> :ok
+      end
+    end)
+
+    opts = [name: name, strategy: Solo, opts: [agent: spec("worker")]]
+    caller = spawn(fn -> Ensemble.start_link(opts) end)
+
+    assert_receive {:session_start_blocked, server}, 2_000
+    assert [{^server, _}] = Registry.lookup(GenAgentEnsemble.Registry, name)
+    assert [{tree, _}] = Registry.lookup(GenAgentEnsemble.AgentTreeRegistry, name)
+    agent = GenAgent.whereis("#{name}/worker")
+    assert is_pid(agent)
+    refs = Enum.map([server, tree, agent], &Process.monitor/1)
+
+    Process.exit(caller, :kill)
+
+    Enum.each(refs, fn ref ->
+      assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
+    end)
+
+    assert_deregistered("#{name}/worker")
+    :telemetry.detach(handler)
+    assert is_pid(start_solo(name))
+  end
+
+  def block_session_start(_event, _measurements, %{session: session}, {session, test_pid}) do
+    send(test_pid, {:session_start_blocked, self()})
+
+    receive do
+      :release_session_start -> :ok
+    end
+  end
+
+  def block_session_start(_event, _measurements, _metadata, _config), do: :ok
+
   test "starting after an older crash removes its stale telemetry handler", %{name: name} do
     handler = "gen_agent_ensemble:#{name}"
 
