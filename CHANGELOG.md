@@ -114,7 +114,7 @@
 
 * refresh core task lifecycle and maintenance ([#28](https://github.com/genagent/gen_agent/issues/28)) ([de84bfc](https://github.com/genagent/gen_agent/commit/de84bfcf9daf4b21ce1ea9465fe4d7933040c2c7))
 
-## [0.2.0](https://github.com/genagent/gen_agent/compare/v0.1.0...v0.2.0) (2026-04-11)
+## [0.2.0](https://github.com/genagent/gen_agent/releases/tag/v0.2.0) (2026-04-11)
 
 
 ### Features
@@ -125,13 +125,12 @@
 ### Bug Fixes
 
 * defer notify events during :processing to preserve state mutations ([b7b647d](https://github.com/genagent/gen_agent/commit/b7b647d8b90b66a8f912fe29063017f71eb859fd))
-* defer notify events during :processing to preserve state mutations ([07d1d90](https://github.com/genagent/gen_agent/commit/07d1d90f992c570cbb455bca81caa646147fd835))
 
-## 0.1.0 (2026-04-10)
+## Initial development (unpublished, 2026-04-10)
 
-- Initial release.
 - GenAgent behaviour and supervision framework for long-running LLM
   agent processes modeled as OTP state machines.
-- Fix: defer notify events that arrive during `:processing` so
-  `handle_event/2` state mutations are not overwritten by the
-  in-flight task's result (PR #1).
+
+The initial 0.1.x development versions were not published to Hex or tagged.
+The first published release was 0.2.0; notify deferral appears once under
+that release's Bug Fixes above.
