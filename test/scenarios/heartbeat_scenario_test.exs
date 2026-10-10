@@ -10,12 +10,11 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
     * **State-based filtering at tick time** -- `handle_event(:tick, ...)`
       pattern-matches on agent state rather than event content, so the
       "should I dispatch" decision lives on the state guard.
-    * **Notify deferral under real wall-clock timing** -- ticks that
+    * **Notify deferral during a gated turn** -- ticks that
       arrive while the agent is in `:processing` must be drained
       against post-decision state, and observations buffered in the
-      same window must survive into that state. This is the only
-      pattern test that exercises the deferral path via a real
-      (`Process.sleep`-backed) slow mock stream.
+      same window must survive into that state. A separate supervised
+      wall-clock ticker tests periodic dispatch without guessing turn duration.
   """
 
   use ExUnit.Case, async: true
@@ -102,23 +101,15 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
 
   defp result(text), do: [Event.new(:result, %{text: text})]
 
-  # A mock script that sleeps before yielding its result event, so
-  # the agent spends real wall-clock time in `:processing`. Events
-  # notified during that window exercise the deferral path.
-  defp slow_result(text, sleep_ms) do
-    fn _prompt ->
-      Stream.resource(
-        fn -> false end,
-        fn
-          false ->
-            Process.sleep(sleep_ms)
-            {[Event.new(:result, %{text: text})], true}
-
-          true ->
-            {:halt, true}
-        end,
-        fn _ -> :ok end
-      )
+  # Keep ticking until the test has observed both responses. A finite number
+  # of ticks could finish before the second observation on a slow scheduler.
+  defp tick_until_stopped(name) do
+    receive do
+      :stop -> :ok
+    after
+      15 ->
+        GenAgent.notify(name, :tick)
+        tick_until_stopped(name)
     end
   end
 
@@ -176,7 +167,6 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
       name = unique("hb")
       start(name, [result("only")])
 
-      Process.sleep(50)
       assert GenAgent.status(name).state == :idle
       assert GenAgent.status(name).agent_state.summaries == []
 
@@ -199,13 +189,8 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
       name = unique("hb")
       start(name, [result("r1"), result("r2")], min_batch: 1)
 
-      ticker =
-        Task.async(fn ->
-          Enum.each(1..6, fn _ ->
-            Process.sleep(15)
-            GenAgent.notify(name, :tick)
-          end)
-        end)
+      ticker = start_supervised!({Task, fn -> tick_until_stopped(name) end})
+      monitor = Process.monitor(ticker)
 
       GenAgent.notify(name, {:observation, %{n: 1}})
       assert_receive {:responded, "r1"}, 1_000
@@ -213,7 +198,8 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
       GenAgent.notify(name, {:observation, %{n: 2}})
       assert_receive {:responded, "r2"}, 1_000
 
-      Task.await(ticker)
+      send(ticker, :stop)
+      assert_receive {:DOWN, ^monitor, :process, ^ticker, :normal}
 
       s = GenAgent.status(name).agent_state
       assert s.summaries == ["r1", "r2"]
@@ -221,7 +207,7 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
     end
   end
 
-  describe "notify deferral under real-timer ticks" do
+  describe "notify deferral during a gated turn" do
     test "observation+tick during :processing survive into post-turn state" do
       name = unique("hb")
 
@@ -230,7 +216,9 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
       # land in state for the second tick to see obs=[:during] and
       # dispatch -- if the mutation were lost, the second tick would
       # see obs=[] and skip instead.
-      start(name, [slow_result("first", 100), result("deferred")], min_batch: 1)
+      start(name, [Mock.gate(:heartbeat_deferral, result("first")), result("deferred")],
+        min_batch: 1
+      )
 
       GenAgent.notify(name, {:observation, %{k: :pre}})
       assert_receive {:observed, %{k: :pre}}, 500
@@ -239,7 +227,7 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
       assert_receive {:tick_dispatched, 1}, 500
 
       # Confirm we're mid-turn before firing the deferred events.
-      Process.sleep(20)
+      assert_receive {:mock_blocked, :heartbeat_deferral, turn_pid}
       assert GenAgent.status(name).state == :processing
 
       # These two notifies arrive while the slow turn is still in
@@ -249,6 +237,11 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
       # obs=[:during] -> dispatch.
       GenAgent.notify(name, {:observation, %{k: :during}})
       GenAgent.notify(name, :tick)
+      # Same caller's status request follows both casts, so they have entered
+      # the deferred queue before the task is released.
+      assert GenAgent.status(name).state == :processing
+      assert GenAgent.status(name).agent_state.observations == []
+      send(turn_pid, {:mock_release, :heartbeat_deferral})
 
       assert_receive {:responded, "first"}, 1_000
       assert_receive {:observed, %{k: :during}}, 500

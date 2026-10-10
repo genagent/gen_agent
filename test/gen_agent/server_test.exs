@@ -1141,29 +1141,17 @@ defmodule GenAgent.ServerTest do
     end
 
     test "is called on watchdog timeout", %{task_sup: task_sup} do
-      slow = fn _ ->
-        Stream.resource(
-          fn -> :s end,
-          fn
-            :s ->
-              Process.sleep(1_000)
-              {[Event.new(:result, %{text: "never"})], :d}
-
-            :d ->
-              {:halt, :d}
-          end,
-          fn _ -> :ok end
-        )
-      end
-
       pid =
         start_server(
           task_sup,
-          [slow],
+          [Mock.gate(:watchdog_error, result_events("never"))],
           [notify_pid: self()],
           watchdog_ms: 50
         )
 
+      # The watchdog starts when the server enters :processing. It may fire
+      # before the task is scheduled, so gate entry is not a prerequisite for
+      # observing the error callback.
       assert {:error, :timeout} = ask(pid, "go")
 
       assert_receive {:test_agent, :handle_error, {_ref, :timeout}}
@@ -1171,25 +1159,13 @@ defmodule GenAgent.ServerTest do
     end
 
     test "is called on interrupt with reason :interrupted", %{task_sup: task_sup} do
-      slow = fn _ ->
-        Stream.resource(
-          fn -> :s end,
-          fn
-            :s ->
-              Process.sleep(500)
-              {[Event.new(:result, %{text: "never"})], :d}
-
-            :d ->
-              {:halt, :d}
-          end,
-          fn _ -> :ok end
+      pid =
+        start_server(task_sup, [Mock.gate(:interrupt_error, result_events("never"))],
+          notify_pid: self()
         )
-      end
-
-      pid = start_server(task_sup, [slow], notify_pid: self())
 
       caller = Task.async(fn -> ask(pid, "start") end)
-      Process.sleep(20)
+      assert_receive {:mock_blocked, :interrupt_error, _turn_pid}
       interrupt(pid)
 
       assert {:error, :interrupted} = Task.await(caller)
@@ -1260,22 +1236,14 @@ defmodule GenAgent.ServerTest do
   # ---------------------------------------------------------------------------
 
   describe "notify deferral during :processing" do
-    defp slow_result(text, delay_ms) do
-      fn _prompt ->
-        Stream.resource(
-          fn -> :start end,
-          fn
-            :start ->
-              Process.sleep(delay_ms)
-              {[Event.new(:result, %{text: text})], :done}
-
-            :done ->
-              {:halt, :done}
-          end,
-          fn _ -> :ok end
-        )
-      end
+    # Sends the notifies, then uses a same-caller status call as a barrier:
+    # the server has handled every cast before it answers.
+    defp notify_all(pid, events) do
+      Enum.each(events, &notify(pid, &1))
+      assert status(pid).state == :processing
     end
+
+    defp release(turn_pid, tag), do: send(turn_pid, {:mock_release, tag})
 
     test "handle_event mutations during an in-flight turn are preserved",
          %{task_sup: task_sup} do
@@ -1291,24 +1259,23 @@ defmodule GenAgent.ServerTest do
       pid =
         start_server(
           task_sup,
-          [slow_result("done", 200)],
+          [Mock.gate(:count, result_events("done"))],
           event_handler: event_handler,
           extra: %{events: 0}
         )
 
-      # Kick off a slow turn so we have a :processing window.
+      # Hold the turn open so we have a :processing window.
       task = Task.async(fn -> ask(pid, "slow") end)
-      Process.sleep(30)
+      assert_receive {:mock_blocked, :count, turn_pid}
       assert status(pid).state == :processing
 
       # Fire 5 notifies while the turn is in flight.
-      for i <- 1..5 do
-        :gen_statem.cast(pid, {:notify, {:ping, i}})
-      end
+      notify_all(pid, for(i <- 1..5, do: {:ping, i}))
+      assert status(pid).agent_state.extra.events == 0
 
       # Turn completes, drain happens, all 5 events should have run.
+      release(turn_pid, :count)
       {:ok, _} = Task.await(task)
-      Process.sleep(50)
 
       assert status(pid).agent_state.extra.events == 5
     end
@@ -1323,20 +1290,18 @@ defmodule GenAgent.ServerTest do
       pid =
         start_server(
           task_sup,
-          [slow_result("ok", 150)],
+          [Mock.gate(:order, result_events("ok"))],
           event_handler: event_handler,
           extra: %{log: []}
         )
 
       task = Task.async(fn -> ask(pid, "go") end)
-      Process.sleep(30)
+      assert_receive {:mock_blocked, :order, turn_pid}
 
-      for i <- 1..4 do
-        :gen_statem.cast(pid, {:notify, {:ev, i}})
-      end
+      notify_all(pid, for(i <- 1..4, do: {:ev, i}))
 
+      release(turn_pid, :order)
       {:ok, _} = Task.await(task)
-      Process.sleep(50)
 
       assert status(pid).agent_state.extra.log == [{:ev, 1}, {:ev, 2}, {:ev, 3}, {:ev, 4}]
     end
@@ -1355,24 +1320,27 @@ defmodule GenAgent.ServerTest do
         start_server(
           task_sup,
           [
-            slow_result("first", 150),
+            Mock.gate(:followup, [Event.new(:result, %{text: "first"})]),
             [Event.new(:result, %{text: "followup"})]
           ],
-          event_handler: event_handler
+          event_handler: event_handler,
+          notify_pid: self()
         )
 
       task = Task.async(fn -> ask(pid, "first") end)
-      Process.sleep(30)
+      assert_receive {:mock_blocked, :followup, turn_pid}
 
       # Fire a notify that wants to dispatch a new prompt. It should
       # be buffered, drained after the current turn finishes, then
       # enqueued to the mailbox and dispatched via :process_next.
-      :gen_statem.cast(pid, {:notify, {:do_followup, "second"}})
+      notify_all(pid, [{:do_followup, "second"}])
 
+      release(turn_pid, :followup)
       {:ok, first} = Task.await(task)
       assert first.text == "first"
 
-      Process.sleep(300)
+      # The follow-up has completed once its response callback has run.
+      assert_receive {:test_agent, :handle_response, {_ref, %{text: "followup"}}}
 
       # The followup prompt should have run, so the responses list
       # includes both turns.
@@ -1391,17 +1359,18 @@ defmodule GenAgent.ServerTest do
       pid =
         start_server(
           task_sup,
-          [slow_result("ok", 150)],
+          [Mock.gate(:halt, result_events("ok"))],
           event_handler: event_handler
         )
 
       task = Task.async(fn -> ask(pid, "go") end)
-      Process.sleep(30)
+      assert_receive {:mock_blocked, :halt, turn_pid}
 
-      :gen_statem.cast(pid, {:notify, :shutdown})
+      notify_all(pid, [:shutdown])
+      refute status(pid).halted
 
+      release(turn_pid, :halt)
       {:ok, _} = Task.await(task)
-      Process.sleep(50)
 
       assert status(pid).halted
     end
@@ -1424,10 +1393,10 @@ defmodule GenAgent.ServerTest do
           extra: %{log: []}
         )
 
-      :gen_statem.cast(pid, {:notify, :first})
-      :gen_statem.cast(pid, {:notify, :second})
-      Process.sleep(50)
+      notify(pid, :first)
+      notify(pid, :second)
 
+      # The status call is ordered after both notify casts.
       assert status(pid).agent_state.extra.log == [:first, :second]
     end
 
@@ -1438,14 +1407,21 @@ defmodule GenAgent.ServerTest do
         {:noreply, %{state | extra: Map.put(state.extra, :events, count + 1)}}
       end
 
-      # A slow stream that raises -- exercises the finish_error path.
-      slow_raising = fn _prompt ->
+      # A stream that blocks until released and then raises -- exercises
+      # the finish_error path.
+      owner = self()
+
+      blocked_raising = fn _prompt ->
         Stream.resource(
           fn -> :s end,
-          fn
-            :s ->
-              Process.sleep(150)
-              raise "boom"
+          fn :s ->
+            send(owner, {:raise_blocked, self()})
+
+            receive do
+              :raise_now -> raise "boom"
+            after
+              5_000 -> raise "raising fixture was not released"
+            end
           end,
           fn _ -> :ok end
         )
@@ -1454,18 +1430,18 @@ defmodule GenAgent.ServerTest do
       pid =
         start_server(
           task_sup,
-          [slow_raising],
+          [blocked_raising],
           event_handler: event_handler,
           extra: %{events: 0}
         )
 
       task = Task.async(fn -> ask(pid, "go") end)
-      Process.sleep(30)
+      assert_receive {:raise_blocked, turn_pid}
 
-      for _ <- 1..3, do: :gen_statem.cast(pid, {:notify, :ping})
+      notify_all(pid, [:ping, :ping, :ping])
 
+      send(turn_pid, :raise_now)
       assert {:error, {:task_crashed, _}} = Task.await(task)
-      Process.sleep(50)
 
       assert status(pid).agent_state.extra.events == 3
     end

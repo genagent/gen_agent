@@ -1,6 +1,8 @@
 defmodule GenAgent.PendingInputsTest do
   use ExUnit.Case, async: false
 
+  @moduletag capture_log: true
+
   alias GenAgent.Event
 
   defmodule Backend do

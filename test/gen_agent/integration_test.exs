@@ -10,6 +10,7 @@ defmodule GenAgent.IntegrationTest do
 
   @moduletag capture_log: true
 
+  alias GenAgent.Backends.Mock
   alias GenAgent.Event
   import GenAgent.TestDownAssertions
 
@@ -756,28 +757,18 @@ defmodule GenAgent.IntegrationTest do
 
   describe "interrupt/1" do
     test "cancels an in-flight ask and returns {:error, :interrupted}" do
-      slow = fn _ ->
-        Stream.resource(
-          fn -> :s end,
-          fn
-            :s ->
-              Process.sleep(500)
-              {[Event.new(:result, %{text: "never"})], :d}
+      gate =
+        Mock.gate(:integration_interrupt, [Event.new(:result, %{text: "never"})])
 
-            :d ->
-              {:halt, :d}
-          end,
-          fn _ -> :ok end
-        )
-      end
-
-      name = start_simple([slow])
+      name = start_simple([gate])
 
       caller = Task.async(fn -> GenAgent.ask(name, "start") end)
-      Process.sleep(20)
+      assert_receive {:mock_blocked, :integration_interrupt, turn_pid}
+      monitor = Process.monitor(turn_pid)
       assert :ok = GenAgent.interrupt(name)
 
       assert {:error, :interrupted} = Task.await(caller)
+      assert_receive {:DOWN, ^monitor, :process, ^turn_pid, :killed}
     end
   end
 
