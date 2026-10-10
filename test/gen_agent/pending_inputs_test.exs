@@ -4,6 +4,7 @@ defmodule GenAgent.PendingInputsTest do
   @moduletag capture_log: true
 
   alias GenAgent.Event
+  import GenAgent.TestPollingAssertions
 
   defmodule Backend do
     @behaviour GenAgent.Backend
@@ -102,7 +103,7 @@ defmodule GenAgent.PendingInputsTest do
     send(second_task, :release)
     assert_receive {:started, "third", third_task}, 1_000
     send(third_task, :release)
-    assert_eventually(fn -> match?({:ok, :completed, _}, GenAgent.poll(name, third)) end)
+    wait_until(fn -> match?({:ok, :completed, _}, GenAgent.poll(name, third)) end, timeout: 300)
   end
 
   test "byte caps and zero caps reject pending prompts and notifications" do
@@ -199,7 +200,10 @@ defmodule GenAgent.PendingInputsTest do
     send(task, :release)
     assert_receive {:started, "next", next_task}, 1_000
     send(next_task, :release)
-    assert_eventually(fn -> match?({:ok, :completed, _}, GenAgent.poll(name, next_ref)) end)
+
+    wait_until(fn -> match?({:ok, :completed, _}, GenAgent.poll(name, next_ref)) end,
+      timeout: 300
+    )
   end
 
   test "deferred callback prompts observe queue bounds and report overload" do
@@ -257,18 +261,6 @@ defmodule GenAgent.PendingInputsTest do
                  Agent,
                  [name: name, backend: Backend, observer: self()] ++ [{key, value}]
                )
-    end
-  end
-
-  defp assert_eventually(fun, attempts \\ 30)
-  defp assert_eventually(fun, 0), do: assert(fun.())
-
-  defp assert_eventually(fun, attempts) do
-    if fun.() do
-      :ok
-    else
-      Process.sleep(10)
-      assert_eventually(fun, attempts - 1)
     end
   end
 end
