@@ -74,7 +74,9 @@ defmodule GenAgentEnsemble.Strategies.SwitchboardTest do
     {:ok, t2} = GenAgentEnsemble.tell(name, "q2", agent: "alice")
     {:ok, t3} = GenAgentEnsemble.tell(name, "q3", agent: "alice")
 
-    Process.sleep(100)
+    for token <- [t1, t2, t3] do
+      assert {:ok, %{text: _}} = GenAgentEnsemble.await(name, token, 5_000)
+    end
 
     {:ok, inbox} = GenAgentEnsemble.inbox(name)
     results = Map.new(inbox, fn {tok, {:ok, %{text: text}}} -> {tok, text} end)
@@ -94,7 +96,8 @@ defmodule GenAgentEnsemble.Strategies.SwitchboardTest do
     {:ok, ta} = GenAgentEnsemble.tell(name, "qa", agent: "alice")
     {:ok, tb} = GenAgentEnsemble.tell(name, "qb", agent: "bob")
 
-    Process.sleep(50)
+    assert {:ok, %{text: "alice:qa"}} = GenAgentEnsemble.await(name, ta, 5_000)
+    assert {:ok, %{text: "bob:qb"}} = GenAgentEnsemble.await(name, tb, 5_000)
 
     {:ok, inbox} = GenAgentEnsemble.inbox(name)
     results = Map.new(inbox, fn {tok, {:ok, %{text: text}}} -> {tok, text} end)
@@ -151,5 +154,100 @@ defmodule GenAgentEnsemble.Strategies.SwitchboardTest do
     Process.exit(GenAgent.whereis("#{name}/alice"), :kill)
 
     assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
+  end
+
+  test "idle agent death removes only that agent; survivor keeps serving", %{name: name} do
+    {:ok, pid} =
+      start_session(name, [
+        {"alice", [echo("alice")]},
+        {"bob", [echo("bob"), echo("bob")]}
+      ])
+
+    session = Process.monitor(pid)
+
+    Process.exit(GenAgent.whereis("#{name}/alice"), :kill)
+
+    info = await_fleet(name, ["bob"])
+    assert info.pending_per_agent == %{"bob" => 0}
+
+    assert {:error, {:unknown_agent, "alice"}} =
+             GenAgentEnsemble.ask(name, "hi", agent: "alice")
+
+    {:ok, token} = GenAgentEnsemble.tell(name, "later", agent: "alice")
+    assert {:error, {:unknown_agent, "alice"}} = GenAgentEnsemble.await(name, token, 5_000)
+
+    assert {:ok, %{text: "bob:one"}} = GenAgentEnsemble.ask(name, "one", agent: "bob")
+    assert {:ok, %{text: "bob:two"}} = GenAgentEnsemble.ask(name, "two", agent: "bob")
+    assert Process.alive?(pid)
+    refute_received {:DOWN, ^session, :process, _, _}
+  end
+
+  test "busy agent death fails running and queued tokens; survivor keeps serving", %{name: name} do
+    alice =
+      {"alice", GenAgentEnsemble.ControlledAgent,
+       [backend: GenAgentEnsemble.ControlledBackend, observer: self(), tag: "alice"]}
+
+    {:ok, pid} =
+      GenAgentEnsemble.start_link(
+        name: name,
+        strategy: Switchboard,
+        opts: [agents: [alice, {"bob", TestAgent, [backend: Mock, scripts: [echo("bob")]]}]]
+      )
+
+    session = Process.monitor(pid)
+
+    {:ok, running} = GenAgentEnsemble.tell(name, "first", agent: "alice")
+    assert_receive {:controlled_prompt, "alice", "first", task}, 2_000
+    task_ref = Process.monitor(task)
+    {:ok, queued} = GenAgentEnsemble.tell(name, "second", agent: "alice")
+
+    {:ok, info} = GenAgentEnsemble.status(name)
+    assert info.pending_per_agent["alice"] == 2
+
+    Process.exit(GenAgent.whereis("#{name}/alice"), :kill)
+
+    assert {:error, {:agent_down, :killed}} = GenAgentEnsemble.await(name, running, 5_000)
+    assert {:error, {:agent_down, :killed}} = GenAgentEnsemble.await(name, queued, 5_000)
+
+    # Release the test backend explicitly; agent death is not a claim that
+    # every external provider task has settled.
+    send(task, {:result, "discarded after agent death"})
+    assert_receive {:DOWN, ^task_ref, :process, ^task, _}, 2_000
+
+    {:ok, info} = GenAgentEnsemble.status(name)
+    assert info.agents == ["bob"]
+    assert info.pending_per_agent == %{"bob" => 0}
+
+    assert {:error, {:unknown_agent, "alice"}} =
+             GenAgentEnsemble.ask(name, "again", agent: "alice")
+
+    assert {:ok, %{text: "bob:alive"}} = GenAgentEnsemble.ask(name, "alive", agent: "bob")
+    assert Process.alive?(pid)
+    refute_received {:DOWN, ^session, :process, _, _}
+  end
+
+  # The Server learns of a death through its own monitor, which is not ordered
+  # against the test's view, so observe the removal with a bounded deadline.
+  defp await_fleet(name, agents) do
+    deadline = System.monotonic_time(:millisecond) + 2_000
+    await_fleet(name, agents, deadline)
+  end
+
+  defp await_fleet(name, agents, deadline) do
+    {:ok, info} = GenAgentEnsemble.status(name)
+
+    cond do
+      info.agents == agents ->
+        info
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("fleet never became #{inspect(agents)}: #{inspect(info)}")
+
+      true ->
+        receive do
+        after
+          1 -> await_fleet(name, agents, deadline)
+        end
+    end
   end
 end
