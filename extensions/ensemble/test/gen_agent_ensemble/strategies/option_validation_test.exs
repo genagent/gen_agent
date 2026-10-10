@@ -48,6 +48,43 @@ defmodule GenAgentEnsemble.Strategies.OptionValidationTest do
       end
     end
 
+    test "rejects malformed :agents specs naming only the index" do
+      secret_opts = [{:api_key, "s3cret"}, :flag]
+
+      for bad <- [
+            :nope,
+            [spec("a"), :bad, spec("c")],
+            [spec("a"), {"b", TestAgent}, spec("c")],
+            [spec("a"), {"b", "NotAnAtom", []}, spec("c")],
+            [spec("a"), {"b", TestAgent, :not_a_list}, spec("c")],
+            [spec("a"), {"b", TestAgent, secret_opts}, spec("c")]
+          ] do
+        error =
+          assert_raise ArgumentError, fn ->
+            Consensus.init(consensus_opts(agents: bad))
+          end
+
+        refute error.message =~ "s3cret"
+      end
+
+      error =
+        assert_raise ArgumentError, ~r/:agents entry 1 must be/, fn ->
+          Consensus.init(consensus_opts(agents: [spec("a"), {"b", TestAgent, secret_opts}]))
+        end
+
+      refute error.message =~ "s3cret"
+    end
+
+    test "malformed specs are reported before the count and duplicate checks" do
+      assert_raise ArgumentError, ~r/:agents entry 0 must be/, fn ->
+        Consensus.init(consensus_opts(agents: [:bad]))
+      end
+
+      assert_raise ArgumentError, ~r/duplicate agent names/, fn ->
+        Consensus.init(consensus_opts(agents: [spec("a"), spec("a")]))
+      end
+    end
+
     test "accepts defaults and custom options" do
       assert {:ok, state, specs} = Consensus.init(consensus_opts([]))
       assert state.rounds == 3
@@ -160,6 +197,7 @@ defmodule GenAgentEnsemble.Strategies.OptionValidationTest do
   test "malformed options fail public startup before creating an agent tree" do
     cases = [
       {Consensus, consensus_opts(rounds: nil)},
+      {Consensus, consensus_opts(agents: [spec("a"), {"b", TestAgent, [:bare]}])},
       {Debate, debate_opts(reply: :bogus)},
       {Supervisor, supervisor_opts(decomposer: nil)},
       {Pool, pool_opts(worker_count: 0)},
