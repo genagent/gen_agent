@@ -138,8 +138,9 @@ to your verdict space.
     * `{:synthesize, fun}` -- call `fun.(summary)` where summary
       is `%{status: :converged | :diverged, verdict: atom | nil,
       rounds: integer, threshold: threshold_spec, responses:
-      [{agent, verdict_or_nil, rationale, raw_text}]}`. Useful for
-      piping the decision out as structured data.
+      [{agent, verdict_or_nil, rationale, raw_text}]}`. The returned
+      value must be a binary; the structured decision is always in
+      `response.metadata.consensus` (see "Reading the decision").
 
 ## Canonical workflow
 
@@ -183,7 +184,30 @@ iex> text
 The callback receives the summary map and can read `summary.status` and
 `summary.verdict` to choose the reply. It must return a binary, which becomes
 `response.text`. Returning a map or any other non-binary fails the token with
-`{:invalid_strategy_result, :synthesizer_reply}` in legacy mode.
+`{:invalid_strategy_result, :synthesizer_reply}` in legacy mode. Do not put the
+decision in `text`; read it from the typed metadata below.
+
+### Reading the decision
+
+Every successful response, whatever the `:reply`, carries the decision in
+`response.metadata.consensus`. `response.text` stays a binary.
+
+```elixir
+{:ok, %{metadata: %{consensus: consensus}}} = E.ask("arch-review", proposal)
+
+case consensus do
+  %{status: :converged, verdict: :approve} -> :ship
+  %{status: :converged, verdict: verdict} -> {:changes, verdict}
+  %{status: :diverged, votes: votes} -> {:no_consensus, votes}
+end
+```
+
+`consensus` is `%{status: :converged | :diverged, verdict: atom | nil,
+rounds: integer, threshold: threshold_spec, votes: [%{agent: name,
+verdict: atom | nil, rationale: String.t()}]}`. `votes` follow the configured
+agent order; a `nil` verdict is an abstain. Raw agent text is not included.
+Failed asks return errors and carry no decision, and each queued turn gets its
+own metadata.
 
 ### Async
 

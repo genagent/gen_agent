@@ -64,6 +64,27 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
           raw_text}, ...]` in agent order; `verdict` is nil when
           diverged.
 
+  ## Typed decision
+
+  Every successful response (converged or diverged, with any `:reply`)
+  carries the decision in `response.metadata.consensus` while
+  `response.text` stays a binary:
+
+      %{
+        status: :converged | :diverged,
+        verdict: atom | nil,
+        rounds: pos_integer,
+        threshold: :unanimous | :majority | {:at_least, n},
+        votes: [%{agent: name, verdict: atom | nil, rationale: String.t()}]
+      }
+
+  `votes` are in configured agent order; `verdict: nil` is an abstain
+  (unparseable or tolerated turn error). Failed turns return errors and
+  carry no decision.
+
+      {:ok, %{metadata: %{consensus: %{status: :converged, verdict: verdict}}}} =
+        GenAgentEnsemble.ask(name, prompt)
+
   ## Concurrency
 
   One consensus at a time per ensemble. Additional `tell`/`ask`
@@ -416,26 +437,31 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   defp finalize(token, status, verdict, rounds_used, pending, state) do
     responses = collect_responses(state.agents, pending)
 
+    summary = %{
+      status: status,
+      verdict: verdict,
+      rounds: rounds_used,
+      threshold: state.threshold,
+      responses: responses
+    }
+
     result =
       case state.reply_kind do
         :synthesis ->
           {:ok, render_synthesis(status, verdict, rounds_used, state.threshold, responses)}
 
         {:synthesize, fun} ->
-          summary = %{
-            status: status,
-            verdict: verdict,
-            rounds: rounds_used,
-            threshold: state.threshold,
-            responses: responses
-          }
-
           Guard.call(:synthesizer_reply, fun, [summary], &is_binary/1)
       end
 
     case result do
       {:ok, text} ->
-        response = %Response{text: text, usage: Usage.to_usage(state.usage)}
+        response = %Response{
+          text: text,
+          usage: Usage.to_usage(state.usage),
+          metadata: %{consensus: decision(summary)}
+        }
+
         state = %{state | phase: :idle, partial: [], errors: []}
         {ops, state} = maybe_start_next(state, [{:reply, token, response}])
         {:ok, ops, state}
@@ -443,6 +469,21 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
       {:error, reason} ->
         fail_round(token, reason, state, :synthesizer_reply, nil)
     end
+  end
+
+  # Typed decision exposed at `response.metadata.consensus`. Raw agent text is
+  # left out; `votes` are in configured agent order.
+  defp decision(summary) do
+    %{
+      status: summary.status,
+      verdict: summary.verdict,
+      rounds: summary.rounds,
+      threshold: summary.threshold,
+      votes:
+        for {agent, verdict, rationale, _raw} <- summary.responses do
+          %{agent: agent, verdict: verdict, rationale: rationale}
+        end
+    }
   end
 
   defp collect_responses(agents, pending) do
