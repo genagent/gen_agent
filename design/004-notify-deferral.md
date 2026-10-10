@@ -1,6 +1,6 @@
 # Design Note 004: Notify Deferral During `:processing`
 
-Status: Implemented (PR #1, merged into main before v0.1.1)
+Status: Implemented (PR #1, merged into main during initial development)
 Retroactive. Captures the bug and the design choice behind the fix.
 
 ## The bug
@@ -17,7 +17,8 @@ against the state **as it was at dispatch time**, not the current
 `data.agent_state`) and wrote it over everything the notify had
 just set.
 
-First surfaced in `Playground.Watcher`, where an event-driven agent
+First surfaced in `Playground.Watcher`, a private development example
+that is not part of the public package, where an event-driven agent
 would visibly lose counter mutations. Post-hoc analysis confirmed
 `Switchboard`'s summary-update and ack-inbox paths were also latently
 vulnerable; `Supervisor` had a narrow race on `worker_result`

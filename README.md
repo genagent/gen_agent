@@ -171,11 +171,16 @@ entry point, see the [local GenAgent app example](examples/gen_agent_app/README.
 An agent is a state machine with two states:
 
 ```
-idle --- ask/tell/notify ---> processing
+idle --- ask/tell ---------------------------> processing
+idle --- notify -> handle_event/2 -> {:prompt, ..} -> processing
+idle --- notify -> handle_event/2 -> {:noreply, ..} -> idle (no turn)
                                   |
                                   v
 idle <--- handle_response --- processing (turn done)
 ```
+
+A notification only starts a turn when `handle_event/2` returns
+`{:prompt, text, state}`; `{:noreply, state}` leaves the agent idle.
 
 - **:idle** -- waiting for work. On enter, drains the mailbox (queued
   prompts) in FIFO order.
