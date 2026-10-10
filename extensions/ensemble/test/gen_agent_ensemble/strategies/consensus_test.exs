@@ -581,6 +581,175 @@ defmodule GenAgentEnsemble.Strategies.ConsensusTest do
     end
   end
 
+  describe "typed decision metadata" do
+    test "converged reply exposes decision while text stays a binary", %{name: name} do
+      {:ok, _} =
+        start_consensus(
+          name,
+          [
+            {"a", [say("fine.\nVERDICT: APPROVE")]},
+            {"b", [say("ok.\nVERDICT: APPROVE")]},
+            {"c", [say("no.\nVERDICT: REJECT")]}
+          ],
+          threshold: :majority,
+          rounds: 1
+        )
+
+      {:ok, resp} = GenAgentEnsemble.ask(name, "merge?", timeout: 5_000)
+
+      assert is_binary(resp.text)
+      assert resp.text =~ "CONSENSUS: :approve (2 of 3 agreed via majority, round 1)"
+      assert GenAgentEnsemble.IEx.text({:ok, resp}) == resp.text
+
+      assert ExUnit.CaptureIO.capture_io(fn -> GenAgentEnsemble.IEx.puts({:ok, resp}) end) ==
+               resp.text <> "\n"
+
+      assert resp.metadata.consensus == %{
+               status: :converged,
+               verdict: :approve,
+               rounds: 1,
+               threshold: :majority,
+               votes: [
+                 %{agent: "a", verdict: :approve, rationale: "fine."},
+                 %{agent: "b", verdict: :approve, rationale: "ok."},
+                 %{agent: "c", verdict: :reject, rationale: "no."}
+               ]
+             }
+    end
+
+    test "diverged reply with an abstain keeps nil verdict and agent order", %{name: name} do
+      {:ok, _} =
+        start_consensus(
+          name,
+          [
+            {"a", [say("yes.\nVERDICT: APPROVE")]},
+            {"b", [say("no.\nVERDICT: REJECT")]},
+            {"c", [say("i dunno")]}
+          ],
+          threshold: :unanimous,
+          rounds: 1
+        )
+
+      {:ok, resp} = GenAgentEnsemble.ask(name, "merge?", timeout: 5_000)
+
+      assert resp.text =~ "DIVERGED AFTER 1 ROUND"
+      c = resp.metadata.consensus
+      assert %{status: :diverged, verdict: nil, rounds: 1, threshold: :unanimous} = c
+
+      assert Enum.map(c.votes, &{&1.agent, &1.verdict}) ==
+               [{"a", :approve}, {"b", :reject}, {"c", nil}]
+
+      assert Enum.at(c.votes, 2).rationale == "i dunno"
+    end
+
+    test "custom string synthesizer keeps its text and gets metadata", %{name: name} do
+      {:ok, _} =
+        start_consensus(
+          name,
+          [
+            {"a", [say("yes.\nVERDICT: APPROVE")]},
+            {"b", [say("yes.\nVERDICT: APPROVE")]}
+          ],
+          threshold: :unanimous,
+          rounds: 1,
+          reply: {:synthesize, fn summary -> "Decision: #{summary.verdict}" end}
+        )
+
+      {:ok, resp} = GenAgentEnsemble.ask(name, "merge?", timeout: 5_000)
+
+      assert resp.text == "Decision: approve"
+      assert %{status: :converged, verdict: :approve, rounds: 1} = resp.metadata.consensus
+    end
+
+    test "invalid synthesizer map still fails and returns no decision", %{name: name} do
+      {:ok, _} =
+        start_consensus(
+          name,
+          [
+            {"a", [say("yes.\nVERDICT: APPROVE")]},
+            {"b", [say("yes.\nVERDICT: APPROVE")]}
+          ],
+          threshold: :unanimous,
+          rounds: 1,
+          reply: {:synthesize, fn summary -> %{verdict: summary.verdict} end}
+        )
+
+      assert {:error, {:invalid_strategy_result, :synthesizer_reply}} =
+               GenAgentEnsemble.ask(name, "merge?", timeout: 5_000)
+    end
+
+    test "usage is preserved alongside metadata", %{name: name} do
+      usage_say = fn text ->
+        fn _prompt ->
+          [Event.new(:usage, %{input_tokens: 3}), Event.new(:result, %{text: text})]
+        end
+      end
+
+      {:ok, _} =
+        start_consensus(
+          name,
+          [
+            {"a", [usage_say.("x.\nVERDICT: APPROVE")]},
+            {"b", [usage_say.("x.\nVERDICT: APPROVE")]}
+          ],
+          threshold: :unanimous,
+          rounds: 1
+        )
+
+      {:ok, resp} = GenAgentEnsemble.ask(name, "merge?", timeout: 5_000)
+
+      assert resp.usage.input_tokens == 6
+      assert resp.metadata.consensus.status == :converged
+    end
+
+    test "queued turns carry their own decision", %{name: name} do
+      {:ok, _} =
+        start_consensus(
+          name,
+          [
+            {"a", [say("one.\nVERDICT: APPROVE"), say("two.\nVERDICT: REJECT")]},
+            {"b", [say("one.\nVERDICT: APPROVE"), say("two.\nVERDICT: REJECT")]}
+          ],
+          threshold: :unanimous,
+          rounds: 1
+        )
+
+      {:ok, t1} = GenAgentEnsemble.tell(name, "one")
+      {:ok, t2} = GenAgentEnsemble.tell(name, "two")
+
+      r1 = await_completion(name, t1)
+      r2 = await_completion(name, t2)
+
+      assert r1.metadata.consensus.verdict == :approve
+      assert r2.metadata.consensus.verdict == :reject
+      assert Enum.map(r2.metadata.consensus.votes, & &1.rationale) == ["two.", "two."]
+    end
+
+    test "failed turn returns an error and the next turn has only its own decision",
+         %{name: name} do
+      {:ok, _} =
+        start_consensus(
+          name,
+          [
+            {"a", [gated_error(:a, :boom), say("x.\nVERDICT: APPROVE")]},
+            {"b", [say("x.\nVERDICT: APPROVE"), say("x.\nVERDICT: APPROVE")]}
+          ],
+          threshold: :unanimous,
+          rounds: 1
+        )
+
+      {:ok, t1} = GenAgentEnsemble.tell(name, "one")
+      assert_receive {:reached, :a, pid}, 2_000
+      {:ok, t2} = GenAgentEnsemble.tell(name, "two")
+      send(pid, :release)
+
+      assert {:error, {"a", :boom}} = GenAgentEnsemble.await(name, t1, 5_000)
+      assert {:ok, resp} = GenAgentEnsemble.await(name, t2, 5_000)
+      assert resp.metadata.consensus.status == :converged
+      assert Enum.all?(resp.metadata.consensus.votes, &(&1.verdict == :approve))
+    end
+  end
+
   test "agent death halts the session", %{name: name} do
     {:ok, pid} =
       start_consensus(name, [
