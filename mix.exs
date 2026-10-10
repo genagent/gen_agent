@@ -34,6 +34,7 @@ defmodule GenAgent.MixProject do
   defp deps do
     [
       {:telemetry, "~> 1.0"},
+      {:stream_data, "~> 1.2", only: :test},
       {:ex_doc, "~> 0.35", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
