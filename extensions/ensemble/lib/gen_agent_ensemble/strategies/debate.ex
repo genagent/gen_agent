@@ -15,8 +15,8 @@ defmodule GenAgentEnsemble.Strategies.Debate do
       specs. Names must be distinct.
     * `:first` (optional) -- name of the agent who speaks first.
       Defaults to the first entry in `:agents`.
-    * `:rounds` (optional) -- hard cap on total agent responses.
-      Defaults to 6 (three exchanges per side).
+    * `:rounds` (optional) -- hard cap on total agent responses; a
+      positive integer. Defaults to 6 (three exchanges per side).
     * `:converge` (optional) -- `(String.t() -> boolean())`. Called
       on each response's text starting from turn 2. Returning `true`
       ends the debate immediately. Defaults to `fn _ -> false end`
@@ -87,8 +87,13 @@ defmodule GenAgentEnsemble.Strategies.Debate do
     end
 
     rounds = Keyword.get(opts, :rounds, 6)
+    validate_rounds!(rounds)
+
     converge = Keyword.get(opts, :converge, fn _ -> false end)
+    validate_converge!(converge)
+
     reply_kind = Keyword.get(opts, :reply, :transcript)
+    validate_reply!(reply_kind)
 
     state = %__MODULE__{
       a: a_name,
@@ -102,6 +107,28 @@ defmodule GenAgentEnsemble.Strategies.Debate do
     }
 
     {:ok, state, specs}
+  end
+
+  defp validate_rounds!(rounds) do
+    unless is_integer(rounds) and rounds > 0 do
+      raise ArgumentError, "Debate :rounds must be a positive integer, got: #{inspect(rounds)}"
+    end
+  end
+
+  defp validate_converge!(converge) do
+    unless is_function(converge, 1) do
+      raise ArgumentError,
+            "Debate :converge must be a 1-arity function, got: #{inspect(converge)}"
+    end
+  end
+
+  defp validate_reply!(reply_kind) do
+    unless reply_kind in [:transcript, :last] or
+             match?({:synthesize, f} when is_function(f, 1), reply_kind) do
+      raise ArgumentError,
+            "Debate :reply must be :transcript, :last, or {:synthesize, fun/1}, got: " <>
+              inspect(reply_kind)
+    end
   end
 
   @impl true
