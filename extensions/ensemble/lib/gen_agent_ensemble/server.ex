@@ -1,12 +1,15 @@
 defmodule GenAgentEnsemble.Server do
   @moduledoc false
 
-  use GenServer
+  # This process owns a supervisor tree. Let each child's configured shutdown
+  # budget apply rather than cutting off the whole tree after five seconds.
+  use GenServer, shutdown: :infinity
   require Logger
 
   @cancel_child_timeout 5_000
 
   defstruct [
+    :owner,
     :strategy_mod,
     :strategy_state,
     :session_name,
@@ -126,11 +129,18 @@ defmodule GenAgentEnsemble.Server do
     # link kills this process before any children exist.
     Process.link(owner)
 
-    with {:stop, _reason} = stop <- init(opts) do
-      # Unlinking first means the {:stop, reason} exit cannot kill the
-      # owner, which receives {:error, reason} from start_link/1 instead.
-      Process.unlink(owner)
-      stop
+    case init(opts) do
+      {:ok, state} ->
+        # Keep init interruptible by owner death, then trap exits so runtime
+        # shutdown runs terminate/2 and waits for the owned tree's callbacks.
+        Process.flag(:trap_exit, true)
+        {:ok, %{state | owner: owner}}
+
+      {:stop, _reason} = stop ->
+        # Unlinking first means the {:stop, reason} exit cannot kill the
+        # owner, which receives {:error, reason} from start_link/1 instead.
+        Process.unlink(owner)
+        stop
     end
   end
 
@@ -400,6 +410,18 @@ defmodule GenAgentEnsemble.Server do
     {:noreply, remove_waiter(state, mref, {:error, :timeout})}
   end
 
+  # GenServer.start/3 does not make the manually linked owner the OTP parent.
+  # Handle its exits explicitly, including :normal, and fail with our tree
+  # rather than continuing to route work to dead supervisors.
+  defp handle_info_impl({:EXIT, pid, reason}, state)
+       when pid == state.owner or pid == state.agent_tree do
+    {:stop, reason, state}
+  end
+
+  defp handle_info_impl({:EXIT, _pid, reason}, state) when reason != :normal do
+    {:stop, reason, state}
+  end
+
   defp handle_info_impl({:DOWN, mref, :process, _pid, _reason}, state)
        when is_map_key(state.waiter_monitors, mref) do
     {:noreply, remove_waiter(state, mref, nil)}
@@ -508,6 +530,9 @@ defmodule GenAgentEnsemble.Server do
 
   @impl true
   def terminate(reason, state) do
+    # Stop admitting callers while cleanup runs. The AgentTree keeps its own
+    # registration until it dies, so a same-name restart still waits for it.
+    Registry.unregister(GenAgentEnsemble.Registry, state.session_name)
     Enum.each(state.waiter_monitors, fn {mref, _} -> remove_waiter(state, mref, nil) end)
     emit_unfinished_work(state)
     outcome = if state.halted, do: :halted, else: if(reason == :normal, do: :ok, else: :error)
