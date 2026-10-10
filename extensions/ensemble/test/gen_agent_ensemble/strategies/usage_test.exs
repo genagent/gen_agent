@@ -168,7 +168,9 @@ defmodule GenAgentEnsemble.Strategies.UsageTest do
              by_agent: %{"a" => %{input_tokens: 4}, "c" => %{output_tokens: 7}}
            }
 
-    assert %{result | usage: last.usage} == last
+    assert %{result | usage: last.usage, metadata: last.metadata} == last
+    assert List.last(result.metadata.pipeline.stages) == {"c", last}
+    assert result.metadata.pipeline.total_duration_ms == 42
   end
 
   test "Consensus counts abstains and both rounds in a divergence and custom synthesis" do
