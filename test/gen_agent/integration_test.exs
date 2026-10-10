@@ -13,6 +13,7 @@ defmodule GenAgent.IntegrationTest do
   alias GenAgent.Backends.Mock
   alias GenAgent.Event
   import GenAgent.TestDownAssertions
+  import GenAgent.TestPollingAssertions
 
   defmodule SimpleAgent do
     use GenAgent
@@ -1038,22 +1039,4 @@ defmodule GenAgent.IntegrationTest do
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
-
-  defp wait_until(fun, timeout \\ 1_000, interval \\ 10) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_wait(fun, deadline, interval)
-  end
-
-  defp do_wait(fun, deadline, interval) do
-    if fun.() do
-      :ok
-    else
-      if System.monotonic_time(:millisecond) >= deadline do
-        flunk("wait_until timeout")
-      else
-        Process.sleep(interval)
-        do_wait(fun, deadline, interval)
-      end
-    end
-  end
 end
