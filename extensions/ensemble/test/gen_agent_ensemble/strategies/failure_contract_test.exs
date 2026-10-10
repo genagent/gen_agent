@@ -19,7 +19,7 @@ defmodule GenAgentEnsemble.Strategies.FailureContractTest do
   defp opts(Sup) do
     [
       coordinator: {"c", TestAgent, []},
-      worker_template: {"w", TestAgent, []},
+      worker_template: {"w", TestAgent, [backend: GenAgent.Backends.Mock]},
       decomposer: fn _ -> ["one", "two"] end
     ]
   end

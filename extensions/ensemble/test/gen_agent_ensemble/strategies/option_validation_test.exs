@@ -157,6 +157,44 @@ defmodule GenAgentEnsemble.Strategies.OptionValidationTest do
       end
     end
 
+    test "rejects worker options that are not a keyword list with :backend" do
+      secret = "s3cret"
+
+      for bad <- [
+            [],
+            [scripts: []],
+            [{:api_key, secret}],
+            [{:api_key, secret}, :flag],
+            [{:backend, Mock} | secret],
+            :not_a_list,
+            %{backend: Mock, api_key: secret},
+            nil
+          ] do
+        error =
+          assert_raise ArgumentError, ~r/:worker_template options/, fn ->
+            Supervisor.init(supervisor_opts(worker_template: {"w", TestAgent, bad}))
+          end
+
+        refute error.message =~ secret
+      end
+    end
+
+    test "invalid worker options fail zero-work startup before any agent tree" do
+      name = "optval-#{System.unique_integer([:positive])}"
+
+      opts =
+        supervisor_opts(
+          worker_template: {"w", TestAgent, [api_key: "s3cret"]},
+          decomposer: fn _ -> [] end
+        )
+
+      assert {:error, {:init_failed, :error, ArgumentError}} =
+               GenAgentEnsemble.start_link(name: name, strategy: Supervisor, opts: opts)
+
+      assert Registry.lookup(GenAgentEnsemble.Registry, name) == []
+      assert Registry.lookup(GenAgentEnsemble.AgentTreeRegistry, name) == []
+    end
+
     test "accepts defaults and 1- or 2-arity synthesizers" do
       assert {:ok, state, [{"coord", _, _}]} = Supervisor.init(supervisor_opts([]))
       assert state.max_subtasks == 10

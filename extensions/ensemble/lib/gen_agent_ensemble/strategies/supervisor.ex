@@ -27,6 +27,9 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
       coordinator agent.
     * `:worker_template` (required) -- `{name_prefix, module, opts}`.
       Workers are named `"\#{prefix}-1"`, `"\#{prefix}-2"`, ...
+      `opts` must be a keyword list containing `:backend`; otherwise init
+      raises `ArgumentError`, even if the decomposer would never produce
+      work. The error never includes the options.
     * `:decomposer` (required) -- `(String.t() -> [String.t()])` that
       turns coordinator output into sub-prompts.
     * `:synthesizer` (optional) -- a function accepting ordered
@@ -100,6 +103,11 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     decomposer = Keyword.fetch!(opts, :decomposer)
     synthesizer = Keyword.get(opts, :synthesizer, &default_synthesizer/2)
     max_subtasks = Keyword.get(opts, :max_subtasks, @default_max_subtasks)
+
+    unless Keyword.keyword?(w_opts) and Keyword.has_key?(w_opts, :backend) do
+      raise ArgumentError,
+            "Supervisor :worker_template options must be a keyword list containing :backend"
+    end
 
     unless is_function(decomposer, 1) do
       raise ArgumentError,
