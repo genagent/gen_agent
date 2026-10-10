@@ -54,7 +54,7 @@ defmodule GenAgent.Telemetry do
   | Event | Measurements | Metadata that may contain application data |
   | --- | --- | --- |
   | `[:gen_agent, :prompt, :start]` | `system_time` (native unit) | `agent`, `ref`, `attempt`, `prompt`, `original_prompt`, `rewritten`, `agent_state` |
-  | `[:gen_agent, :prompt, :stop]` | `duration` (backend-reported milliseconds) | `agent`, `ref`, `attempt`, `agent_state` |
+  | `[:gen_agent, :prompt, :stop]` | `duration` (core-measured prompt-task elapsed milliseconds) | `agent`, `ref`, `attempt`, `agent_state` |
   | `[:gen_agent, :prompt, :error]` | `system_time` (native unit); `duration` (milliseconds) for dispatched turns | `agent`, `ref`, `attempt`, raw `reason`, `agent_state` |
   | `[:gen_agent, :event, :received]` | `system_time` (native unit) | `agent`, raw `event` |
   | `[:gen_agent, :state, :changed]` | `system_time` (native unit) | `agent`, `from`, `to` |
