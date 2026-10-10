@@ -98,6 +98,14 @@ config :gen_agent_ensemble,
   ]
 ```
 
+Config-declared ensembles are started under `GenAgentEnsemble.Supervisor`
+with a `:transient` restart policy. An explicit `GenAgentEnsemble.stop/1`
+or a strategy halt exits normally and the ensemble stays stopped until the
+application is restarted; an abnormal crash of the session is restarted.
+Sessions you start yourself keep the caller-owned child spec (`Server`
+defaults to `:permanent`). Recovery after a crash of the
+`GenAgentEnsemble.Supervisor` itself is not provided.
+
 Programmatic use:
 
 ```elixir
