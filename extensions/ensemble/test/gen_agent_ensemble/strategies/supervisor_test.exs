@@ -3,6 +3,7 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
 
   alias GenAgent.Backends.Mock
   alias GenAgent.Event
+  alias GenAgentEnsemble.Queue
   alias GenAgentEnsemble.Strategies.Supervisor, as: SupStrat
   alias GenAgentEnsemble.TestAgent
 
@@ -233,6 +234,101 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
            ]
 
     assert state.phase == {:decomposing, :t2}
+  end
+
+  defp init_strategy(extra \\ []) do
+    {:ok, state, _} =
+      SupStrat.init(
+        Keyword.merge(
+          [
+            coordinator: {"coord", TestAgent, []},
+            worker_template: {"w", TestAgent, []},
+            decomposer: decomposer_newlines()
+          ],
+          extra
+        )
+      )
+
+    state
+  end
+
+  # Two workers fanned out for :t1 with :t2 queued behind it.
+  defp fanned_out_state do
+    state = init_strategy()
+    {:ok, _, state} = SupStrat.handle_tell("first", [], :t1, state)
+    {:ok, [], state} = SupStrat.handle_tell("second", [], :t2, state)
+    response = %GenAgent.Response{text: "x\ny"}
+    {:ok, _ops, state} = SupStrat.handle_response("coord", response, state)
+    state
+  end
+
+  test "death of a completed worker preserves the active run and queue" do
+    state = fanned_out_state()
+    done = %GenAgent.Response{text: "one"}
+
+    {:ok, [], state} = SupStrat.handle_response("w-1", done, state)
+
+    assert {:ok, [], state} = SupStrat.handle_agent_down("w-1", :killed, state)
+    assert {:fanning_out, :t1, _} = state.phase
+    assert Queue.len(state.queue) == 1
+
+    assert {:ok, ops, state} =
+             SupStrat.handle_response("w-2", %GenAgent.Response{text: "two"}, state)
+
+    assert [{:reply, :t1, %GenAgent.Response{}} | _] = ops
+    assert state.phase == {:decomposing, :t2}
+  end
+
+  test "death of a pending worker fails the run and queued requests" do
+    state = fanned_out_state()
+
+    {:ok, [], state} = SupStrat.handle_response("w-1", %GenAgent.Response{text: "one"}, state)
+
+    assert {:ok, ops, state} = SupStrat.handle_agent_down("w-2", :killed, state)
+    failure = {:worker_down, "w-2", :killed}
+
+    assert Enum.sort(ops) ==
+             Enum.sort([
+               {:stop, "w-1"},
+               {:reply_error, :t1, failure},
+               {:reply_error, :t2, failure}
+             ])
+
+    assert state.phase == :idle
+    assert Queue.len(state.queue) == 0
+  end
+
+  test "reply precedes worker stops and stops precede the next queued dispatch" do
+    state = fanned_out_state()
+
+    {:ok, [], state} = SupStrat.handle_response("w-1", %GenAgent.Response{text: "one"}, state)
+    {:ok, ops, _state} = SupStrat.handle_response("w-2", %GenAgent.Response{text: "two"}, state)
+
+    assert [{:reply, :t1, _}, stop_a, stop_b, {:dispatch, "coord", "second", :t2}] = ops
+    assert Enum.sort([stop_a, stop_b]) == [{:stop, "w-1"}, {:stop, "w-2"}]
+  end
+
+  test "init rejects a coordinator name that collides with a generated worker name" do
+    for name <- ["w-1", "w-10"] do
+      assert_raise ArgumentError, ~r/collides/, fn ->
+        init_strategy(coordinator: {name, TestAgent, []}, max_subtasks: 10)
+      end
+    end
+  end
+
+  test "init allows similar coordinator names outside the generated range" do
+    for name <- ["w-0", "w-11", "w-01", "w-x", "w", "w-1-b", "other-1"] do
+      assert %SupStrat{} = init_strategy(coordinator: {name, TestAgent, []}, max_subtasks: 10)
+    end
+  end
+
+  test "collision check does not allocate for a huge max_subtasks" do
+    assert %SupStrat{} =
+             init_strategy(coordinator: {"coord", TestAgent, []}, max_subtasks: 1_000_000_000)
+
+    assert_raise ArgumentError, ~r/collides/, fn ->
+      init_strategy(coordinator: {"w-999999999", TestAgent, []}, max_subtasks: 1_000_000_000)
+    end
   end
 
   test "second tell queues behind an in-flight fan-out", %{name: name} do
