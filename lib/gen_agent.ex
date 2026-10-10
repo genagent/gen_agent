@@ -201,6 +201,26 @@ defmodule GenAgent do
   | Backend `prompt/2,3`, its event stream, `update_session/2` | prompt task |
   | Backend `start_session/1`, `terminate_session/1`, `checkpoint_session/2` | agent process |
 
+  ### Callback contracts
+
+  In this table, `decision` means `t:callback_return/0` (a follow-up prompt
+  must be a binary). Log levels describe GenAgent's callback failure logs.
+  Raise/throw/exit refers to failures caught during callback execution;
+  an untrappable process kill bypasses these handlers.
+
+  | Callback | Process / context | Valid returns | Invalid return | Raise / throw / exit |
+  | --- | --- | --- | --- | --- |
+  | `c:init_agent/1` | agent, initialization | `{:ok, backend_opts, state}`, `{:error, reason}` | startup fails with `{:init_agent_failed, value}` | error log; startup fails with `{:init_failed, kind, failure_kind}` |
+  | `c:pre_run/1` | agent, after initialization | `{:ok, state}`, `{:error, reason}` | error log; stops with `:pre_run_invalid` | error log; stops with `{:pre_run_crashed, failure_kind}` |
+  | `c:pre_turn/2` | agent, before dispatch | `t:pre_turn_return/0` | warning log; rejects with `:pre_turn_invalid` | warning log; external request gets `:pre_turn_skipped`; generated prompt calls `handle_error/3` with `{:pre_turn_crashed, failure_kind}` |
+  | `c:handle_response/3` | agent, successful turn | decision | error log; stops agent | error log; stops agent |
+  | `c:handle_error/3` | agent, failed turn or generated-prompt rejection | decision | error log; keeps prior state and original error | error log; keeps prior state and original error |
+  | `c:handle_event/2`, `c:handle_info/2` | agent, immediate or buffered delivery | decision | error log; keeps prior state | error log; keeps prior state |
+  | `c:handle_stream_event/2` | prompt task, each backend event | any term (next state) | no return validation | task fails; agent calls `handle_error/3` with `{:task_crashed, reason}` |
+  | `c:post_turn/3` | agent, after decision | `{:ok, state}` | warning log; keeps post-decision state and transition | warning log; keeps post-decision state and transition |
+  | `c:post_run/1` | agent, transition to halted | `:ok` (return ignored) | ignored without logging | warning log; halt completes |
+  | `c:terminate_agent/2` | agent, termination | any term (ignored) | no return validation | error log; cleanup continues |
+
   `current_name/0` returns the registered agent name in callbacks on either
   process, including `init_agent/1` and `handle_stream_event/2`. It returns
   `nil` outside those processes. The name is kept separate from the options
@@ -440,9 +460,15 @@ defmodule GenAgent do
   @doc """
   An external event arrived via `notify/2`. Optional.
 
-  Exceptions and malformed returns are logged and treated as
-  `{:noreply, previous_state}`, including when the notification was buffered
-  during a turn.
+  Also used by `notify_ack/3`. Notifications admitted during a turn are
+  buffered, then delivered in arrival order after the decision callback and
+  `c:post_turn/3`, using their resulting state. When idle, including while
+  halted, notifications are handled immediately. A prompt returned while
+  halted is queued until `resume/1`; state updates still apply.
+
+  Raises, throws, exits, and malformed returns are logged at error level
+  and treated as `{:noreply, previous_state}`, including when the
+  notification was buffered during a turn.
   """
   @callback handle_event(event :: term(), agent_state()) :: callback_return()
 
@@ -495,14 +521,15 @@ defmodule GenAgent do
   otherwise freeze the starter: cloning a repo, creating a worktree,
   spinning up a sandbox, fetching secrets.
 
-  Return `{:ok, state}` to continue, or `{:error, reason}` to halt the
+  Return `{:ok, state}` to continue, or `{:error, reason}` to stop the
   agent before any turn runs. On error, `c:terminate_agent/2` is called
   with `{:pre_run_failed, reason}`.
 
-  Crashes are wrapped: the agent halts with
-  `{:pre_run_crashed, exception}` and `c:terminate_agent/2` is called
+  Raises, throws, and exits are logged at error level: the agent stops with
+  `{:pre_run_crashed, failure_kind}` and `c:terminate_agent/2` is called
   with that reason. A malformed return stops the agent with
-  `:pre_run_invalid`.
+  `:pre_run_invalid` and is logged at error level. `failure_kind` is the
+  exception module for a raise, or `:other` for a caught throw or exit.
 
   Default implementation: `{:ok, state}`.
   """
@@ -557,8 +584,9 @@ defmodule GenAgent do
 
   Fires after each turn, AFTER `c:handle_response/3` or
   `c:handle_error/3` has returned its decision. The hook sees the
-  post-decision state. Runs regardless of which decision callback ran
-  or what it returned.
+  post-decision state. Runs for valid decisions and for failures normalized
+  by `c:handle_error/3` to `{:noreply, previous_state}`. A failure in
+  `c:handle_response/3` stops the agent before this hook runs.
 
   The outcome is `{:ok, response}` for a successful turn or
   `{:error, reason}` for a failed one -- the same data delivered to
@@ -571,9 +599,9 @@ defmodule GenAgent do
   For pure observation, prefer telemetry handlers on
   `[:gen_agent, :prompt, :stop]`.
 
-  Crashes or malformed returns are logged and the server continues
-  with the transition the decision callback chose. The turn is not
-  unwound.
+  Raises, throws, exits, or malformed returns are logged at warning level
+  and the server continues with the transition the decision callback chose,
+  retaining the post-decision state. The turn is not unwound.
 
   Default implementation: `{:ok, state}`.
   """
@@ -613,9 +641,9 @@ defmodule GenAgent do
   in an external tracker. The semantic distinction from
   `c:terminate_agent/2` is "completion" vs "termination."
 
-  Crashes are caught: a warning is logged and the halt transition
-  still completes normally. A failing last-chance hook does not keep a
-  dead agent alive.
+  Raises, throws, and exits are caught: a warning is logged and the halt
+  transition still completes normally, leaving the agent alive and halted.
+  The return value is ignored without validation or logging.
 
   Default implementation: `:ok`.
   """
@@ -1216,6 +1244,8 @@ defmodule GenAgent do
   `agent_state`. While a turn is processing, that value is the server's
   latest retained state, not a live read of state inside the prompt task.
   Use `runtime_snapshot/2` for a bounded metadata-only view.
+  The legacy keys `:state` and `:queued` correspond to `:phase` and
+  `:pending_prompts` in `runtime_snapshot/2`, respectively.
   Returns `{:error, :not_found}` if the agent name is not registered.
   """
   @spec status(name(), timeout()) ::

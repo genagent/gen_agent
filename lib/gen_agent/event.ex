@@ -22,6 +22,7 @@ defmodule GenAgent.Event do
       `%{reason: term()}`.
 
   Exactly one terminal event (`:result` or `:error`) is emitted per turn.
+  Custom atom kinds are also accepted by `new/2` and are nonterminal.
   """
 
   @type kind ::
@@ -32,6 +33,7 @@ defmodule GenAgent.Event do
           | :usage
           | :result
           | :error
+          | atom()
 
   @type t :: %__MODULE__{
           kind: kind(),

@@ -2,8 +2,12 @@ defmodule GenAgent.Response do
   @moduledoc """
   The result of a completed prompt turn, delivered to `c:GenAgent.handle_response/3`.
 
-  A `Response` is built by the state machine after a terminal event
-  (`:result` or `:error`) arrives from the backend. It carries:
+  During an agent turn, a `Response` is built after the backend's terminal
+  `:result` event and delivered to `c:GenAgent.handle_response/3`. A terminal
+  `:error` event or a synchronous backend error instead dispatches its reason
+  to `c:GenAgent.handle_error/3`; no `Response` is delivered on that path.
+  `from_events/2` can also build a response outside the agent lifecycle,
+  including from an event list containing an `:error` event. It carries:
 
     * `:prompt` -- the prompt actually sent to the backend after `pre_turn/2`
       rewriting. It is `nil` for responses built outside an agent turn.

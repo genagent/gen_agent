@@ -2068,13 +2068,12 @@ defmodule GenAgent.Server do
   end
 
   # ---------------------------------------------------------------------------
-  # Lifecycle hook wrappers. Each wraps a user callback in try/rescue/catch
-  # per the semantics in design/005-lifecycle-hooks.md:
+  # Lifecycle hook wrappers catch raises, throws, and exits:
   #
-  #   pre_run raise   -> {:crashed, ex}           (server stops)
-  #   pre_turn raise  -> :skip                    (skip turn, back to idle)
-  #   post_turn raise -> {:ok, state}             (log + continue transition)
-  #   post_run raise  -> :ok                      (log + terminate normally)
+  #   pre_run failure   -> {:crashed, failure}   (error log; server stops)
+  #   pre_turn failure  -> {:crashed, kind}      (warning log; reject dispatch)
+  #   post_turn failure -> {:ok, state}          (warning log; keep transition)
+  #   post_run failure  -> :ok                   (warning log; complete halt)
   # ---------------------------------------------------------------------------
 
   defp safely_pre_run(name, module, state) do
