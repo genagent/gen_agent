@@ -169,7 +169,7 @@ defmodule GenAgentEnsemble.ShutdownTest do
 
   test "supervisor termination waits for agent and backend callbacks", %{name: name} do
     {:ok, server} =
-      DynamicSupervisor.start_child(GenAgentEnsemble.Supervisor, {Server, options(name)})
+      DynamicSupervisor.start_child(GenAgentEnsemble.Supervisor, {Ensemble, options(name)})
 
     {agent, refs} = owned_processes(server, name)
 
@@ -188,7 +188,7 @@ defmodule GenAgentEnsemble.ShutdownTest do
     opts = Keyword.put(opts, :opts, agents: [{agent_name, module, agent_opts}])
 
     {:ok, server} =
-      DynamicSupervisor.start_child(GenAgentEnsemble.Supervisor, {Server, opts})
+      DynamicSupervisor.start_child(GenAgentEnsemble.Supervisor, {Ensemble, opts})
 
     {agent, refs} = owned_processes(server, name)
     {^server, ref} = List.keyfind(refs, server, 0)

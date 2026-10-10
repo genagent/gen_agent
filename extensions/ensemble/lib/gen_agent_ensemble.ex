@@ -43,6 +43,30 @@ defmodule GenAgentEnsemble do
   defdelegate start_link(opts), to: GenAgentEnsemble.Server
 
   @doc """
+  Return a child specification for supervising an ensemble with
+  `{GenAgentEnsemble, opts}`. Accepts the same options as `start_link/1`,
+  including the required `:name`.
+
+  The child ID is `{GenAgentEnsemble, name}`, allowing distinct named
+  ensembles under one supervisor without creating atoms. Restart is
+  `:transient`: explicit stops and strategy halts stay stopped, while
+  abnormal exits restart the ensemble. Shutdown is `:infinity` so the
+  owned agent tree can finish within its configured shutdown budgets.
+
+  Use `Supervisor.child_spec/2` to override these defaults when needed.
+  """
+  @spec child_spec(keyword()) :: Supervisor.child_spec()
+  def child_spec(opts) do
+    %{
+      id: {__MODULE__, Keyword.fetch!(opts, :name)},
+      start: {__MODULE__, :start_link, [opts]},
+      restart: :transient,
+      shutdown: :infinity,
+      type: :worker
+    }
+  end
+
+  @doc """
   Fire-and-forget prompt. Returns `{:ok, token}` immediately; use
   `poll/2` or `inbox/1` to retrieve the response later.
   """
