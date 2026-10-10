@@ -36,7 +36,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
 
   ## Limits
 
-  Only one in-flight prompt at a time in this first version. If a
+  Only one in-flight prompt at a time. If a
   second `tell`/`ask` arrives while a fan-out is in progress, it is
   queued and dispatched after the current one completes.
 
@@ -199,7 +199,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
 
   defp reject_decomposition(token, reason, state) do
     state = %{state | phase: :idle, subtasks: []}
-    {ops, state} = maybe_prepend_next(state, [{:reply_error, token, reason}])
+    {ops, state} = maybe_append_next(state, [{:reply_error, token, reason}])
     {:ok, ops, state}
   end
 
@@ -221,7 +221,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
         response = %{response | usage: Usage.to_usage(state.usage)}
         # Nothing to fan out; reply immediately with coordinator's text.
         state = %{state | phase: :idle, subtasks: []}
-        {ops, state} = maybe_prepend_next(state, [{:reply, token, response}])
+        {ops, state} = maybe_append_next(state, [{:reply, token, response}])
         {:ok, ops, state}
 
       _ ->
@@ -268,7 +268,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     stop_ops = Enum.map(progress, fn {worker, _} -> {:stop, worker} end)
 
     state = %{state | phase: :idle, subtasks: []}
-    {ops, state} = maybe_prepend_next(state, [reply_op | stop_ops])
+    {ops, state} = maybe_append_next(state, [reply_op | stop_ops])
     {:ok, ops, state}
   end
 
@@ -279,7 +279,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
 
   defp synthesize(state, args), do: {:ok, apply(state.synthesizer, args)}
 
-  defp maybe_prepend_next(%{phase: :idle} = state, ops_so_far) do
+  defp maybe_append_next(%{phase: :idle} = state, ops_so_far) do
     case Queue.pop(state.queue) do
       {:ok, {token, prompt}, rest} ->
         state = %{
@@ -302,7 +302,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     case state.phase do
       {:decomposing, token} when agent == state.coordinator ->
         state = %{state | phase: :idle, subtasks: []}
-        {ops, state} = maybe_prepend_next(state, [{:reply_error, token, reason}])
+        {ops, state} = maybe_append_next(state, [{:reply_error, token, reason}])
         {:ok, ops, state}
 
       {:fanning_out, token, progress} ->
@@ -310,7 +310,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
         state = %{state | phase: :idle, subtasks: []}
 
         {ops, state} =
-          maybe_prepend_next(state, stop_ops ++ [{:reply_error, token, {agent, reason}}])
+          maybe_append_next(state, stop_ops ++ [{:reply_error, token, {agent, reason}}])
 
         {:ok, ops, state}
 
@@ -337,7 +337,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
 
   defp cancel_run(state, stop_ops) do
     state = %{state | phase: :idle, subtasks: [], usage: Usage.new()}
-    {ops, state} = maybe_prepend_next(state, stop_ops)
+    {ops, state} = maybe_append_next(state, stop_ops)
     {:ok, ops, state}
   end
 

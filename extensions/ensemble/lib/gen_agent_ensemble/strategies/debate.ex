@@ -65,7 +65,6 @@ defmodule GenAgentEnsemble.Strategies.Debate do
     :rounds,
     :converge,
     :reply_kind,
-    agents: MapSet.new(),
     phase: :idle,
     queue: nil,
     usage: Usage.new()
@@ -113,7 +112,6 @@ defmodule GenAgentEnsemble.Strategies.Debate do
       rounds: rounds,
       converge: converge,
       reply_kind: reply_kind,
-      agents: MapSet.new([a_name, b_name]),
       queue: Queue.new()
     }
 

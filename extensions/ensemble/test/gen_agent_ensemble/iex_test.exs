@@ -94,6 +94,16 @@ defmodule GenAgentEnsemble.IExTest do
       assert {:ok, :completed, ^response} = E.poll(name, token)
     end
 
+    test "accepts :infinity and leaves the result retained", %{name: name} do
+      {:ok, _} = start_solo(name, [[Event.new(:result, %{text: "done"})]])
+
+      {:ok, token} = E.tell(name, "go")
+      response = E.await(name, token, :infinity)
+
+      assert %Response{text: "done"} = response
+      assert {:ok, :completed, ^response} = E.poll(name, token)
+    end
+
     test "raises on timeout when the token never completes", %{name: name} do
       {:ok, _} =
         GenAgentEnsemble.start_link(
