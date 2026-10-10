@@ -11,7 +11,9 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
 
   When every worker has reported back, the strategy concatenates their
   responses (or runs a user-supplied `:synthesizer` if given) and
-  issues `{:reply, token, response}` plus `{:stop, worker}` per worker.
+  issues `{:reply, token, response}` first, then `{:stop, worker}` per
+  worker, so the caller is not delayed by worker shutdown. Stops precede
+  the dispatch of the next queued run.
 
   ## Options
 
@@ -38,9 +40,15 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   second `tell`/`ask` arrives while a fan-out is in progress, it is
   queued and dispatched after the current one completes.
 
-  If a worker process dies during fan-out, the current run and every
-  queued request fail with `{:worker_down, worker, reason}`. Remaining
-  workers are stopped, and a later fresh request may start a new run.
+  If a worker that has not yet responded dies during fan-out, the current
+  run and every queued request fail with `{:worker_down, worker, reason}`.
+  Remaining workers are stopped, and a later fresh request may start a new
+  run. The death of a worker that already responded does not fail the run
+  or queued requests; it is cleaned up at fan-in.
+
+  The coordinator name must not equal a generated worker name
+  (`"\#{prefix}-N"` for N in `1..max_subtasks`); init raises
+  `ArgumentError` otherwise.
   """
 
   @behaviour GenAgentEnsemble.Strategy
@@ -89,6 +97,12 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
             "Supervisor :max_subtasks must be a positive integer, got: #{inspect(max_subtasks)}"
     end
 
+    if generated_worker_name?(c_name, w_prefix, max_subtasks) do
+      raise ArgumentError,
+            "Supervisor :coordinator name #{inspect(c_name)} collides with a generated " <>
+              "worker name (#{inspect(w_prefix)}-1 .. #{inspect(w_prefix)}-#{max_subtasks})"
+    end
+
     state = %__MODULE__{
       coordinator: c_name,
       worker_prefix: w_prefix,
@@ -101,6 +115,20 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     }
 
     {:ok, state, [{c_name, c_mod, c_opts}]}
+  end
+
+  # Parses the name instead of enumerating 1..max_subtasks, so a large limit
+  # costs nothing. Only the canonical form "prefix-N" (N in 1..max) collides.
+  defp generated_worker_name?(name, prefix, max_subtasks) do
+    with true <- is_binary(name),
+         marker = "#{prefix}-",
+         true <- String.starts_with?(name, marker),
+         suffix = binary_part(name, byte_size(marker), byte_size(name) - byte_size(marker)),
+         {index, ""} <- Integer.parse(suffix) do
+      index >= 1 and index <= max_subtasks and Integer.to_string(index) == suffix
+    else
+      _ -> false
+    end
   end
 
   @impl true
@@ -210,7 +238,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     stop_ops = Enum.map(progress, fn {worker, _} -> {:stop, worker} end)
 
     state = %{state | phase: :idle, subtasks: []}
-    {ops, state} = maybe_prepend_next(state, stop_ops ++ [{:reply, token, final_response}])
+    {ops, state} = maybe_prepend_next(state, [{:reply, token, final_response} | stop_ops])
     {:ok, ops, state}
   end
 
@@ -305,7 +333,9 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   defp fail_fan_out_on_worker_down(agent, reason, state) do
     {:fanning_out, token, progress} = state.phase
 
-    if Map.has_key?(progress, agent) do
+    # A worker that already reported (`{:done, _}`) has nothing left to lose;
+    # its later death must not fail the run or the queued requests.
+    if Map.get(progress, agent) == :pending do
       failure = {:worker_down, agent, reason}
       stop_ops = for {worker, _} <- progress, worker != agent, do: {:stop, worker}
       fail_ops = [{:reply_error, token, failure} | queued_fail_ops(state.queue, failure)]
