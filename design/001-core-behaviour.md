@@ -51,7 +51,7 @@ transition-side-effects.
 ## Why three return shapes, not more
 
 `{:noreply | :prompt | :halt}` covers the three things a callback can
-want to do: wait, continue immediately, stop. A fourth shape for
+want to do: wait, continue immediately, mark work complete. A fourth shape for
 "wait N seconds then continue" was considered and rejected -- users
 can achieve it with a self-sent notify or an external timer, and
 adding it would bloat the contract.
@@ -62,8 +62,24 @@ so users only memorize one vocabulary.
 ## Load-bearing consequences
 
 - `handle_stream_event/2` runs inside the prompt task, not the agent
-  process, so it can update state mid-turn but must not call back into
-  GenAgent API (would deadlock on self-call).
-- `handle_response/3` is mandatory; everything else optional.
+  process, so synchronous observations such as `status/2` can remain
+  responsive while it runs. A synchronous call that waits on the same
+  agent's turn (for example, `ask/3`) is still unsafe: the task cannot
+  finish while waiting for work queued behind itself. Agent-process
+  callbacks must also avoid synchronous self-calls. Stream state is
+  task-local until the task returns; task crashes cannot recover it.
+  See [callback contexts and contracts](../lib/gen_agent.ex) and
+  `run_prompt/7`, `maybe_handle_stream_event/3`, and `finish_turn/5`
+  in [GenAgent.Server](../lib/gen_agent/server.ex).
+- `init_agent/1` and `handle_response/3` are mandatory; the remaining
+  callbacks are optional.
 - The `agent_state()` is an opaque term owned by the implementation.
   The state machine does not inspect it.
+
+Callback failures are not all fatal. `handle_response/3` exceptions or
+invalid returns stop the agent before `post_turn/3`; failures or invalid
+returns from `handle_error/3`, `handle_event/2`, and `handle_info/2` are
+logged and normalized to `{:noreply, previous_state}`. Follow-up prompts
+must be binaries. See `handle_event/4`, `decision_to_transition/1`,
+`normalize_decision/5`, and the `safely_handle_*` wrappers in
+[GenAgent.Server](../lib/gen_agent/server.ex).
