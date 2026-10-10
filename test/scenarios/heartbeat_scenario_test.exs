@@ -90,6 +90,11 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
         min_batch: min_batch
       )
 
+    # Registered before any assertion so a failed test still tears down. Only
+    # this test's uniquely named agent is stopped; an already-stopped agent
+    # returns {:error, :not_found}.
+    on_exit(fn -> GenAgent.stop(name) end)
+
     name
   end
 
@@ -134,8 +139,6 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
       assert s.skipped == 1
       assert s.summaries == []
       assert length(s.observations) == 1
-
-      GenAgent.stop(name)
     end
 
     test "tick with min_batch observations dispatches and resets observations" do
@@ -153,8 +156,6 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
       s = GenAgent.status(name).agent_state
       assert s.observations == []
       assert s.summaries == ["summary"]
-
-      GenAgent.stop(name)
     end
 
     test "tick without observations is skipped" do
@@ -167,8 +168,6 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
       s = GenAgent.status(name).agent_state
       assert s.ticks == 1
       assert s.skipped == 1
-
-      GenAgent.stop(name)
     end
   end
 
@@ -192,8 +191,6 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
       GenAgent.notify(name, :tick)
 
       assert_receive {:responded, "only"}, 500
-
-      GenAgent.stop(name)
     end
   end
 
@@ -221,8 +218,6 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
       s = GenAgent.status(name).agent_state
       assert s.summaries == ["r1", "r2"]
       assert s.observations == []
-
-      GenAgent.stop(name)
     end
   end
 
@@ -264,8 +259,6 @@ defmodule GenAgent.Scenarios.HeartbeatTest do
       assert s.summaries == ["first", "deferred"]
       assert s.observations == []
       assert s.skipped == 0
-
-      GenAgent.stop(name)
     end
   end
 end

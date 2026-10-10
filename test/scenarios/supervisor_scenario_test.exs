@@ -10,7 +10,7 @@ defmodule GenAgent.Scenarios.SupervisorTest do
   self-chains a synthesis turn and halts.
 
   Exercises:
-    * `GenAgent.start_agent/2` called from inside a callback
+    * caller-owned supervisors and `GenAgent.child_spec/2` from a callback
     * many-to-one notify (fan-in)
     * one-to-many notify (fan-out)
     * multi-phase coordinator state machine
@@ -68,6 +68,8 @@ defmodule GenAgent.Scenarios.SupervisorTest do
         :parent,
         :self_name,
         :worker_scripts,
+        :worker_supervisor,
+        :worker_task_supervisor,
         phase: :planning,
         sub_tasks: [],
         workers: [],
@@ -82,7 +84,9 @@ defmodule GenAgent.Scenarios.SupervisorTest do
         task: Keyword.fetch!(opts, :task),
         parent: Keyword.fetch!(opts, :parent),
         self_name: Keyword.fetch!(opts, :self_name),
-        worker_scripts: Keyword.fetch!(opts, :worker_scripts)
+        worker_scripts: Keyword.fetch!(opts, :worker_scripts),
+        worker_supervisor: Keyword.fetch!(opts, :worker_supervisor),
+        worker_task_supervisor: Keyword.fetch!(opts, :worker_task_supervisor)
       }
 
       {:ok, [scripts: Keyword.get(opts, :scripts, [])], state}
@@ -96,14 +100,19 @@ defmodule GenAgent.Scenarios.SupervisorTest do
         Enum.map(sub_tasks, fn sub_task ->
           name = "worker-#{System.unique_integer([:positive])}"
 
-          {:ok, _pid} =
-            GenAgent.start_agent(Worker,
+          # Workers live under the test-owned supervisor so they are torn down
+          # with the test even though they halt rather than exit.
+          spec =
+            GenAgent.child_spec(Worker,
               name: name,
               backend: Mock,
+              task_supervisor: state.worker_task_supervisor,
               coordinator: state.self_name,
               sub_task: sub_task,
               scripts: [Map.fetch!(state.worker_scripts, sub_task)]
             )
+
+          {:ok, _pid} = DynamicSupervisor.start_child(state.worker_supervisor, spec)
 
           GenAgent.notify(name, :go)
           name
@@ -136,8 +145,18 @@ defmodule GenAgent.Scenarios.SupervisorTest do
 
   defp result(text), do: [Event.new(:result, %{text: text})]
 
+  # Test-owned supervisors hold the coordinator and every dynamically started
+  # worker. ExUnit stops them (agents first, then their task supervisor) when
+  # the test exits, including after a failed assertion, and nothing else in the
+  # global GenAgent.AgentSupervisor is touched.
+  setup do
+    task_supervisor = start_supervised!(Task.Supervisor)
+    agent_supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
+    {:ok, task_supervisor: task_supervisor, agent_supervisor: agent_supervisor}
+  end
+
   describe "fan-out/fan-in topology" do
-    test "plan -> spawn workers -> collect results -> synthesize -> halt" do
+    test "plan -> spawn workers -> collect results -> synthesize -> halt", ctx do
       # Use the coordinator's OWN registered name so workers can notify
       # it back via GenAgent.notify/2.
       coordinator_name = "coord-#{System.unique_integer([:positive])}"
@@ -148,14 +167,17 @@ defmodule GenAgent.Scenarios.SupervisorTest do
         "sub-c" => result("result-c")
       }
 
-      {:ok, _pid} =
-        GenAgent.start_agent(Coordinator,
+      spec =
+        GenAgent.child_spec(Coordinator,
           name: coordinator_name,
           backend: Mock,
+          task_supervisor: ctx.task_supervisor,
           task: "demo",
           parent: self(),
           self_name: coordinator_name,
           worker_scripts: worker_scripts,
+          worker_supervisor: ctx.agent_supervisor,
+          worker_task_supervisor: ctx.task_supervisor,
           scripts: [
             # 1st turn: plan (split into 3 sub-tasks)
             result("sub-a|sub-b|sub-c"),
@@ -163,6 +185,8 @@ defmodule GenAgent.Scenarios.SupervisorTest do
             result("final: a+b+c")
           ]
         )
+
+      {:ok, _pid} = DynamicSupervisor.start_child(ctx.agent_supervisor, spec)
 
       {:ok, _ref} = GenAgent.tell(coordinator_name, "demo")
 
@@ -176,8 +200,6 @@ defmodule GenAgent.Scenarios.SupervisorTest do
       assert Map.get(s.results, "sub-c") == "result-c"
       assert s.synthesis == "final: a+b+c"
       assert GenAgent.status(coordinator_name).halted == true
-
-      GenAgent.stop(coordinator_name)
     end
   end
 end
