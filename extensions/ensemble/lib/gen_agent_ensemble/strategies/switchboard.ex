@@ -32,12 +32,18 @@ defmodule GenAgentEnsemble.Strategies.Switchboard do
 
   ## Failure modes
 
+  Routing errors close the token rather than raising. `ask` returns
+  the error immediately; `tell` still returns `{:ok, token}`, and the
+  error is delivered later through `await`, `poll`, or `inbox`.
+
     * `opts[:agent]` missing -- `{:error, :no_agent_specified}`
     * `opts[:agent]` not in the fleet -- `{:error, {:unknown_agent, name}}`
     * An agent's turn errors -- that token fails; the agent stays
       available for subsequent turns.
     * An agent dies -- its pending tokens all fail with
-      `{:agent_down, reason}`; remaining agents keep serving.
+      `{:agent_down, reason}` and it is removed from the fleet, so
+      later calls addressed to it fail with `{:unknown_agent, name}`;
+      remaining agents keep serving.
     * All agents die -- the session halts.
   """
 

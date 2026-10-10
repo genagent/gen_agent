@@ -132,6 +132,15 @@ iex> E.status("reviewers")
 | `{:error, {:agent_down, reason}}`  | An agent crashed mid-turn; queued tokens fail    |
 | session halts                      | Last agent dies; session exits                   |
 
+With `ask`, routing errors are returned without starting a turn; backend
+and agent-down errors arrive when that turn fails. With `tell`, the
+call still returns `{:ok, token}` and token errors are retrieved later
+through `E.await`, `E.poll`, or `E.drain`.
+
+A dead agent is removed from the fleet: its queued tokens fail with
+`{:agent_down, reason}`, and later calls addressed to it fail with
+`{:unknown_agent, name}`.
+
 A single agent's trouble does not take down the fleet. When the
 last agent dies, the whole ensemble halts with
 `{:halt, :switchboard_exhausted}`.
@@ -150,7 +159,8 @@ last agent dies, the whole ensemble halts with
 ## Gotchas
 
 - **No default target.** If you forget `agent:`, you get
-  `{:error, :no_agent_specified}` immediately. Intentional -- it
+  `{:error, :no_agent_specified}` (immediately from `ask`; via the
+  token from `tell`). Intentional -- it
   prevents silent misrouting. If you want a "primary" fallback,
   wrap with your own helper.
 - **No broadcast (yet).** v1 routes to exactly one agent per call.
