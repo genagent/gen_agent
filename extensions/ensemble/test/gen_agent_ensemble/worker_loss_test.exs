@@ -14,7 +14,13 @@ defmodule GenAgentEnsemble.WorkerLossTest do
           try do
             GenServer.stop(server, :normal, 10_000)
           catch
-            :exit, {:noproc, _} -> :ok
+            # The linked test owner may already have begun session shutdown.
+            :exit, {{reason, {:sys, :terminate, _}}, {GenServer, :stop, _}}
+            when reason in [:noproc, :normal, :shutdown] ->
+              :ok
+
+            :exit, {reason, _} when reason in [:noproc, :normal, :shutdown] ->
+              :ok
           end
 
         [] ->

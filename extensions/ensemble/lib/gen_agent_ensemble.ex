@@ -31,6 +31,14 @@ defmodule GenAgentEnsemble do
   @doc """
   Start a new ensemble process. Takes `:name`, `:strategy`, and
   `:opts` (the strategy's own options keyword list).
+
+  The session is linked to its caller and stops when that caller exits,
+  including normally. Runtime shutdown waits for the owned agent tree;
+  each sub-agent's configured `:shutdown` budget still applies. The session's
+  supervisor child spec uses `shutdown: :infinity` so it does not cut those
+  budgets short. Termination observers should return promptly; a blocking
+  observer or an infinite child shutdown budget can prolong cleanup indefinitely.
+  Forced kills can still skip termination callbacks.
   """
   defdelegate start_link(opts), to: GenAgentEnsemble.Server
 
