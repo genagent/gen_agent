@@ -191,6 +191,7 @@ defmodule GenAgentEnsemble.FormatStatusTest do
         in_flight: %{one: @prompt},
         dispatch_contexts: %{one: @prompt},
         monitors: %{one: @prompt},
+        stream_recipients: %{one: self()},
         token_contexts: %{one: @prompt}
       },
       message: {:tell, @prompt, [api_key: @secret]},
@@ -201,6 +202,7 @@ defmodule GenAgentEnsemble.FormatStatusTest do
     formatted = Server.format_status(raw)
     assert Map.keys(formatted) == Map.keys(raw)
     assert formatted.state.session_name == "safe-session"
+    assert formatted.state.stream_recipients == :redacted
     assert formatted.message == {:tell, :redacted, [api_key: :redacted]}
     assert formatted.reason == :redacted
     refute inspect(formatted, limit: :infinity) =~ @secret
