@@ -52,20 +52,30 @@ end
 
 ## Quickstart (zero-setup demo)
 
-A fresh clone ships with one ensemble pre-enabled: `"echo"`. It
-uses `GenAgentEnsemble.Backends.Echo` -- no API keys, no external
+The GenAgent checkout ships the `"echo"` ensemble pre-enabled in
+`extensions/ensemble/config/config.exs`. It uses
+`GenAgentEnsemble.Backends.Echo` -- no API keys, no external
 services, every prompt echoed back with an `"echo: "` prefix.
-Every other ensemble in `config/config.exs` is commented out as
-a template you can enable after wiring up real credentials.
+Every other ensemble in that file is commented out as a template you
+can enable after wiring up real credentials.
 
-Start iex. The repo ships a `.iex.exs` that aliases
-`GenAgentEnsemble.IEx` to `E` -- a module that delegates the core
-API (`list/0`, `ask/2`, `tell/2`, ...) and adds REPL-flavoured
-helpers on top:
+The `echo` config and the `E` alias come from `extensions/ensemble`
+only; the checkout root has neither. Start iex from that directory.
+Its `.iex.exs` aliases `GenAgentEnsemble.IEx` to `E` -- a module that
+delegates the core API (`list/0`, `ask/2`, `tell/2`, ...) and adds
+REPL-flavoured helpers on top:
 
 ```sh
+cd extensions/ensemble
+mix deps.get
 iex -S mix
 ```
+
+In your own application, add the dependency from [Install](#install),
+declare ensembles under `config :gen_agent_ensemble` (see below), and
+add `alias GenAgentEnsemble.IEx, as: E` to your own `.iex.exs` (or
+call `GenAgentEnsemble` directly). The `"echo"` ensemble is not
+defined for you.
 
 ```elixir
 iex> E.list()
@@ -119,7 +129,9 @@ Async fan-out with a Pool (declare it in config too):
 iex> {:ok, t1} = E.tell("qa-pool", "question one")
 iex> {:ok, t2} = E.tell("qa-pool", "question two")
 iex> E.status("qa-pool")
-iex> E.drain("qa-pool")   # [{token, text}, ...]
+iex> E.await("qa-pool", t1, 60_000)
+iex> E.await("qa-pool", t2, 60_000)
+iex> E.drain("qa-pool")   # [{token, text}, ...] of completed tokens
 ```
 
 See the [Pool workflow guide](guides/workflows/pool.md) for the
@@ -142,7 +154,7 @@ set up by the repo's `.iex.exs`.
 |----------------------------|----------------------------------------------------|
 | `E.ask(name, prompt)`      | Synchronous single-turn. Blocks until reply.       |
 | `E.tell(name, prompt)`     | Async. Returns a `token` you poll or drain later.  |
-| `E.poll(name, token)`      | Non-blocking check on a single token.              |
+| `E.poll(name, token)`      | Non-blocking check; consumes a completed token.    |
 | `E.inbox(name)`            | Drain all completed tokens since last call.        |
 | `E.notify(name, event)`    | Send an event to the strategy (cast).              |
 | `E.status(name)`           | Inspect strategy phase, queue depth, etc.          |
@@ -162,7 +174,7 @@ set up by the repo's `.iex.exs`.
 | `E.drain(name)`            | `inbox` unwrapped to `[{token, text}, ...]`.       |
 
 For library code (not iex), call `GenAgentEnsemble` directly -- the
-`IEx` module is a humans-at-the-prompt convenience.
+`GenAgentEnsemble.IEx` module is a humans-at-the-prompt convenience.
 
 `GenAgentEnsemble.cancel(name, token)` closes a pending token with
 `{:error, :cancelled}` through the existing completion, await, ask, and

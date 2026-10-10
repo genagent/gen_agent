@@ -2,7 +2,7 @@ defmodule GenAgentEnsemble.Strategies.Solo do
   @moduledoc """
   Trivial single-agent strategy. Every `tell`/`ask` dispatches the
   prompt straight to the one sub-agent; every response closes the
-  most recent pending token.
+  oldest pending token.
 
   ## Options
 
@@ -11,13 +11,12 @@ defmodule GenAgentEnsemble.Strategies.Solo do
 
   ## State
 
-      %{agent: name, pending_by_agent: %{agent_name => token}}
+      %{agent: name, tokens: :queue.queue(token)}
 
-  Because Solo has exactly one agent, there is at most one in-flight
-  token per agent at any time. If a second `tell`/`ask` arrives while
-  one is in flight, the new prompt is dispatched and queues up inside
-  `GenAgent`'s own mailbox -- the tokens are still tracked per-agent
-  in FIFO order via a small queue.
+  Tokens are tracked in a single FIFO queue. If a second `tell`/`ask`
+  arrives while one is in flight, the new prompt is dispatched and
+  queues up inside `GenAgent`'s own mailbox; each response or error
+  closes the oldest queued token.
   """
 
   @behaviour GenAgentEnsemble.Strategy
