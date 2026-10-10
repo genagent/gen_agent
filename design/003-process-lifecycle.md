@@ -75,13 +75,20 @@ There are three primitives that look superficially similar:
 `{:halt, state}` is the semantic "this agent has finished its job"
 signal. The process stays alive because:
 
-- `post_run/1` needs to run on the halted state (design 005).
+- `post_run/1` runs on the halted state ([design 005](005-lifecycle-hooks.md)).
 - The manager may want to read final state via `status/1`.
 - `resume/1` can unhalt and drain the queued mailbox.
 
 Repeated halt decisions while already halted do not rerun
 `post_run/1` or emit another halted event. After `resume/1`, a new
 halt transition runs the completion hook again.
+
+A raised, thrown, or exited `post_run/1` failure is caught and logged at
+warning level; the halt completes and the process stays alive. Its return
+value is ignored. Halting does not release the backend session: an owner
+should observe the final state and then stop the agent to release resources.
+See `transition_to_halted/1`, `safely_post_run/3`, and `terminate/3` in
+[GenAgent.Server](../lib/gen_agent/server.ex).
 
 Using `stop/1` to "finish" an agent would throw away the final
 state before anyone observed it.

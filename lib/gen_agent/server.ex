@@ -2068,7 +2068,8 @@ defmodule GenAgent.Server do
   end
 
   # ---------------------------------------------------------------------------
-  # Lifecycle hook wrappers catch raises, throws, and exits:
+  # Lifecycle hook wrappers catch raises, throws, and exits.
+  # See design/005-lifecycle-hooks.md for the design and current contracts:
   #
   #   pre_run failure   -> {:crashed, failure}   (error log; server stops)
   #   pre_turn failure  -> {:crashed, kind}      (warning log; reject dispatch)
