@@ -73,7 +73,7 @@ defmodule GenAgentEnsemble.MixProject do
   defp description do
     "Multi-agent orchestration strategies for GenAgent. " <>
       "One ensemble process owns N sub-agents under a strategy " <>
-      "(Solo, Supervisor, Pool, Pipeline)."
+      "(Solo, Switchboard, Pool, Pipeline, Supervisor, Debate, Consensus)."
   end
 
   defp package do
@@ -85,7 +85,7 @@ defmodule GenAgentEnsemble.MixProject do
         "Changelog" => "#{@source_url}/blob/main/#{@source_path}/CHANGELOG.md",
         "GenAgent" => "https://hex.pm/packages/gen_agent"
       },
-      files: ~w(lib guides config mix.exs README.md CHANGELOG.md LICENSE .formatter.exs)
+      files: ~w(lib guides mix.exs README.md CHANGELOG.md LICENSE .formatter.exs)
     ]
   end
 
@@ -94,6 +94,8 @@ defmodule GenAgentEnsemble.MixProject do
       main: "readme",
       extras: [
         "README.md",
+        "CHANGELOG.md",
+        "LICENSE",
         "guides/workflows/overview.md",
         "guides/workflows/solo.md",
         "guides/workflows/switchboard.md",

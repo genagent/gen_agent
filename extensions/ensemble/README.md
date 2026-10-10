@@ -269,5 +269,5 @@ mix test
 Pre-1.0. The strategy op vocabulary
 (`:start | :stop | :dispatch | :reply | :reply_error | :forward | :halt`)
 and public API are stable and unlikely to change further before 1.0.
-Breaking changes bump the minor version; see `CHANGELOG.md` for
+Breaking changes bump the minor version; see [CHANGELOG.md](CHANGELOG.md) for
 what's changed.
