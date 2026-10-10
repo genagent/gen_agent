@@ -4,8 +4,9 @@ defmodule GenAgentEnsemble.Strategies.Switchboard do
   specifies its target agent via `opts[:agent]`.
 
   No decomposition, no coordination across agents, no default
-  target -- if the caller doesn't say which agent, the call fails
-  loud with `{:error, :no_agent_specified}`. Pick this strategy
+  target -- if the caller doesn't say which agent, the request fails
+  with `:no_agent_specified` (returned by `ask`, retrieved through the
+  token from `tell`). Pick this strategy
   when you want an explicit routed fleet ("the code review team")
   rather than an implicit pool or a decomposing coordinator.
 

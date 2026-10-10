@@ -2,7 +2,7 @@ defmodule GenAgentEnsemble.Strategies.Solo do
   @moduledoc """
   Trivial single-agent strategy. Every `tell`/`ask` dispatches the
   prompt straight to the one sub-agent; every response closes the
-  most recent pending token.
+  oldest pending token.
 
   ## Options
 
