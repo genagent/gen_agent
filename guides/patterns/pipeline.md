@@ -177,26 +177,95 @@ defmodule Pipeline do
       |> Enum.zip(Enum.drop(stage_names, 1) ++ [nil])
       |> Map.new()
 
-    stages_config
-    |> Enum.with_index(1)
-    |> Enum.each(fn {cfg, i} ->
-      name = Enum.at(stage_names, i - 1)
+    result =
+      stages_config
+      |> Enum.with_index(1)
+      |> Enum.reduce_while({:ok, []}, fn {cfg, i}, {:ok, started} ->
+        name = Enum.at(stage_names, i - 1)
 
-      {:ok, _pid} = GenAgent.start_agent(Stage,
-        name: name,
-        backend: backend,
-        next_stage: Map.fetch!(next_map, name),
-        role: cfg.role,
-        instruction: cfg.instruction,
-        index: i
-      )
-    end)
+        case GenAgent.start_agent(Stage,
+               name: name,
+               backend: backend,
+               next_stage: Map.fetch!(next_map, name),
+               role: cfg.role,
+               instruction: cfg.instruction,
+               index: i
+             ) do
+          {:ok, pid} -> {:cont, {:ok, [pid | started]}}
+          {:error, reason} -> {:halt, {:error, reason, started}}
+        end
+      end)
 
-    # Kick off the first stage with the initial input.
-    [first | _] = stage_names
-    {:ok, _ref} = GenAgent.tell(first, initial_input)
+    case result do
+      {:ok, started} ->
+        case stage_names do
+          [] ->
+            {:error, :no_stages}
 
-    {:ok, %{stages: stage_names}}
+          [first | _] ->
+            case GenAgent.notify_ack(first, {:pipeline_input, initial_input}) do
+              :ok ->
+                {:ok, %{stages: stage_names}}
+
+              {:error, reason} ->
+                rollback(started)
+                {:error, reason}
+            end
+        end
+
+      {:error, reason, started} ->
+        rollback(started)
+        {:error, reason}
+    end
+  end
+
+  # Stop only children created by this invocation, never a conflicting registration.
+  defp rollback(pids) do
+    Enum.each(pids, &DynamicSupervisor.terminate_child(GenAgent.AgentSupervisor, &1))
+  end
+
+  # Bound both polling and each status call; halted processes retain final state.
+  def await_completion(%{stages: names}, timeout \\ 30_000) do
+    wait(names, System.monotonic_time(:millisecond) + timeout)
+  end
+
+  defp wait(names, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      {:error, :timeout}
+    else
+      try do
+        statuses =
+          Enum.map(names, fn name ->
+            call_timeout = deadline - System.monotonic_time(:millisecond)
+            if call_timeout > 0,
+              do: GenAgent.status(name, call_timeout),
+              else: {:error, :timeout}
+          end)
+
+        case Enum.find(statuses, &match?({:error, _}, &1)) do
+          {:error, reason} ->
+            {:error, reason}
+
+          nil ->
+            if Enum.all?(statuses, & &1.halted) do
+              states = Enum.map(statuses, & &1.agent_state)
+
+              case Enum.find(states, fn state -> state.error != nil end) do
+                nil -> {:ok, states}
+                state -> {:error, state.error}
+              end
+            else
+              Process.sleep(min(10, max(0, deadline - System.monotonic_time(:millisecond))))
+              wait(names, deadline)
+            end
+        end
+      catch
+        :exit, {:timeout, _} -> {:error, :timeout}
+        :exit, reason -> {:error, {:status_unavailable, reason}}
+      end
+    end
   end
 end
 ```
@@ -225,22 +294,21 @@ end
   ]
 )
 
-# Each stage notifies the next as it completes. Wait for the
-# last stage to halt:
-last = List.last(handle.stages)
-
-# In practice, a small wait loop checking:
-%{agent_state: %{output: output}} = GenAgent.status(last)
-IO.puts(output)
-
-# Read the trace across all stages:
-Enum.map(handle.stages, fn name ->
-  %{agent_state: %{input: i, output: o, role: r}} = GenAgent.status(name)
-  %{stage: name, role: r, in: i, out: o}
-end)
-
-# Clean up:
-Enum.each(handle.stages, &GenAgent.stop/1)
+try do
+  case Pipeline.await_completion(handle, 30_000) do
+    {:ok, states} ->
+      IO.puts(List.last(states).output)
+      # All stages have halted, so the trace includes the initial input.
+      Enum.zip(handle.stages, states)
+      |> Enum.map(fn {name, state} ->
+        %{stage: name, role: state.role, in: state.input, out: state.output}
+      end)
+      |> IO.inspect(label: "trace")
+    {:error, reason} -> IO.inspect(reason, label: "pipeline failed or timed out")
+  end
+after
+  Enum.each(handle.stages, &GenAgent.stop/1)
+end
 ```
 
 ## Variations

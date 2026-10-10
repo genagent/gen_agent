@@ -207,17 +207,84 @@ defmodule Debate do
       report_to: Keyword.get(opts, :report_to, self())
     ]
 
-    {:ok, _} = GenAgent.start_agent(Agent,
-      [name: name_a, opponent: name_b, role: role_a] ++ shared)
+    case GenAgent.start_agent(
+           Agent,
+           [name: name_a, opponent: name_b, role: role_a] ++ shared
+         ) do
+      {:error, reason} ->
+        {:error, reason}
 
-    {:ok, _} = GenAgent.start_agent(Agent,
-      [name: name_b, opponent: name_a, role: role_b] ++ shared)
+      {:ok, pid_a} ->
+        case GenAgent.start_agent(
+               Agent,
+               [name: name_b, opponent: name_a, role: role_b] ++ shared
+             ) do
+          {:error, reason} ->
+            rollback([pid_a])
+            {:error, reason}
 
-    # Kick off agent A with the opening statement.
-    {:ok, _ref} = GenAgent.tell(name_a,
-      "Make your opening statement about: #{topic}. 2-3 sentences.")
+          {:ok, pid_b} ->
+            case GenAgent.tell(
+                   name_a,
+                   "Make your opening statement about: #{topic}. 2-3 sentences."
+                 ) do
+              {:ok, _ref} ->
+                {:ok, %{a: name_a, b: name_b}}
 
-    {:ok, %{a: name_a, b: name_b}}
+              {:error, reason} ->
+                rollback([pid_b, pid_a])
+                {:error, reason}
+            end
+        end
+    end
+  end
+
+  defp rollback(pids) do
+    Enum.each(pids, &DynamicSupervisor.terminate_child(GenAgent.AgentSupervisor, &1))
+  end
+
+  # Bound both polling and each status call; halted processes retain final state.
+  def await_completion(%{a: a, b: b}, timeout \\ 30_000) do
+    wait([a, b], System.monotonic_time(:millisecond) + timeout)
+  end
+
+  defp wait(names, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      {:error, :timeout}
+    else
+      try do
+        statuses =
+          Enum.map(names, fn name ->
+            call_timeout = deadline - System.monotonic_time(:millisecond)
+            if call_timeout > 0,
+              do: GenAgent.status(name, call_timeout),
+              else: {:error, :timeout}
+          end)
+
+        case Enum.find(statuses, &match?({:error, _}, &1)) do
+          {:error, reason} ->
+            {:error, reason}
+
+          nil ->
+            if Enum.all?(statuses, & &1.halted) do
+              states = Enum.map(statuses, & &1.agent_state)
+
+              case Enum.find(states, fn state -> match?({:failed, _}, state.status) end) do
+                nil -> {:ok, states}
+                state -> {:error, elem(state.status, 1)}
+              end
+            else
+              Process.sleep(min(10, max(0, deadline - System.monotonic_time(:millisecond))))
+              wait(names, deadline)
+            end
+        end
+      catch
+        :exit, {:timeout, _} -> {:error, :timeout}
+        :exit, reason -> {:error, {:status_unavailable, reason}}
+      end
+    end
   end
 end
 ```
@@ -241,31 +308,17 @@ end
 # statement is delivered to A, which records it and halts. With
 # max_rounds: 1, A opens and B answers.
 
-# Each agent halts and reports to :report_to (the caller by default),
-# so there are two reports per debate. A turn failure on either side
-# halts both, and each reports. Wait for both, matching on the agent
-# name so a report left over from an earlier debate is never taken:
-results =
-  for name <- [handle.a, handle.b] do
-    receive do
-      {:debate, ^name, :finished} -> :ok
-      {:debate, ^name, {:failed, reason}} -> {:error, reason}
-    end
+# Reports remain available to :report_to. Poll runtime halt as well so final
+# state is committed before reading the transcript.
+try do
+  case Debate.await_completion(handle, 30_000) do
+    {:ok, [a, _b]} -> IO.inspect(a.transcript, label: "transcript")
+    {:error, reason} -> IO.inspect(reason, label: "debate failed or timed out")
   end
-
-# Inspect live state:
-GenAgent.status(handle.a)
-GenAgent.status(handle.b)
-
-# Read the transcript. Each agent stores its own statements and the
-# opponent's as {speaker, text} in the order it saw them. There is no
-# shared store, but once the debate finishes both agents hold the same
-# ordered conversation, so either one will do:
-%{agent_state: %{transcript: transcript}} = GenAgent.status(handle.a)
-
-# Clean up:
-GenAgent.stop(handle.a)
-GenAgent.stop(handle.b)
+after
+  GenAgent.stop(handle.a)
+  GenAgent.stop(handle.b)
+end
 ```
 
 `test/guides/debate_test.exs` compiles `Debate.Agent` and `Debate`
