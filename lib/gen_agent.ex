@@ -216,7 +216,7 @@ defmodule GenAgent do
   | `c:handle_response/3` | agent, successful turn | decision | error log; stops agent | error log; stops agent |
   | `c:handle_error/3` | agent, failed turn or generated-prompt rejection | decision | error log; keeps prior state and original error | error log; keeps prior state and original error |
   | `c:handle_event/2`, `c:handle_info/2` | agent, immediate or buffered delivery | decision | error log; keeps prior state | error log; keeps prior state |
-  | `c:handle_stream_event/2` | prompt task, each backend event | any term (next state) | no return validation | task fails; agent calls `handle_error/3` with `{:task_crashed, reason}` |
+  | `c:handle_stream_event/2` | prompt task, each backend event | any term (next state) | no return validation | task fails; agent calls `handle_error/3` with a recorded checkpoint error, otherwise `{:task_crashed, reason}` |
   | `c:post_turn/3` | agent, after decision | `{:ok, state}` | warning log; keeps post-decision state and transition | warning log; keeps post-decision state and transition |
   | `c:post_run/1` | agent, transition to halted | `:ok` (return ignored) | ignored without logging | warning log; halt completes |
   | `c:terminate_agent/2` | agent, termination | any term (ignored) | no return validation | error log; cleanup continues |
