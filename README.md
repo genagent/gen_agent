@@ -229,6 +229,107 @@ they run. Check `status/2` or `runtime_snapshot/2` to distinguish a halt
 from an active turn. Callers that cannot resume the agent can use
 `tell_with_completion/5` with `on_halt: :fail`.
 
+## Core callbacks
+
+Only `init_agent/1` and `handle_response/3` are required. `use GenAgent`
+supplies defaults for the rest, except `handle_info/2`, which stays
+undefined so unexpected messages are logged and discarded. A "decision"
+is `{:noreply, state}`, `{:prompt, text, state}` (text must be a binary),
+or `{:halt, state}`.
+
+| Callback | Runs in | Valid returns | Use it for |
+|---|---|---|---|
+| `init_agent/1` | agent | `{:ok, backend_opts, state}` or `{:error, reason}` | Backend options and initial state |
+| `handle_response/3` | agent | decision | A turn succeeded: record it, chain, or halt |
+| `handle_error/3` | agent | decision | A turn failed: stay idle, retry, or halt |
+| `handle_event/2` | agent | decision | Events from `notify/2` and `notify_ack/3` |
+| `handle_info/2` | agent | decision | Timers, monitors, and other OTP messages |
+| `handle_stream_event/2` | prompt task | next state (any term) | Mid-turn backend events |
+| `terminate_agent/2` | agent | any term (ignored) | Cleanup on shutdown |
+
+`pre_run/1`, `pre_turn/2`, `post_turn/3`, and `post_run/1` are covered
+under [Lifecycle hooks](#lifecycle-hooks). The `GenAgent` moduledoc has the
+full callback contract table, including invalid returns and logging.
+
+**Errors.** `handle_error/3` receives backend errors, a terminal `:error`
+event, a stream that ends without a terminal event, a prompt-task crash
+(`{:task_crashed, reason}`), `:timeout`, `:interrupted`, and
+`:task_supervisor_unavailable`. It also receives overload or `pre_turn/2`
+rejections of generated prompts. It returns a decision, so `{:prompt, text,
+state}` retries; there is no built-in retry cap. A raise or invalid return
+from `handle_error/3`, `handle_event/2`, or `handle_info/2` is logged and
+keeps the previous state; the same failure in `handle_response/3` stops the
+agent.
+
+**Events.** An event handled while idle runs immediately. During a turn it
+is buffered and delivered in arrival order after the decision callback and
+`post_turn/3`, using the resulting state.
+
+**Stream events.** `handle_stream_event/2` runs in the prompt task. Its
+state starts as the agent state at dispatch and is threaded through the
+stream inside that task; the agent process does not see intermediate
+values. The final value is merged only when the stream finishes normally,
+which includes a terminal `:error` event or EOF without a terminal event.
+A task crash, interruption, or watchdog kill discards it, and the agent
+continues from its pre-stream state. A crash inside the callback is a task
+crash.
+
+**Terminate.** `terminate_agent/2` runs in the agent process on shutdown
+for cleanup; its return value is ignored. It does not run for an
+untrappable kill.
+
+### Request refs and acknowledgments
+
+`interrupt_request/3` cancels the active turn only if `ref` is still the
+current request, so it cannot hit a successor turn. It returns
+`{:ok, :accepted}`, `{:error, :not_current}`, `{:error, :idle}`, or
+`{:error, :not_found}`. Use `cancel_request/3` for a queued tell.
+
+```elixir
+try do
+  with {:ok, ref} <- GenAgent.tell("my-coder", "Run the tests", 5_000) do
+    interruption =
+      case GenAgent.interrupt_request("my-coder", ref, 5_000) do
+        {:ok, :accepted} = result -> result
+        {:error, reason} when reason in [:not_current, :idle] ->
+          GenAgent.cancel_request("my-coder", ref, 5_000)
+        {:error, reason} -> {:error, reason}
+      end
+
+    %{ref: ref, interruption: interruption}
+  end
+catch
+  :exit, reason -> {:error, {:agent_call_failed, reason}}
+end
+```
+
+`{:ok, :accepted}` reports the agent's decision and BEAM task cancellation,
+not that a provider process has stopped. `{:error, :not_current}` can also
+mean the request has finished or is queued. `:idle` includes a tell queued
+while halted, so both results fall back to `cancel_request/3`, which may
+itself return `{:error, :current}` or `{:error, :already_finished}`.
+The example returns the ref and admission result without waiting for completion.
+Read the eventual outcome with `GenAgent.poll/3`, or use
+`tell_with_completion/4` when you want ref-tagged completion messages.
+Each call has a finite timeout, and the catch handles timeout or agent-death
+exits. A call timeout does not prove rejection; check agent state before retrying.
+
+`notify_ack/3` waits for admission, not for model work. While a turn is
+running, `:ok` means the event was retained for delivery after the turn.
+
+```elixir
+case GenAgent.notify_ack("my-coder", {:ci_failed, "test_auth"}, 5_000) do
+  :ok -> :accepted
+  {:error, {:overloaded, info}} -> {:rejected, info}
+  {:error, :not_found} -> :no_such_agent
+  {:error, :draining} -> :shutting_down
+end
+```
+
+The acknowledgment is in-memory only. A prompt that `handle_event/2` later
+generates can still be rejected, and `handle_error/3` receives that
+overload. `notify/2` is a best-effort cast that returns `:ok` regardless.
+
 ## Lifecycle hooks
 
 In addition to the core callbacks, v0.2 adds four optional lifecycle
