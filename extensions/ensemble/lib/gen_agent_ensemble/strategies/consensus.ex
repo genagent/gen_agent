@@ -42,7 +42,8 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
           verdict.
         * `{:at_least, n}` -- at least `n` agents agree on the same
           verdict.
-    * `:rounds` (optional) -- hard cap on rounds. Defaults to 3.
+    * `:rounds` (optional) -- hard cap on rounds; a positive integer.
+      Defaults to 3.
       Exceeding the cap returns a divergence report.
     * `:reply` (optional) -- response shape:
         * `:synthesis` (default) -- converged case: verdict +
@@ -121,7 +122,10 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     validate_threshold!(threshold, length(names))
 
     rounds = Keyword.get(opts, :rounds, 3)
+    validate_rounds!(rounds)
+
     reply_kind = Keyword.get(opts, :reply, :synthesis)
+    validate_reply!(reply_kind)
 
     state = %__MODULE__{
       agents: names,
@@ -133,6 +137,22 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     }
 
     {:ok, state, specs}
+  end
+
+  defp validate_rounds!(rounds) do
+    unless is_integer(rounds) and rounds > 0 do
+      raise ArgumentError,
+            "Consensus :rounds must be a positive integer, got: #{inspect(rounds)}"
+    end
+  end
+
+  defp validate_reply!(reply_kind) do
+    unless reply_kind == :synthesis or
+             match?({:synthesize, f} when is_function(f, 1), reply_kind) do
+      raise ArgumentError,
+            "Consensus :reply must be :synthesis or {:synthesize, fun/1}, got: " <>
+              inspect(reply_kind)
+    end
   end
 
   defp validate_threshold!(:unanimous, _n), do: :ok

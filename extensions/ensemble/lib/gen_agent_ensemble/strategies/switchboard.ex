@@ -12,7 +12,8 @@ defmodule GenAgentEnsemble.Strategies.Switchboard do
   ## Options
 
     * `:agents` (required) -- list of `{name, module, opts}` specs,
-      one per sub-agent. Names must be unique within this ensemble.
+      one per sub-agent. Must be non-empty (an empty fleet raises
+      `ArgumentError` at init). Names must be unique within this ensemble.
 
   ## Addressing
 
@@ -48,6 +49,10 @@ defmodule GenAgentEnsemble.Strategies.Switchboard do
   def init(opts) do
     specs = Keyword.fetch!(opts, :agents)
     names = for {name, _mod, _opts} <- specs, do: name
+
+    if names == [] do
+      raise ArgumentError, "Switchboard requires at least 1 agent, got none"
+    end
 
     # Reject duplicate names at init time for a clear error.
     case names -- Enum.uniq(names) do

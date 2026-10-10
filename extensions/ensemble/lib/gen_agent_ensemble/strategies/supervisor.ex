@@ -73,6 +73,17 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     synthesizer = Keyword.get(opts, :synthesizer, &default_synthesizer/2)
     max_subtasks = Keyword.get(opts, :max_subtasks, @default_max_subtasks)
 
+    unless is_function(decomposer, 1) do
+      raise ArgumentError,
+            "Supervisor :decomposer must be a 1-arity function, got: #{inspect(decomposer)}"
+    end
+
+    unless is_function(synthesizer, 1) or is_function(synthesizer, 2) do
+      raise ArgumentError,
+            "Supervisor :synthesizer must be a 1- or 2-arity function, got: " <>
+              inspect(synthesizer)
+    end
+
     unless is_integer(max_subtasks) and max_subtasks > 0 do
       raise ArgumentError,
             "Supervisor :max_subtasks must be a positive integer, got: #{inspect(max_subtasks)}"
