@@ -157,7 +157,7 @@ At 500 RPS with 2KB payloads and 30min TTL...
 ...
 ```
 
-### Extracting the decision as a pipeable atom
+### Rendering the decision with a custom reply
 
 ```elixir
 iex> {:ok, _pid} =
@@ -167,21 +167,23 @@ iex> {:ok, _pid} =
 ...>     opts: [
 ...>       agents: [...],
 ...>       verdict_parser: &DecisionParser.parse/1,
-...>       reply: {:synthesize, &Function.identity/1}
+...>       reply: {:synthesize, fn summary ->
+...>         case summary.status do
+...>           :converged -> "Decision: #{summary.verdict}"
+...>           :diverged -> "No consensus reached"
+...>         end
+...>       end}
 ...>     ]
 ...>   )
-iex> {:ok, %{text: summary}} = E.ask("scratch", "...")
-iex> summary.verdict
-:approve
-iex> summary.status
-:converged
+iex> {:ok, %{text: text}} = E.ask("scratch", "...")
+iex> text
+"Decision: approve"
 ```
 
-Note: `{:synthesize, fn}` returns whatever the fn returns from
-the ensemble as `response.text`. When the fn returns a map (as
-with `&Function.identity/1`), the "text" field holds that map,
-which is a minor abuse of the `%Response{}` shape but handy for
-programmatic use.
+The callback receives the summary map and can read `summary.status` and
+`summary.verdict` to choose the reply. It must return a binary, which becomes
+`response.text`. Returning a map or any other non-binary fails the token with
+`{:invalid_strategy_result, :synthesizer_reply}` in legacy mode.
 
 ### Async
 
@@ -265,3 +267,46 @@ when no turn reports usage. Nonnumeric fields are dropped, and each invocation
 starts fresh. Failed turns cannot be counted; session-cumulative backend usage
 would overcount. See [usage accounting](overview.md#usage-accounting) for the
 complete shape and per-turn reporting assumption.
+
+## Opt-in structured runtime failures
+
+Set `failure_reply: :structured` in the strategy's `opts` to receive:
+
+```elixir
+{:error, %GenAgentEnsemble.Strategies.Failure{
+  strategy: strategy_module,
+  phase: phase,
+  agent: agent_name_or_nil,
+  reason: original_reason,
+  partial: [%{agent: name, phase: output_phase, index: index, text: text}]
+}}
+```
+
+`failure_reply: :legacy` is the default and preserves existing error reasons
+and operation ordering. Other option values raise `ArgumentError` at init.
+Migrate caller error matches before opting in, for example:
+
+```elixir
+{:error, %GenAgentEnsemble.Strategies.Failure{agent: agent, reason: reason, partial: partial}}
+```
+
+This contract covers handled backend turn errors that abort the token, guarded
+callback failures or malformed outputs, and scoped dispatch rejection. `reason`
+is exactly the original legacy reason (including any agent tuple) or the
+redacted Guard reason. Known turn, dispatch and callback agents are identified;
+aggregate synthesis uses `agent: nil`.
+
+Consensus partials use `:turn` and one-based round indexes, ordered by round then configured agent order. Completed texts from earlier rounds are retained; tolerated turn errors add no text. Failure phases are `:turn`, `:dispatch`, `:verdict_parser`, and `:synthesizer_reply`. Parser `:error` remains an abstention, and divergence remains a successful response. In structured mode, a dispatch rejection terminally fails its token, resets the run, and advances the queue even if the voting threshold would still be reachable. Legacy dispatch behavior is preserved.
+
+Partials contain only completed successful response texts, including the response
+that triggers a callback failure and all completed synthesis inputs. Failed turns
+and outstanding turns contribute no invented outputs or streamed fragments.
+Only text is journaled in structured mode; retained text is cleared on success,
+terminal failure, cancellation and successor start. Partials never mix queued
+requests. Guard still redacts callback payloads, messages and stacktraces from
+`reason`; response text and backend reasons may contain application data.
+
+Agent deaths, halt, cancellation, timeouts, initialization/startup errors and
+custom strategy/framework errors are outside this structured guarantee and keep
+their existing semantics. Callers must handle those outcomes separately.
+Structured failures are optional; the default contract remains legacy.

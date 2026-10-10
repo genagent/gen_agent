@@ -28,6 +28,12 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
 
   ## Options
 
+    * `:failure_reply` (optional) -- `:legacy` (default) preserves existing
+      reasons. `:structured` returns `GenAgentEnsemble.Strategies.Failure`
+      for handled terminal turn, dispatch and guarded callback failures,
+      with completed text partials. Agent death, halt, cancellation, timeout,
+      initialization and custom strategy failures keep their existing contracts.
+
     * `:agents` (required) -- list of `{name, module, opts}` specs,
       2 or more. Names must be distinct. Every entry must be a
       `{name, module, keyword_opts}` tuple; a malformed entry raises
@@ -97,7 +103,7 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
 
   alias GenAgent.Response
   alias GenAgentEnsemble.Queue
-  alias GenAgentEnsemble.Strategies.Guard
+  alias GenAgentEnsemble.Strategies.{Failure, Guard}
   alias GenAgentEnsemble.Usage
 
   defstruct [
@@ -106,6 +112,8 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     :threshold,
     :rounds,
     :reply_kind,
+    failure_reply: :legacy,
+    partial: [],
     phase: :idle,
     errors: [],
     queue: nil,
@@ -150,7 +158,8 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
       threshold: threshold,
       rounds: rounds,
       reply_kind: reply_kind,
-      queue: Queue.new()
+      queue: Queue.new(),
+      failure_reply: Failure.option!(opts)
     }
 
     {:ok, state, specs}
@@ -217,7 +226,13 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     ops = for agent <- state.agents, do: {:dispatch, agent, prompt, token}
 
     {:ok, ops,
-     %{state | usage: Usage.new(), errors: [], phase: {:running, token, prompt, 1, %{}}}}
+     %{
+       state
+       | partial: [],
+         usage: Usage.new(),
+         errors: [],
+         phase: {:running, token, prompt, 1, %{}}
+     }}
   end
 
   defp start_or_queue(prompt, token, state) do
@@ -229,10 +244,11 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     case state.phase do
       {:running, token, original, round, pending} ->
         state = %{state | usage: Usage.add(state.usage, agent, response.usage)}
+        state = Failure.record(state, agent, :turn, round, response.text)
 
         case parse_response(state.verdict_parser, response.text) do
           {:ok, parsed} -> record(agent, parsed, {token, original, round, pending}, state)
-          {:error, reason} -> fail_round(token, reason, state)
+          {:error, reason} -> fail_round(token, reason, state, :verdict_parser, agent)
         end
 
       _ ->
@@ -246,8 +262,8 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
 
     cond do
       state.errors != [] and threshold_unreachable?(pending, state) ->
-        error = hd(state.errors)
-        fail_round(token, error, state)
+        {agent, _reason} = error = hd(state.errors)
+        fail_round(token, error, state, :turn, agent)
 
       map_size(pending) == length(state.agents) ->
         complete_round(token, original, round, pending, %{state | errors: []})
@@ -274,8 +290,14 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   defp required_votes(:majority, n_agents), do: div(n_agents, 2) + 1
   defp required_votes({:at_least, n}, _n_agents), do: n
 
-  defp fail_round(token, error, state) do
-    state = %{state | phase: :idle, errors: []}
+  defp fail_round(token, error, state, phase, agent) do
+    partial =
+      Enum.sort_by(state.partial, fn entry ->
+        {entry.index, Enum.find_index(state.agents, &(&1 == entry.agent))}
+      end)
+
+    error = Failure.wrap(state.failure_reply, __MODULE__, phase, agent, error, partial)
+    state = %{state | phase: :idle, partial: [], errors: []}
     {ops, state} = maybe_start_next(state, [{:reply_error, token, error}])
     {:ok, ops, state}
   end
@@ -414,12 +436,12 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     case result do
       {:ok, text} ->
         response = %Response{text: text, usage: Usage.to_usage(state.usage)}
-        state = %{state | phase: :idle, errors: []}
+        state = %{state | phase: :idle, partial: [], errors: []}
         {ops, state} = maybe_start_next(state, [{:reply, token, response}])
         {:ok, ops, state}
 
       {:error, reason} ->
-        fail_round(token, reason, state)
+        fail_round(token, reason, state, :synthesizer_reply, nil)
     end
   end
 
@@ -475,7 +497,8 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
 
         state = %{
           state
-          | usage: Usage.new(),
+          | partial: [],
+            usage: Usage.new(),
             errors: [],
             phase: {:running, token, prompt, 1, %{}},
             queue: rest
@@ -512,7 +535,10 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     case state.phase do
       {:running, ^token, _, _, _} ->
         {ops, state} =
-          maybe_start_next(%{state | phase: :idle, errors: [], usage: Usage.new()}, [])
+          maybe_start_next(
+            %{state | phase: :idle, partial: [], errors: [], usage: Usage.new()},
+            []
+          )
 
         {:ok, ops, state}
 
@@ -524,8 +550,17 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   @impl true
   def handle_dispatch_rejected(agent, token, reason, state) do
     case state.phase do
-      {:running, ^token, _, _, _} -> handle_error(agent, reason, state)
-      _ -> {:ok, [{:reply_error, token, {agent, reason}}], state}
+      {:running, ^token, _, _, _} when state.failure_reply == :structured ->
+        fail_round(token, {agent, reason}, state, :dispatch, agent)
+
+      {:running, ^token, _, _, _} ->
+        handle_error(agent, reason, state)
+
+      _ ->
+        error =
+          Failure.wrap(state.failure_reply, __MODULE__, :dispatch, agent, {agent, reason}, [])
+
+        {:ok, [{:reply_error, token, error}], state}
     end
   end
 

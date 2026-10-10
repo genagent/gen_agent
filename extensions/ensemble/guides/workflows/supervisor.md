@@ -204,3 +204,46 @@ when no turn reports usage. Nonnumeric fields are dropped, and each invocation
 starts fresh. Failed turns cannot be counted; session-cumulative backend usage
 would overcount. See [usage accounting](overview.md#usage-accounting) for the
 complete shape and per-turn reporting assumption.
+
+## Opt-in structured runtime failures
+
+Set `failure_reply: :structured` in the strategy's `opts` to receive:
+
+```elixir
+{:error, %GenAgentEnsemble.Strategies.Failure{
+  strategy: strategy_module,
+  phase: phase,
+  agent: agent_name_or_nil,
+  reason: original_reason,
+  partial: [%{agent: name, phase: output_phase, index: index, text: text}]
+}}
+```
+
+`failure_reply: :legacy` is the default and preserves existing error reasons
+and operation ordering. Other option values raise `ArgumentError` at init.
+Migrate caller error matches before opting in, for example:
+
+```elixir
+{:error, %GenAgentEnsemble.Strategies.Failure{agent: agent, reason: reason, partial: partial}}
+```
+
+This contract covers handled backend turn errors that abort the token, guarded
+callback failures or malformed outputs, and scoped dispatch rejection. `reason`
+is exactly the original legacy reason (including any agent tuple) or the
+redacted Guard reason. Known turn, dispatch and callback agents are identified;
+aggregate synthesis uses `agent: nil`.
+
+Supervisor partials contain coordinator text with phase `:coordinator` and index 0, followed by completed workers with phase `:worker` and numeric assignment indexes starting at 1. Failure phases are `:turn`, `:dispatch`, `:decomposer` (including excessive decomposition), and `:synthesizer`. Empty decomposition remains successful. Worker start operation semantics are unchanged: a subsequent dispatch rejection identifies the worker but cannot recover the original worker-start error.
+
+Partials contain only completed successful response texts, including the response
+that triggers a callback failure and all completed synthesis inputs. Failed turns
+and outstanding turns contribute no invented outputs or streamed fragments.
+Only text is journaled in structured mode; retained text is cleared on success,
+terminal failure, cancellation and successor start. Partials never mix queued
+requests. Guard still redacts callback payloads, messages and stacktraces from
+`reason`; response text and backend reasons may contain application data.
+
+Agent deaths, halt, cancellation, timeouts, initialization/startup errors and
+custom strategy/framework errors are outside this structured guarantee and keep
+their existing semantics. Callers must handle those outcomes separately.
+Structured failures are optional; the default contract remains legacy.

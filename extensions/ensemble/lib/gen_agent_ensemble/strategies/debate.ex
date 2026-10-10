@@ -11,6 +11,12 @@ defmodule GenAgentEnsemble.Strategies.Debate do
 
   ## Options
 
+    * `:failure_reply` (optional) -- `:legacy` (default) preserves existing
+      reasons. `:structured` returns `GenAgentEnsemble.Strategies.Failure`
+      for handled terminal turn, dispatch and guarded callback failures,
+      with completed text partials. Agent death, halt, cancellation, timeout,
+      initialization and custom strategy failures keep their existing contracts.
+
     * `:agents` (required) -- exactly two `{name, module, opts}`
       specs. Names must be distinct.
     * `:first` (optional) -- name of the agent who speaks first.
@@ -55,7 +61,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
 
   alias GenAgent.Response
   alias GenAgentEnsemble.Queue
-  alias GenAgentEnsemble.Strategies.Guard
+  alias GenAgentEnsemble.Strategies.{Failure, Guard}
   alias GenAgentEnsemble.Usage
 
   defstruct [
@@ -65,6 +71,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
     :rounds,
     :converge,
     :reply_kind,
+    failure_reply: :legacy,
     phase: :idle,
     queue: nil,
     usage: Usage.new()
@@ -112,7 +119,8 @@ defmodule GenAgentEnsemble.Strategies.Debate do
       rounds: rounds,
       converge: converge,
       reply_kind: reply_kind,
-      queue: Queue.new()
+      queue: Queue.new(),
+      failure_reply: Failure.option!(opts)
     }
 
     {:ok, state, specs}
@@ -183,7 +191,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
          %{state | phase: {:running, token, other, turns, transcript, original_prompt}}}
 
       {:error, reason} ->
-        fail_turn(token, reason, state)
+        fail_turn(token, reason, state, :converge, agent, transcript)
     end
   end
 
@@ -194,7 +202,19 @@ defmodule GenAgentEnsemble.Strategies.Debate do
 
   defp converged?(_turns, _converge, _text), do: {:ok, false}
 
-  defp fail_turn(token, reason, state) do
+  defp fail_turn(token, reason, state, phase, agent, transcript) do
+    partial =
+      if state.failure_reply == :structured do
+        transcript
+        |> Enum.with_index(1)
+        |> Enum.map(fn {{name, text}, index} ->
+          %{agent: name, phase: :turn, index: index, text: text}
+        end)
+      else
+        []
+      end
+
+    reason = Failure.wrap(state.failure_reply, __MODULE__, phase, agent, reason, partial)
     state = %{state | phase: :idle}
     {ops, state} = maybe_start_next(state, [{:reply_error, token, reason}])
     {:ok, ops, state}
@@ -212,7 +232,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
         {:ok, ops, state}
 
       {:error, reason} ->
-        fail_turn(token, reason, state)
+        fail_turn(token, reason, state, :synthesizer_reply, nil, transcript)
     end
   end
 
@@ -248,12 +268,12 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   end
 
   @impl true
-  def handle_error(_agent, reason, state) do
+  def handle_error(agent, reason, state), do: terminal_error(agent, reason, :turn, state)
+
+  defp terminal_error(agent, reason, phase, state) do
     case state.phase do
-      {:running, token, _, _, _, _} ->
-        state = %{state | phase: :idle}
-        {ops, state} = maybe_start_next(state, [{:reply_error, token, reason}])
-        {:ok, ops, state}
+      {:running, token, _, _, transcript, _} ->
+        fail_turn(token, reason, state, phase, agent, transcript)
 
       _ ->
         {:ok, [], state}
@@ -277,8 +297,12 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   @impl true
   def handle_dispatch_rejected(agent, token, reason, state) do
     case state.phase do
-      {:running, ^token, _, _, _, _} -> handle_error(agent, reason, state)
-      _ -> {:ok, [{:reply_error, token, reason}], state}
+      {:running, ^token, _, _, _, _} ->
+        terminal_error(agent, reason, :dispatch, state)
+
+      _ ->
+        reason = Failure.wrap(state.failure_reply, __MODULE__, :dispatch, agent, reason, [])
+        {:ok, [{:reply_error, token, reason}], state}
     end
   end
 
