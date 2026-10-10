@@ -263,7 +263,9 @@ agent.
 
 **Events.** An event handled while idle runs immediately. During a turn it
 is buffered and delivered in arrival order after the decision callback and
-`post_turn/3`, using the resulting state.
+`post_turn/3`, using the resulting state. See the keyless
+[log-triage example](examples/log_triage/README.md) for an OTP Logger handler
+that forwards crash reports and batches deferred notifications into agent turns.
 
 **Stream events.** `handle_stream_event/2` runs in the prompt task. Its
 state starts as the agent state at dispatch and is threaded through the
