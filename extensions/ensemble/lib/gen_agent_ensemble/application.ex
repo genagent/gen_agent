@@ -32,10 +32,12 @@ defmodule GenAgentEnsemble.Application do
   defp start_one(config) do
     name = Keyword.get(config, :name, "<unnamed>")
 
-    case DynamicSupervisor.start_child(
-           GenAgentEnsemble.Supervisor,
-           {GenAgentEnsemble.Server, config}
-         ) do
+    # Transient: an explicit stop or strategy halt exits :normal and must stay
+    # stopped, while an abnormal crash is still restarted. Scoped to
+    # config-declared sessions; Server's own child spec is unchanged.
+    spec = Supervisor.child_spec({GenAgentEnsemble.Server, config}, restart: :transient)
+
+    case DynamicSupervisor.start_child(GenAgentEnsemble.Supervisor, spec) do
       {:ok, _pid} ->
         Logger.info("[gen_agent_ensemble] started configured ensemble: #{inspect(name)}")
 
