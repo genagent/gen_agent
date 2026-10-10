@@ -649,11 +649,10 @@ defmodule GenAgent.ServerTest do
 
   describe "tell/2 + poll/2" do
     test "returns a ref and makes the result pollable", %{task_sup: task_sup} do
-      pid = start_server(task_sup, [result_events("async")])
+      pid = start_server(task_sup, [result_events("async")], notify_pid: self())
 
       {:ok, ref} = tell(pid, "do it")
-      # Spin briefly for the task to finish.
-      Process.sleep(20)
+      assert_receive {:test_agent, :handle_response, {^ref, _}}
 
       assert {:ok, :completed, response} = poll(pid, ref)
       assert response.text == "async"
@@ -661,28 +660,24 @@ defmodule GenAgent.ServerTest do
 
     test "poll returns :pending while a tell is queued behind another prompt",
          %{task_sup: task_sup} do
-      slow_first = fn _prompt ->
-        Stream.resource(
-          fn -> :start end,
-          fn
-            :start ->
-              Process.sleep(50)
-              {[Event.new(:result, %{text: "first"})], :done}
-
-            :done ->
-              {:halt, :done}
-          end,
-          fn _ -> :ok end
+      pid =
+        start_server(
+          task_sup,
+          [Mock.gate(:first, result_events("first")), result_events("second")],
+          notify_pid: self()
         )
-      end
 
-      pid = start_server(task_sup, [slow_first, result_events("second")])
-
-      _ask_task = Task.async(fn -> ask(pid, "a") end)
-      Process.sleep(10)
+      ask_task = Task.async(fn -> ask(pid, "a") end)
+      assert_receive {:mock_blocked, :first, turn_pid}
       {:ok, ref} = tell(pid, "b")
 
       assert {:ok, :pending} = poll(pid, ref)
+      assert status(pid).queued == 1
+
+      send(turn_pid, {:mock_release, :first})
+      assert {:ok, %{text: "first"}} = Task.await(ask_task)
+      assert_receive {:test_agent, :handle_response, {^ref, %{text: "second"}}}
+      assert {:ok, :completed, %{text: "second"}} = poll(pid, ref)
     end
 
     test "poll returns {:error, :not_found} for unknown refs", %{task_sup: task_sup} do
@@ -691,10 +686,10 @@ defmodule GenAgent.ServerTest do
     end
 
     test "poll returns the error for a failed tell", %{task_sup: task_sup} do
-      pid = start_server(task_sup, [{:error, :nope}])
+      pid = start_server(task_sup, [{:error, :nope}], notify_pid: self())
 
       {:ok, ref} = tell(pid, "fail")
-      Process.sleep(20)
+      assert_receive {:test_agent, :handle_error, {^ref, :nope}}
 
       assert {:error, :nope} = poll(pid, ref)
     end
@@ -715,15 +710,15 @@ defmodule GenAgent.ServerTest do
         start_server(
           task_sup,
           [result_events("first"), result_events("second")],
-          responder: responder
+          responder: responder,
+          notify_pid: self()
         )
 
       {:ok, response} = ask(pid, "start")
       assert response.text == "first"
 
-      # After the ask returns, the self-chain is in flight or already done.
-      # Give it a moment.
-      Process.sleep(30)
+      # The self-chain may still be in flight; wait for its response callback.
+      assert_receive {:test_agent, :handle_response, {_, %{text: "second"}}}
 
       s = status(pid)
       assert s.state == :idle
@@ -740,34 +735,22 @@ defmodule GenAgent.ServerTest do
         start_server(
           task_sup,
           [
-            fn _ ->
-              Stream.resource(
-                fn -> :s end,
-                fn
-                  :s ->
-                    Process.sleep(30)
-                    {[Event.new(:result, %{text: "first"})], :d}
-
-                  :d ->
-                    {:halt, :d}
-                end,
-                fn _ -> :ok end
-              )
-            end,
+            Mock.gate(:first, result_events("first")),
             result_events("chained"),
             result_events("queued")
           ],
-          responder: responder
+          responder: responder,
+          notify_pid: self()
         )
 
       ask_task = Task.async(fn -> ask(pid, "a") end)
-      Process.sleep(5)
-      queued_tell = Task.async(fn -> tell(pid, "b") end)
+      assert_receive {:mock_blocked, :first, turn_pid}
+      {:ok, queued_ref} = tell(pid, "b")
+      assert status(pid).queued == 1
 
+      send(turn_pid, {:mock_release, :first})
       assert {:ok, %{text: "first"}} = Task.await(ask_task)
-      {:ok, _ref} = Task.await(queued_tell)
-
-      Process.sleep(50)
+      assert_receive {:test_agent, :handle_response, {^queued_ref, %{text: "queued"}}}
 
       # Order of responses in agent_state: first, chained (self-chain), queued (mailbox).
       texts =
@@ -816,19 +799,19 @@ defmodule GenAgent.ServerTest do
         start_server(
           task_sup,
           [result_events("halt me"), result_events("after")],
-          responder: responder
+          responder: responder,
+          notify_pid: self()
         )
 
       {:ok, _} = ask(pid, "first")
       assert status(pid).halted
 
       {:ok, ref} = tell(pid, "should queue")
-      Process.sleep(10)
       assert {:ok, :pending} = poll(pid, ref)
       assert status(pid).queued == 1
 
       resume(pid)
-      Process.sleep(20)
+      assert_receive {:test_agent, :handle_response, {^ref, %{text: "after"}}}
 
       assert {:ok, :completed, response} = poll(pid, ref)
       assert response.text == "after"
@@ -849,11 +832,12 @@ defmodule GenAgent.ServerTest do
         start_server(
           task_sup,
           [result_events("done")],
-          event_handler: event_handler
+          event_handler: event_handler,
+          notify_pid: self()
         )
 
       notify(pid, {:go, "it"})
-      Process.sleep(20)
+      assert_receive {:test_agent, :handle_response, {_, %{text: "done"}}}
 
       s = status(pid)
       assert length(s.agent_state.events) == 1
@@ -866,8 +850,8 @@ defmodule GenAgent.ServerTest do
       pid = start_server(task_sup, [], event_handler: event_handler)
 
       notify(pid, :stop)
-      Process.sleep(5)
 
+      # The status call is ordered after the notify cast.
       assert status(pid).halted
     end
   end
@@ -879,28 +863,15 @@ defmodule GenAgent.ServerTest do
   describe "interrupt/1" do
     test "kills in-flight task and delivers :interrupted to the ask caller",
          %{task_sup: task_sup} do
-      slow = fn _ ->
-        Stream.resource(
-          fn -> :s end,
-          fn
-            :s ->
-              Process.sleep(500)
-              {[Event.new(:result, %{text: "never"})], :d}
-
-            :d ->
-              {:halt, :d}
-          end,
-          fn _ -> :ok end
-        )
-      end
-
-      pid = start_server(task_sup, [slow])
+      pid = start_server(task_sup, [Mock.gate(:slow, result_events("never"))])
 
       caller = Task.async(fn -> ask(pid, "start") end)
-      Process.sleep(20)
+      assert_receive {:mock_blocked, :slow, turn_pid}
+      turn_monitor = Process.monitor(turn_pid)
       interrupt(pid)
 
       assert {:error, :interrupted} = Task.await(caller)
+      assert_receive {:DOWN, ^turn_monitor, :process, ^turn_pid, _reason}
       assert status(pid).state == :idle
     end
   end
