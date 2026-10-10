@@ -29,11 +29,14 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   ## Options
 
     * `:agents` (required) -- list of `{name, module, opts}` specs,
-      2 or more. Names must be distinct.
+      2 or more. Names must be distinct. Every entry must be a
+      `{name, module, keyword_opts}` tuple; a malformed entry raises
+      `ArgumentError` at init naming only its index.
     * `:verdict_parser` (required) -- `(String.t() -> {:ok, atom,
       String.t()} | :error)`. Called on each agent's response text.
-      The atom is the verdict category; the string is the rationale
-      with verdict markers stripped.
+      The atom is the verdict category (never `nil`); the string is the
+      rationale with verdict markers stripped. `:error` abstains; any
+      other return fails the token (see Failure semantics).
     * `:threshold` (optional) -- convergence rule. Defaults to
       `:majority`.
         * `:unanimous` -- all parseable verdicts agree AND no
@@ -76,12 +79,25 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
       starts clean, and a failed agent is dispatched again.
     * Agent process death halts the session -- the panel size is
       fixed; a missing agent invalidates the threshold.
+    * A `:verdict_parser` that returns `:error` abstains. A parser that
+      raises, throws or exits, or returns anything other than `:error` or
+      `{:ok, verdict, rationale}` (a non-nil atom and a binary), fails the
+      token; so does a `{:synthesize, fun}` reply function that fails or
+      returns a non-binary. The caller receives
+      `{:error, {:strategy_function_failed, label, kind, class}}` or
+      `{:error, {:invalid_strategy_result, label}}`, where `label` is
+      `:verdict_parser` or `:synthesizer_reply`, `kind` is `:error`,
+      `:throw` or `:exit`, and `class` is the exception module or
+      `:other`. Messages, stacktraces and returned values are never
+      included. In-flight responses are discarded, the session keeps
+      running and the next queued prompt starts.
   """
 
   @behaviour GenAgentEnsemble.Strategy
 
   alias GenAgent.Response
   alias GenAgentEnsemble.Queue
+  alias GenAgentEnsemble.Strategies.Guard
   alias GenAgentEnsemble.Usage
 
   defstruct [
@@ -99,6 +115,7 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   @impl true
   def init(opts) do
     specs = Keyword.fetch!(opts, :agents)
+    validate_specs!(specs)
 
     if length(specs) < 2 do
       raise ArgumentError,
@@ -137,6 +154,29 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     }
 
     {:ok, state, specs}
+  end
+
+  # Reports only the index: spec options may carry credentials.
+  defp validate_specs!(specs) do
+    unless is_list(specs) do
+      raise ArgumentError, "Consensus :agents must be a list of {name, module, opts} specs"
+    end
+
+    Enum.each(Enum.with_index(specs), &validate_spec!/1)
+
+    :ok
+  end
+
+  defp validate_spec!({{_name, module, spec_opts}, index})
+       when is_atom(module) and is_list(spec_opts) do
+    if Keyword.keyword?(spec_opts), do: :ok, else: bad_spec!(index)
+  end
+
+  defp validate_spec!({_spec, index}), do: bad_spec!(index)
+
+  defp bad_spec!(index) do
+    raise ArgumentError,
+          "Consensus :agents entry #{index} must be {name, module, keyword_opts}"
   end
 
   defp validate_rounds!(rounds) do
@@ -189,8 +229,11 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     case state.phase do
       {:running, token, original, round, pending} ->
         state = %{state | usage: Usage.add(state.usage, agent, response.usage)}
-        parsed = parse_response(state.verdict_parser, response.text)
-        record(agent, parsed, {token, original, round, pending}, state)
+
+        case parse_response(state.verdict_parser, response.text) do
+          {:ok, parsed} -> record(agent, parsed, {token, original, round, pending}, state)
+          {:error, reason} -> fail_round(token, reason, state)
+        end
 
       _ ->
         {:ok, [], state}
@@ -237,15 +280,23 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     {:ok, ops, state}
   end
 
+  # `:error` is the parser's explicit abstain; anything else that is not a
+  # verdict atom (never nil, the internal abstain marker) with a binary
+  # rationale is a malformed result that fails the token.
   defp parse_response(parser, text) do
-    case parser.(text) do
-      {:ok, verdict, rationale} when is_atom(verdict) and is_binary(rationale) ->
-        {verdict, rationale, text}
-
-      _ ->
-        {nil, text, text}
+    case Guard.call(:verdict_parser, parser, [text], &valid_parse?/1) do
+      {:ok, :error} -> {:ok, {nil, text, text}}
+      {:ok, {:ok, verdict, rationale}} -> {:ok, {verdict, rationale, text}}
+      {:error, _} = error -> error
     end
   end
+
+  defp valid_parse?(:error), do: true
+
+  defp valid_parse?({:ok, verdict, rationale}),
+    do: is_atom(verdict) and verdict != nil and is_binary(rationale)
+
+  defp valid_parse?(_), do: false
 
   defp complete_round(token, original, round, pending, state) do
     case converged?(pending, state.threshold, length(state.agents)) do
@@ -343,25 +394,33 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   defp finalize(token, status, verdict, rounds_used, pending, state) do
     responses = collect_responses(state.agents, pending)
 
-    text =
+    result =
       case state.reply_kind do
         :synthesis ->
-          render_synthesis(status, verdict, rounds_used, state.threshold, responses)
+          {:ok, render_synthesis(status, verdict, rounds_used, state.threshold, responses)}
 
         {:synthesize, fun} ->
-          fun.(%{
+          summary = %{
             status: status,
             verdict: verdict,
             rounds: rounds_used,
             threshold: state.threshold,
             responses: responses
-          })
+          }
+
+          Guard.call(:synthesizer_reply, fun, [summary], &is_binary/1)
       end
 
-    response = %Response{text: text, usage: Usage.to_usage(state.usage)}
-    state = %{state | phase: :idle, errors: []}
-    {ops, state} = maybe_start_next(state, [{:reply, token, response}])
-    {:ok, ops, state}
+    case result do
+      {:ok, text} ->
+        response = %Response{text: text, usage: Usage.to_usage(state.usage)}
+        state = %{state | phase: :idle, errors: []}
+        {ops, state} = maybe_start_next(state, [{:reply, token, response}])
+        {:ok, ops, state}
+
+      {:error, reason} ->
+        fail_round(token, reason, state)
+    end
   end
 
   defp collect_responses(agents, pending) do

@@ -39,12 +39,23 @@ defmodule GenAgentEnsemble.Strategies.Debate do
       reason; next queued prompt (if any) starts.
     * If either agent's process dies, the session halts -- neither
       agent alone can debate.
+    * A `:converge` function that raises, throws or exits, or a
+      `{:synthesize, fun}` reply function that fails or returns a
+      non-binary, fails the token and the next queued prompt starts. The
+      caller receives `{:error, {:strategy_function_failed, label, kind,
+      class}}` or `{:error, {:invalid_strategy_result, label}}`, where
+      `label` is `:converge` or `:synthesizer_reply`, `kind` is `:error`,
+      `:throw` or `:exit`, and `class` is the exception module or
+      `:other`. Messages, stacktraces and returned values are never
+      included. A `:converge` return other than `true` means "not
+      converged" and is not an error.
   """
 
   @behaviour GenAgentEnsemble.Strategy
 
   alias GenAgent.Response
   alias GenAgentEnsemble.Queue
+  alias GenAgentEnsemble.Strategies.Guard
   alias GenAgentEnsemble.Usage
 
   defstruct [
@@ -161,46 +172,65 @@ defmodule GenAgentEnsemble.Strategies.Debate do
     state = %{state | usage: Usage.add(state.usage, agent, response.usage)}
     transcript = transcript ++ [{agent, response.text}]
     turns = turns + 1
-    converged? = turns >= 2 and safely_converged?(state.converge, response.text)
 
-    if converged? or turns >= state.rounds do
-      finalize(token, transcript, state)
-    else
-      other = other_agent(agent, state)
-      next_prompt = "#{original_prompt}\n\n#{agent}:\n#{response.text}"
+    case converged?(turns, state.converge, response.text) do
+      {:ok, converged?} when converged? or turns >= state.rounds ->
+        finalize(token, transcript, state)
 
-      {:ok, [{:dispatch, other, next_prompt, token}],
-       %{state | phase: {:running, token, other, turns, transcript, original_prompt}}}
+      {:ok, _} ->
+        other = other_agent(agent, state)
+        next_prompt = "#{original_prompt}\n\n#{agent}:\n#{response.text}"
+
+        {:ok, [{:dispatch, other, next_prompt, token}],
+         %{state | phase: {:running, token, other, turns, transcript, original_prompt}}}
+
+      {:error, reason} ->
+        fail_turn(token, reason, state)
     end
   end
 
-  defp safely_converged?(fun, text) do
-    fun.(text) == true
+  # Only an exact `true` ends the debate early; other returns mean "keep going".
+  defp converged?(turns, converge, text) when turns >= 2 do
+    with {:ok, value} <- Guard.call(:converge, converge, [text]), do: {:ok, value == true}
+  end
+
+  defp converged?(_turns, _converge, _text), do: {:ok, false}
+
+  defp fail_turn(token, reason, state) do
+    state = %{state | phase: :idle}
+    {ops, state} = maybe_start_next(state, [{:reply_error, token, reason}])
+    {:ok, ops, state}
   end
 
   defp other_agent(name, %{a: a, b: b}) when name == a, do: b
   defp other_agent(name, %{a: a, b: b}) when name == b, do: a
 
   defp finalize(token, transcript, state) do
-    text = render_reply(state.reply_kind, transcript)
-    response = %Response{text: text, usage: Usage.to_usage(state.usage)}
-    state = %{state | phase: :idle}
-    {ops, state} = maybe_start_next(state, [{:reply, token, response}])
-    {:ok, ops, state}
+    case render_reply(state.reply_kind, transcript) do
+      {:ok, text} ->
+        response = %Response{text: text, usage: Usage.to_usage(state.usage)}
+        state = %{state | phase: :idle}
+        {ops, state} = maybe_start_next(state, [{:reply, token, response}])
+        {:ok, ops, state}
+
+      {:error, reason} ->
+        fail_turn(token, reason, state)
+    end
   end
 
   defp render_reply(:transcript, transcript) do
-    Enum.map_join(transcript, "\n\n", fn {agent, text} -> "#{agent}:\n#{text}" end)
+    {:ok, Enum.map_join(transcript, "\n\n", fn {agent, text} -> "#{agent}:\n#{text}" end)}
   end
 
   defp render_reply(:last, transcript) do
     case List.last(transcript) do
-      {_agent, text} -> text
-      nil -> ""
+      {_agent, text} -> {:ok, text}
+      nil -> {:ok, ""}
     end
   end
 
-  defp render_reply({:synthesize, fun}, transcript), do: fun.(transcript)
+  defp render_reply({:synthesize, fun}, transcript),
+    do: Guard.call(:synthesizer_reply, fun, [transcript], &is_binary/1)
 
   defp maybe_start_next(%{phase: :idle} = state, ops_so_far) do
     case Queue.pop(state.queue) do

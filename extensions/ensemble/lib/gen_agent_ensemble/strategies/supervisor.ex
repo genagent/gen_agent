@@ -46,6 +46,16 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   run. The death of a worker that already responded does not fail the run
   or queued requests; it is cleaned up at fan-in.
 
+  A `:decomposer` that raises, throws or exits, or returns anything but a
+  proper list of binaries, fails the run before any worker starts. A
+  caller-supplied `:synthesizer` that fails or returns a non-binary fails the run after fan-in: the caller
+  gets the error first, then every worker is stopped. Either way the caller
+  receives `{:error, {:strategy_function_failed, label, kind, class}}` or
+  `{:error, {:invalid_strategy_result, label}}` with `label` `:decomposer` or
+  `:synthesizer`, `kind` `:error`, `:throw` or `:exit`, and `class` the
+  exception module or `:other`. Messages, stacktraces and returned values are
+  never included. The session keeps running and queued requests proceed.
+
   The coordinator name must not equal a generated worker name
   (`"\#{prefix}-N"` for N in `1..max_subtasks`); init raises
   `ArgumentError` otherwise.
@@ -55,6 +65,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
 
   alias GenAgent.Response
   alias GenAgentEnsemble.Queue
+  alias GenAgentEnsemble.Strategies.Guard
   alias GenAgentEnsemble.Usage
 
   @default_max_subtasks 10
@@ -67,6 +78,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     :decomposer,
     :synthesizer,
     max_subtasks: @default_max_subtasks,
+    custom_synthesizer?: false,
     subtasks: [],
     phase: :idle,
     queue: nil,
@@ -110,6 +122,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
       worker_opts: w_opts,
       decomposer: decomposer,
       synthesizer: synthesizer,
+      custom_synthesizer?: Keyword.has_key?(opts, :synthesizer),
       max_subtasks: max_subtasks,
       queue: Queue.new()
     }
@@ -162,19 +175,29 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
 
   defp decompose(token, response, state) do
     state = %{state | usage: Usage.add(state.usage, state.coordinator, response.usage)}
-    sub_prompts = state.decomposer.(response.text)
 
-    case length(sub_prompts) do
-      count when count > state.max_subtasks ->
-        reject_decomposition(token, count, state)
+    case Guard.call(:decomposer, state.decomposer, [response.text], &sub_prompts?/1) do
+      {:ok, sub_prompts} when length(sub_prompts) > state.max_subtasks ->
+        reject_decomposition(
+          token,
+          {:too_many_subtasks, length(sub_prompts), state.max_subtasks},
+          state
+        )
 
-      _ ->
+      {:ok, sub_prompts} ->
         fan_out(token, response, sub_prompts, state)
+
+      {:error, reason} ->
+        reject_decomposition(token, reason, state)
     end
   end
 
-  defp reject_decomposition(token, count, state) do
-    reason = {:too_many_subtasks, count, state.max_subtasks}
+  # Total: any term, including an improper list, yields a boolean.
+  defp sub_prompts?([]), do: true
+  defp sub_prompts?([head | tail]), do: is_binary(head) and sub_prompts?(tail)
+  defp sub_prompts?(_), do: false
+
+  defp reject_decomposition(token, reason, state) do
     state = %{state | phase: :idle, subtasks: []}
     {ops, state} = maybe_prepend_next(state, [{:reply_error, token, reason}])
     {:ok, ops, state}
@@ -227,20 +250,34 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
         |> String.to_integer()
       end)
 
-    combined =
-      if is_function(state.synthesizer, 2) do
-        state.synthesizer.(worker_outputs, state.subtasks)
-      else
-        state.synthesizer.(worker_outputs)
+    args =
+      if is_function(state.synthesizer, 2),
+        do: [worker_outputs, state.subtasks],
+        else: [worker_outputs]
+
+    # Reply (or error) first, then worker cleanup, then the next queued run.
+    reply_op =
+      case synthesize(state, args) do
+        {:ok, combined} ->
+          {:reply, token, %Response{text: combined, usage: Usage.to_usage(state.usage)}}
+
+        {:error, reason} ->
+          {:reply_error, token, reason}
       end
 
-    final_response = %Response{text: combined, usage: Usage.to_usage(state.usage)}
     stop_ops = Enum.map(progress, fn {worker, _} -> {:stop, worker} end)
 
     state = %{state | phase: :idle, subtasks: []}
-    {ops, state} = maybe_prepend_next(state, [{:reply, token, final_response} | stop_ops])
+    {ops, state} = maybe_prepend_next(state, [reply_op | stop_ops])
     {:ok, ops, state}
   end
+
+  # Only a caller-supplied synthesizer is user code. The built-in default
+  # runs unguarded so its own failures (corrupted strategy state) propagate.
+  defp synthesize(%{custom_synthesizer?: true} = state, args),
+    do: Guard.call(:synthesizer, state.synthesizer, args, &is_binary/1)
+
+  defp synthesize(state, args), do: {:ok, apply(state.synthesizer, args)}
 
   defp maybe_prepend_next(%{phase: :idle} = state, ops_so_far) do
     case Queue.pop(state.queue) do

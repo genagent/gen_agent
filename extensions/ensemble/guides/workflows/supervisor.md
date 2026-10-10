@@ -137,7 +137,7 @@ iex> E.await("research", tok) |> E.puts()
 
 ## Variations
 
-- **Decomposer shape.** Any `String.t -> [String.t]`. Newline
+- **Decomposer shape.** Any `String.t -> [String.t]` (a list of binaries). Newline
   splitting is the simplest; regex or JSON parsing (if the
   coordinator is prompted to emit JSON) are common next steps.
 - **Synthesizer shape.** A one-argument function receives ordered
@@ -175,12 +175,19 @@ iex> E.await("research", tok) |> E.puts()
 - **Coordinator is persistent.** The coordinator agent's session
   lives across runs, so its input tokens grow as you reuse the
   ensemble. Restart if you want a clean coordinator.
-- **Decomposer/synthesizer exceptions stop the ensemble.** If your
-  user-supplied function raises, the strategy does not convert it into
-  a `:halt` or an error reply. The Server's callback wrapper catches
-  it, logs a sanitized message, and stops the ensemble with
-  `{:callback_failed, kind, reason_kind}`. Wrap defensively if the
-  coordinator output might be malformed.
+- **Decomposer/synthesizer failures fail the run, not the ensemble.** If
+  your `:decomposer` raises, throws or exits, or returns anything other
+  than a list of binaries, or your `:synthesizer` fails or returns a
+  non-binary, the caller receives
+  `{:error, {:strategy_function_failed, label, kind, class}}` or
+  `{:error, {:invalid_strategy_result, label}}`, with `label` either
+  `:decomposer` or `:synthesizer`. Messages, stacktraces and returned
+  values are not included. A decomposer failure happens before any worker
+  starts. A synthesizer failure is replied first, then all workers are
+  stopped. The ensemble keeps running and queued requests proceed. This
+  covers only these built-in callbacks; it is not a general containment
+  guarantee for custom strategies, and the built-in default synthesizer is
+  not wrapped: only functions you supply are treated as user code.
 - **Decomposition determines synthesizer order.** The synthesizer
   receives `[{worker_name, output_text}]` in the original sub-prompt
   order, regardless of worker completion order. For two-argument
