@@ -433,6 +433,9 @@ defmodule GenAgentEnsemble.Server do
         {:noreply, state}
 
       {agent, monitors} ->
+        affected_tokens =
+          for {_ref, {name, token}} <- state.in_flight, name == agent, do: token
+
         emit_dropped_dispatches(state, agent, :agent_down)
 
         state = %{
@@ -454,7 +457,7 @@ defmodule GenAgentEnsemble.Server do
 
             %{state | strategy_state: strategy_state} |> apply_ops(ops)
           else
-            state
+            fail_unhandled_tokens(state, affected_tokens, {:agent_down, agent, reason})
           end
 
         {:noreply, state}
@@ -524,7 +527,41 @@ defmodule GenAgentEnsemble.Server do
           "[gen_agent_ensemble] agent #{bare_agent} turn errored (unhandled): #{reason_kind(reason)}"
         )
 
-        state
+        fail_unhandled_token(state, token, reason)
+    end
+  end
+
+  defp fail_unhandled_tokens(state, tokens, reason) do
+    Enum.reduce(Enum.uniq(tokens), state, fn token, acc ->
+      fail_unhandled_token(acc, token, reason)
+    end)
+  end
+
+  # Unscoped dispatches have no token to close. For scoped work, retire every
+  # remaining ref for the failed token, including sibling fanout requests.
+  defp fail_unhandled_token(state, nil, _reason), do: state
+
+  defp fail_unhandled_token(state, token, reason) do
+    if Map.has_key?(state.pending, token) do
+      state =
+        Enum.reduce(state.in_flight, state, fn
+          {ref, {agent, ^token}}, acc ->
+            {{started_at, ordinal}, contexts} = Map.pop(acc.dispatch_contexts, ref)
+
+            emit_dispatch(acc, :error, agent, token, ref, started_at, ordinal,
+              reason_kind: reason_kind(reason)
+            )
+
+            %{acc | in_flight: Map.delete(acc.in_flight, ref), dispatch_contexts: contexts}
+
+          _, acc ->
+            acc
+        end)
+
+      {:ok, state} = reply_to_token(state, token, {:error, reason})
+      state
+    else
+      state
     end
   end
 

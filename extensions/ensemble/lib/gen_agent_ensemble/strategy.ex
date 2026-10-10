@@ -73,6 +73,14 @@ defmodule GenAgentEnsemble.Strategy do
   and advance any queued work. The framework guarantees a terminal error for
   the token even when the callback is absent.
 
+  If `handle_error/3` is absent, a failed turn closes its token with the
+  backend error. If `handle_agent_down/3` is absent, each pending token
+  dispatched to that agent fails with `{:agent_down, agent, reason}`.
+  Remaining dispatch references for those tokens are retired so late
+  completions cannot alter their results; unrelated tokens remain pending.
+  Implement these callbacks when the strategy needs to recover, update its
+  own state, or advance queued work. Unscoped dispatches have no token to close.
+
   ## Tokens
 
   Tokens are opaque strings minted by the framework when the caller
@@ -120,7 +128,12 @@ defmodule GenAgentEnsemble.Strategy do
   @doc "Handle a successful agent response. The callback receives the agent name, not the request token."
   @callback handle_response(agent_name, response, strategy_state) :: result
 
-  @doc "Handle an active agent turn error. If the token is no longer pending, this callback is skipped. If omitted, the server logs the error as unhandled and leaves strategy state unchanged."
+  @doc """
+  Handle an active agent turn error. If the token is no longer pending,
+  this callback is skipped. If omitted, the server logs the error and closes
+  the affected token with it, retiring remaining dispatch references for
+  that token. Strategy state is unchanged.
+  """
   @callback handle_error(agent_name, term(), strategy_state) :: result
 
   @doc "Handle a rejected child start. Defining this callback halts the current operation batch; if omitted, remaining operations continue."
@@ -139,7 +152,11 @@ defmodule GenAgentEnsemble.Strategy do
   @doc "Handle an event sent to the session. If omitted, the event is ignored and state is unchanged."
   @callback handle_notify(term(), strategy_state) :: result
 
-  @doc "Handle an agent going down. If omitted, strategy state is unchanged."
+  @doc """
+  Handle an agent going down. If omitted, pending tokens dispatched to this
+  agent fail with `{:agent_down, agent, reason}` and their remaining dispatch
+  references are retired. Strategy state is unchanged.
+  """
   @callback handle_agent_down(agent_name, term(), strategy_state) :: result
 
   @doc "Return extra status fields. These are merged over the server's base map and can replace its keys; if omitted, no extra fields are added."
