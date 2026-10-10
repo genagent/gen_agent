@@ -155,26 +155,31 @@ defmodule Pool do
     id = System.unique_integer([:positive])
     limits = Keyword.take(opts, [:max_pending_prompts, :max_pending_prompt_bytes])
 
-    workers =
-      1..size
-      |> Enum.map(fn i ->
+    result =
+      Enum.reduce_while(1..size, {:ok, []}, fn i, {:ok, started} ->
         name = "pool-#{id}-#{i}"
 
-        {:ok, _pid} =
-          GenAgent.start_agent(
-            Worker,
-            [
-              name: name,
-              backend: backend,
-              role: role
-            ] ++ limits
-          )
-
-        name
+        case GenAgent.start_agent(
+               Worker,
+               [name: name, backend: backend, role: role] ++ limits
+             ) do
+          {:ok, pid} -> {:cont, {:ok, [{name, pid} | started]}}
+          {:error, reason} -> {:halt, {:error, reason, started}}
+        end
       end)
 
-    counter = :atomics.new(1, [])
-    {:ok, %{workers: workers, counter: counter}}
+    case result do
+      {:ok, started} ->
+        workers = started |> Enum.reverse() |> Enum.map(&elem(&1, 0))
+        {:ok, %{workers: workers, counter: :atomics.new(1, [])}}
+
+      {:error, reason, started} ->
+        Enum.each(started, fn {_name, pid} ->
+          DynamicSupervisor.terminate_child(GenAgent.AgentSupervisor, pid)
+        end)
+
+        {:error, reason}
+    end
   end
 
   @doc """

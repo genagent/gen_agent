@@ -271,6 +271,50 @@ defmodule Fanout.Coordinator do
     Synthesize these into a cohesive 2-paragraph answer.
     """
   end
+
+  # Bound both polling and each status call; halted processes retain final state.
+  def await_completion(name, timeout \\ 30_000) do
+    wait([name], System.monotonic_time(:millisecond) + timeout)
+  end
+
+  defp wait(names, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      {:error, :timeout}
+    else
+      try do
+        statuses =
+          Enum.map(names, fn name ->
+            call_timeout = deadline - System.monotonic_time(:millisecond)
+            if call_timeout > 0,
+              do: GenAgent.status(name, call_timeout),
+              else: {:error, :timeout}
+          end)
+
+        case Enum.find(statuses, &match?({:error, _}, &1)) do
+          {:error, reason} ->
+            {:error, reason}
+
+          nil ->
+            if Enum.all?(statuses, & &1.halted) do
+              states = Enum.map(statuses, & &1.agent_state)
+
+              case Enum.find(states, fn state -> state.phase == :failed end) do
+                nil -> {:ok, hd(states)}
+                state -> {:error, state.error}
+              end
+            else
+              Process.sleep(min(10, max(0, deadline - System.monotonic_time(:millisecond))))
+              wait(names, deadline)
+            end
+        end
+      catch
+        :exit, {:timeout, _} -> {:error, :timeout}
+        :exit, reason -> {:error, {:status_unavailable, reason}}
+      end
+    end
+  end
 end
 ```
 
@@ -497,16 +541,10 @@ name = "coord-#{System.unique_integer([:positive])}"
 
 # Bound the manager's wait too, including planning and synthesis.
 try do
-  status = Enum.reduce_while(1..300, nil, fn _, _ ->
-    status = GenAgent.status(name)
-    if status.agent_state.phase in [:done, :failed] do
-      {:halt, status}
-    else
-      Process.sleep(100)
-      {:cont, nil}
-    end
-  end)
-  IO.inspect(status && status.agent_state, label: "result (nil means manager timeout)")
+  case Fanout.Coordinator.await_completion(name, 30_000) do
+    {:ok, state} -> IO.puts(state.final_output)
+    {:error, reason} -> IO.inspect(reason, label: "supervisor failed or timed out")
+  end
 after
   GenAgent.stop(name)
 end
