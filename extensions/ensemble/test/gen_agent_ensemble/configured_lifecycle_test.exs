@@ -115,6 +115,28 @@ defmodule GenAgentEnsemble.ConfiguredLifecycleTest do
     assert Map.get(Server.child_spec(name: "x"), :restart, :permanent) == :permanent
   end
 
+  test "a configured entry without a name warns and still starts later valid entries", %{
+    prefix: prefix
+  } do
+    :ok = Application.stop(:gen_agent_ensemble)
+    keep = "#{prefix}-after-invalid"
+
+    Application.put_env(:gen_agent_ensemble, :ensembles, [
+      Keyword.delete(config("missing"), :name),
+      config(keep)
+    ])
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, _} = Application.ensure_all_started(:gen_agent_ensemble)
+      end)
+
+    assert log =~ "failed to start"
+    assert is_pid(lookup(keep))
+    assert {:ok, _} = Ensemble.status(keep)
+    assert %{active: 1} = DynamicSupervisor.count_children(GenAgentEnsemble.Supervisor)
+  end
+
   test "repeated explicit stops stay stopped and do not exhaust the supervisor", %{prefix: prefix} do
     stopped = for i <- 1..5, do: "#{prefix}-stop-#{i}"
     keep = "#{prefix}-keep"

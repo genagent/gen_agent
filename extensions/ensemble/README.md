@@ -112,9 +112,38 @@ Config-declared ensembles are started under `GenAgentEnsemble.Supervisor`
 with a `:transient` restart policy. An explicit `GenAgentEnsemble.stop/1`
 or a strategy halt exits normally and the ensemble stays stopped until the
 application is restarted; an abnormal crash of the session is restarted.
-Sessions you start yourself keep the caller-owned child spec (`Server`
-defaults to `:permanent`). Recovery after a crash of the
+Caller supervisors can use the same public child spec described below.
+Recovery after a crash of the
 `GenAgentEnsemble.Supervisor` itself is not provided.
+
+### Supervise ensembles in your application
+
+Use `{GenAgentEnsemble, opts}` in your supervisor's children:
+
+```elixir
+children =
+  for name <- ["research", "review"] do
+    {GenAgentEnsemble,
+     name: name,
+     strategy: GenAgentEnsemble.Strategies.Solo,
+     opts: [
+       agent: {"worker", GenAgentEnsemble.Agents.Simple,
+               backend: GenAgentEnsemble.Backends.Echo}
+     ]}
+  end
+
+Supervisor.start_link(children, strategy: :one_for_one)
+```
+
+`GenAgentEnsemble.child_spec/1` requires `:name`, just like `start_link/1`.
+Its ID is `{GenAgentEnsemble, name}`, so multiple distinct named ensembles
+can share a supervisor without generating atoms. The `:transient` restart
+policy keeps explicit stops and strategy halts stopped and restarts abnormal
+exits. `shutdown: :infinity` lets the owned agent tree finish using each
+sub-agent's configured shutdown budget; blocking callbacks or infinite
+budgets can prolong shutdown indefinitely. Override defaults with
+`Supervisor.child_spec/2` if needed. Direct `start_link/1` calls retain their
+caller-linked behavior.
 
 Programmatic use:
 
