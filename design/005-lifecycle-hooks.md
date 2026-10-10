@@ -28,22 +28,43 @@ From a Centralino-style app (agents that drive real work in real repos):
    external system, without polluting `handle_response`.
 5. **Rate limiting**: delay a turn until a budget becomes available.
 
-Observation (4) is already served by telemetry events. (1)(2)(3)(5) are
-not.
+Observation (4) is served by telemetry events plus `post_turn/3` for
+token usage (see below). (1)(2)(3)(5) are not.
 
 ## Principle: telemetry first, callbacks for state mutation
 
-Before adding any new callback, enrich the existing telemetry events
-with enough metadata to cover observational use cases. Concretely:
+Before adding any new callback, use existing telemetry events for
+observational use cases. The original proposal was to enrich them
+(`agent_state` on `:prompt, :start`; post-decision `agent_state` and
+`outcome` on `:prompt, :stop`; `reason` on `:halted`). That proposal
+was only partly adopted. Current behavior (see `GenAgent.Telemetry`):
 
-- `[:gen_agent, :prompt, :start]` -- add `agent_state`, `prompt`.
-- `[:gen_agent, :prompt, :stop]` -- add `agent_state` (post-decision),
-  `outcome` (`:ok | :error`).
-- `[:gen_agent, :halted]` -- add `agent_state`, `reason`.
+- `[:gen_agent, :prompt, :start]` -- metadata has `agent`, `ref`,
+  `attempt`, `prompt`, `original_prompt`, `rewritten`, `agent_state`.
+- `[:gen_agent, :prompt, :stop]` -- measurement `duration` is the
+  core-measured prompt-task elapsed time in **milliseconds**; metadata is `agent`,
+  `ref`, `attempt`, `agent_state`. It fires when the backend task
+  returns, **before** `handle_response/3` and `post_turn/3`, so
+  `agent_state` is the pre-decision state (it does not include changes
+  made by this turn's `handle_response/3`). There is no `outcome` key
+  (success and failure are the separate `:stop` and `:error` events),
+  no `usage`, no `session_id`, and no response.
+- `[:gen_agent, :halted]` -- metadata is `agent` and `agent_state`
+  (the state at the halt transition, after the decision). There is no
+  `reason`; per Q4 there is a single halt cause.
 
-If a use case is pure observation (log tokens, send a Slack summary,
-emit a metric), it should go into a telemetry handler, not a callback.
-No new behaviour required.
+Duration units differ: `:prompt, :stop` and `:prompt, :error`
+`duration` are milliseconds, `:turn, :stop`/`:error` use `duration_ms`
+(milliseconds), and `system_time` measurements are in native units.
+Do not pass these through `System.convert_time_unit/3` as native time.
+
+Normalized token usage lives on `GenAgent.Response.usage`. Read it in
+`handle_response/3` or `post_turn/3`, not from prompt-stop telemetry.
+
+If a use case is pure observation that needs only the metadata above
+(send a Slack summary on halt, emit a duration metric), use a telemetry
+handler. Anything needing the response or usage belongs in
+`post_turn/3`.
 
 New callbacks are justified only when the hook needs to:
 
@@ -51,8 +72,13 @@ New callbacks are justified only when the hook needs to:
 2. Short-circuit the turn (`pre_turn` `:skip` / `:halt`), OR
 3. Block the next transition until an async operation completes.
 
-Telemetry handlers run outside the agent process -- they cannot do any
-of the above.
+Telemetry handlers run synchronously in the process that emits the
+event (usually the agent process), so a slow handler delays the agent,
+and they cannot do any of the above in a controlled way. Offload
+expensive handler work (e.g. send to a separate process or task
+supervisor); that is best effort and gives no delivery guarantee, since
+the receiving process may be down or overloaded and a crashing handler
+is detached by `:telemetry`.
 
 This framing sharpens the proposal below: the hooks exist specifically
 for state-mutating side effects that must fire in the agent's own
@@ -322,7 +348,7 @@ Restated from the principle section above, applied to each hook:
 
 | Use case                           | Solution                             |
 |------------------------------------|--------------------------------------|
-| Log token usage per turn           | telemetry `[:prompt, :stop]` handler |
+| Log token usage per turn           | `post_turn` / `handle_response` (`Response.usage`) |
 | Metrics / distributed tracing      | telemetry handlers                   |
 | Commit per turn (state-mutating)   | `post_turn` callback                 |
 | Create PR on halt (state-reading)  | enriched `[:halted]` telemetry OR `post_run` |
@@ -331,8 +357,8 @@ Restated from the principle section above, applied to each hook:
 | Clone repo on startup              | `pre_run` callback                   |
 | Cleanup on death (any reason)      | `terminate_agent` (already exists)   |
 
-Note the two options for "create PR on halt": the enriched
-`[:halted]` telemetry event now includes `agent_state`, so a
+Note the two options for "create PR on halt": the `[:halted]`
+telemetry event includes `agent_state` (but no `reason`), so a
 telemetry handler can do it without a callback. `post_run` remains
 preferable when the side effect has error paths that should surface
 through the agent's own logging / supervision, or when it needs to
