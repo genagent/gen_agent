@@ -214,7 +214,7 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
     {:ok, state, _} =
       SupStrat.init(
         coordinator: {"coord", TestAgent, []},
-        worker_template: {"w", TestAgent, []},
+        worker_template: {"w", TestAgent, [backend: Mock]},
         decomposer: decomposer_newlines(),
         max_subtasks: 2
       )
@@ -242,7 +242,7 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
         Keyword.merge(
           [
             coordinator: {"coord", TestAgent, []},
-            worker_template: {"w", TestAgent, []},
+            worker_template: {"w", TestAgent, [backend: Mock]},
             decomposer: decomposer_newlines()
           ],
           extra
