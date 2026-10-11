@@ -184,13 +184,30 @@ set up by the repo's `.iex.exs`.
 | `E.ask(name, prompt)`      | Synchronous single-turn. Blocks until reply.       |
 | `E.tell(name, prompt)`     | Async. Returns a `token` you poll or drain later.  |
 | `E.poll(name, token)`      | Non-blocking check; consumes a completed token.    |
-| `E.inbox(name)`            | Drain all completed tokens since last call.        |
+| `E.inbox(name)`            | Drain all retained completed tokens.              |
 | `E.notify(name, event)`    | Send an event to the strategy (cast).              |
 | `E.status(name)`           | Inspect strategy phase, queue depth, etc.          |
 | `E.stop(name)`             | Stop an ensemble cleanly.                          |
 | `E.list()`                 | Names of all running ensembles.                    |
 | `E.start_link(opts)`       | Start an ad-hoc ensemble imperatively (same shape  |
 |                            | as a config entry).                                |
+
+Completed tell results are retained per ensemble with a top-level
+`max_completed_results: 100` default, matching core's default tell result
+limit. Set a non-negative integer (including `0` to disable retention), or
+`:infinity` to explicitly allow unbounded retention. This option belongs
+beside `:name` and `:strategy`, outside strategy `:opts`. Invalid values
+return `{:error, {:invalid_option, :max_completed_results, value}}` before
+strategy initialization or owned tree startup.
+
+Successes, errors, and cancellations all count; the oldest by completion
+order is evicted first. Asks are never cached. `poll/2` consumes one retained
+result and `inbox/1` drains the cache; inbox entry order is unspecified.
+`await/3` does not consume results. Later poll/await calls for evicted or
+consumed tokens return `{:error, :not_found}`. Already registered waiters
+and `tell_with_completion` recipients still receive terminal results when
+retention is zero or the cache is full. The limit bounds result count and
+cache bookkeeping, not response bytes, strategy state, or pending work.
 
 ### Helpers (iex-flavoured sugar)
 

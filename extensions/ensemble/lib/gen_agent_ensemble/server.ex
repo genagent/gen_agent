@@ -7,6 +7,7 @@ defmodule GenAgentEnsemble.Server do
   require Logger
 
   @cancel_child_timeout 5_000
+  @default_max_completed_results 100
 
   defstruct [
     :owner,
@@ -28,6 +29,9 @@ defmodule GenAgentEnsemble.Server do
     :token_contexts,
     # completed tell results, %{token => {:ok, response} | {:error, reason}}
     :completed,
+    # FIFO of retained tokens only; consumed tokens are removed immediately
+    :completed_order,
+    :max_completed_results,
     # %{token => %{monitor_ref => {from, timer_ref | nil}}}
     :waiters,
     # %{monitor_ref => token}
@@ -95,6 +99,7 @@ defmodule GenAgentEnsemble.Server do
       state
       | strategy_state: :redacted,
         completed: :redacted,
+        completed_order: :redacted,
         waiters: :redacted,
         waiter_monitors: :redacted,
         in_flight: :redacted,
@@ -162,7 +167,8 @@ defmodule GenAgentEnsemble.Server do
     strategy_opts = Keyword.get(opts, :opts, [])
     session_name = Keyword.fetch!(opts, :name)
 
-    with {:ok, strategy_state, start_specs} <- strategy_mod.init(strategy_opts),
+    with {:ok, max_completed_results} <- validate_max_completed_results(opts),
+         {:ok, strategy_state, start_specs} <- strategy_mod.init(strategy_opts),
          {:ok, agent_tree} <- GenAgentEnsemble.AgentTree.start_link(session_name) do
       # Older releases left this handler behind after abrupt server death.
       # Request-scoped completions now replace the telemetry bridge entirely.
@@ -185,6 +191,8 @@ defmodule GenAgentEnsemble.Server do
         pending: %{},
         token_contexts: %{},
         completed: %{},
+        completed_order: :queue.new(),
+        max_completed_results: max_completed_results,
         waiters: %{},
         waiter_monitors: %{},
         in_flight: %{},
@@ -203,6 +211,14 @@ defmodule GenAgentEnsemble.Server do
       end
     else
       {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp validate_max_completed_results(opts) do
+    case Keyword.get(opts, :max_completed_results, @default_max_completed_results) do
+      :infinity -> {:ok, :infinity}
+      value when is_integer(value) and value >= 0 -> {:ok, value}
+      value -> {:error, {:invalid_option, :max_completed_results, value}}
     end
   end
 
@@ -340,7 +356,7 @@ defmodule GenAgentEnsemble.Server do
     entries =
       Enum.map(state.completed, fn {token, result} -> {token, result} end)
 
-    {:reply, {:ok, entries}, %{state | completed: %{}}}
+    {:reply, {:ok, entries}, %{state | completed: %{}, completed_order: :queue.new()}}
   end
 
   defp handle_call_impl(:status, _from, state) do
@@ -891,8 +907,7 @@ defmodule GenAgentEnsemble.Server do
             remove_waiter(acc, mref, result)
           end)
 
-        completed = Map.put(state.completed, token, result)
-        {:ok, %{state | pending: pending, completed: completed}}
+        {:ok, retain_completed(%{state | pending: pending}, token, result)}
     end
   end
 
@@ -1075,7 +1090,26 @@ defmodule GenAgentEnsemble.Server do
 
   defp pop_completed(state, token) do
     {result, rest} = Map.pop(state.completed, token)
-    {result, %{state | completed: rest}}
+    order = :queue.filter(&(&1 != token), state.completed_order)
+    {result, %{state | completed: rest, completed_order: order}}
+  end
+
+  defp retain_completed(%{max_completed_results: 0} = state, _token, _result), do: state
+
+  defp retain_completed(state, token, result) do
+    state = %{
+      state
+      | completed: Map.put(state.completed, token, result),
+        completed_order: :queue.in(token, state.completed_order)
+    }
+
+    if state.max_completed_results != :infinity and
+         map_size(state.completed) > state.max_completed_results do
+      {{:value, oldest}, order} = :queue.out(state.completed_order)
+      %{state | completed: Map.delete(state.completed, oldest), completed_order: order}
+    else
+      state
+    end
   end
 
   defp active_dispatch?(_state, nil), do: true

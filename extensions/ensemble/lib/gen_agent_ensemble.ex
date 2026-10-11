@@ -32,6 +32,16 @@ defmodule GenAgentEnsemble do
   Start a new ensemble process. Takes `:name`, `:strategy`, and
   `:opts` (the strategy's own options keyword list).
 
+  Top-level `:max_completed_results` bounds retained terminal tell results,
+  default 100 (matching core's default tell result limit). Accepts a
+  non-negative integer, including 0 to disable retention, or `:infinity` to
+  opt out of the bound. Invalid values return
+  `{:error, {:invalid_option, :max_completed_results, value}}` before strategy
+  initialization or owned tree startup. The oldest result by completion
+  order is evicted first; success, error, and cancellation all count.
+  Asks are never cached. This is a result count bound, not a byte limit or
+  a bound on strategy state or pending work.
+
   The session is linked to its caller and stops when that caller exits,
   including normally. Runtime shutdown waits for the owned agent tree;
   each sub-agent's configured `:shutdown` budget still applies. The session's
@@ -87,6 +97,7 @@ defmodule GenAgentEnsemble do
   The recipient defaults to the caller. It must be a PID (otherwise raises
   `FunctionClauseError`).
   Notification does not consume the result stored for `poll/2` or `inbox/1`.
+  It is delivered even when retention is disabled or the cache is full.
   Halt delivers `{:error, {:halted, reason}}` before stopping the session;
   stored results are unavailable after the session terminates.
   """
@@ -99,8 +110,9 @@ defmodule GenAgentEnsemble do
   Returns `{:ok, response}` or `{:error, reason}`. All registered waiters
   receive the terminal result. `poll/2` and `inbox/1` still consume the
   stored copy; an await processed after consumption returns
-  `{:error, :not_found}`, as does an unknown token. Server message order
-  determines races between registration, completion, and consumption.
+  `{:error, :not_found}`, as does an evicted or unknown token. Registered
+  waiters receive results even with zero retention or a full cache. Server
+  message order determines races between registration, completion, and consumption.
 
   Timeout is a non-negative number of milliseconds or `:infinity`, default
   30_000. Zero checks the current result without waiting. Expiry returns
@@ -122,7 +134,7 @@ defmodule GenAgentEnsemble do
   settlement of an external provider process.
 
   Returns `{:error, :already_finished}` for a retained result or a completion
-  that wins the race, `{:error, :not_found}` for unknown/consumed tokens
+  that wins the race, `{:error, :not_found}` for unknown/consumed/evicted tokens
   (including finished asks), and `{:error, :unsupported}` when the strategy
   lacks `handle_cancel/2`. Unsupported strategies are left unchanged.
   """
@@ -143,12 +155,14 @@ defmodule GenAgentEnsemble do
   @doc """
   Non-blocking check on a `tell`-minted token. Returns
   `{:ok, :pending}`, `{:ok, :completed, response}`, or
-  `{:error, reason}`.
+  `{:error, reason}`. Completed results are consumed; evicted or consumed
+  tokens return `{:error, :not_found}`.
   """
   defdelegate poll(name, token), to: GenAgentEnsemble.Server
 
   @doc """
-  Drain every completed `tell` token since the last call. Returns
+  Drain all currently retained completed `tell` tokens, clearing their
+  completion order bookkeeping too. Entry order is unspecified. Returns
   `{:ok, [{token, {:ok, response} | {:error, reason}}, ...]}`.
   """
   defdelegate inbox(name), to: GenAgentEnsemble.Server
