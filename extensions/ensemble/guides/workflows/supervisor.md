@@ -107,8 +107,16 @@ form above or put the `start_link/1` call in your application's
 
 ### Single decomposed run
 
+Decompose, fan out and recombine take several backend turns, so budget the
+call with `timeout:` (default 30_000 ms). Expiry exits the caller; the
+timeout itself does not cancel the work, which keeps running only if the
+ensemble survives (the caller catches the exit, or a separate supervised
+owner started it). An uncaught exit that kills the `start_link` owner stops
+the ensemble. For recoverable waits use `GenAgentEnsemble.tell/2` +
+`GenAgentEnsemble.await/3` (`E.await` raises on timeout).
+
 ```elixir
-iex> E.ask!("research", "why does Erlang have a separate process per stage?")
+iex> E.ask!("research", "why does Erlang have a separate process per stage?", timeout: 300_000)
 """
 - The BEAM's process model makes this cheap...
 - Isolation: a crashing stage can't corrupt the others...

@@ -222,6 +222,19 @@ cache bookkeeping, not response bytes, strategy state, or pending work.
 For library code (not iex), call `GenAgentEnsemble` directly -- the
 `GenAgentEnsemble.IEx` module is a humans-at-the-prompt convenience.
 
+**Ask timeouts.** `ask` defaults to 30_000 ms. Override per call with
+`timeout:` (non-negative integer or `:infinity`) or globally with
+`config :gen_agent_ensemble, ask_timeout: 120_000`; the per-call option
+wins. Expiry exits the *calling* process; the timeout itself does **not**
+cancel the work, which keeps running only if the ensemble survives (the
+caller catches the exit, or a separate supervised owner started the
+ensemble). If the uncaught exit kills the process that called `start_link`,
+the ensemble stops with it. For long or recoverable waits call
+`GenAgentEnsemble.tell/2` and `GenAgentEnsemble.await/3`, where a timeout
+returns `{:error, :timeout}` and the result can be fetched later while the
+ensemble is alive. (`E.await` is the iex helper and raises on timeout
+instead.) Invalid values raise `ArgumentError` before any work is submitted.
+
 `GenAgentEnsemble.cancel(name, token)` closes a pending token with
 `{:error, :cancelled}` through the existing completion, await, ask, and
 poll/inbox paths while preserving other tokens and the session. It returns

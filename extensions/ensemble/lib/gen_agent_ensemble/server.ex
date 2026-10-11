@@ -64,8 +64,23 @@ defmodule GenAgentEnsemble.Server do
   end
 
   def ask(name, prompt, opts \\ []) do
-    {timeout, strategy_opts} = Keyword.pop(opts, :timeout, 30_000)
+    {timeout, strategy_opts} = Keyword.pop_lazy(opts, :timeout, &default_ask_timeout/0)
+    validate_ask_timeout!(timeout)
     GenServer.call(via(name), {:ask, prompt, strategy_opts}, timeout)
+  end
+
+  @default_ask_timeout 30_000
+
+  defp default_ask_timeout do
+    Application.get_env(:gen_agent_ensemble, :ask_timeout, @default_ask_timeout)
+  end
+
+  defp validate_ask_timeout!(:infinity), do: :ok
+  defp validate_ask_timeout!(timeout) when is_integer(timeout) and timeout >= 0, do: :ok
+
+  defp validate_ask_timeout!(timeout) do
+    raise ArgumentError,
+          "ask timeout must be a non-negative integer or :infinity, got: #{inspect(timeout)}"
   end
 
   def cancel(name, token), do: GenServer.call(via(name), {:cancel, token}, :infinity)

@@ -146,10 +146,19 @@ to your verdict space.
 
 ### Sync run
 
+Consensus runs several agents (and possibly rounds), so budget it with
+`timeout:` (default 30_000 ms). Expiry exits the caller; the timeout itself
+does not cancel the work, which keeps running only if the ensemble survives
+(the caller catches the exit, or a separate supervised owner started it). An
+uncaught exit that kills the `start_link` owner stops the ensemble. For
+recoverable waits use `GenAgentEnsemble.tell/2` +
+`GenAgentEnsemble.await/3` (`E.await` raises on timeout).
+
 ```elixir
 iex> E.ask!("arch-review",
 ...>   "Proposal: replace ETS session store with Redis for a 500 RPS service. " <>
-...>   "30min TTL, 2KB sessions, team has no Redis experience. Should this go forward?"
+...>   "30min TTL, 2KB sessions, team has no Redis experience. Should this go forward?",
+...>   timeout: 300_000
 ...> ) |> E.puts()
 CONSENSUS: :revise (3 of 3 agreed via majority, round 1)
 
@@ -193,7 +202,7 @@ Every successful response, whatever the `:reply`, carries the decision in
 `response.metadata.consensus`. `response.text` stays a binary.
 
 ```elixir
-{:ok, %{metadata: %{consensus: consensus}}} = E.ask("arch-review", proposal)
+{:ok, %{metadata: %{consensus: consensus}}} = E.ask("arch-review", proposal, timeout: 300_000)
 
 case consensus do
   %{status: :converged, verdict: :approve} -> :ship
