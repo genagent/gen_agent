@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.8.0](https://github.com/genagent/gen_agent/compare/v0.7.0...v0.8.0) (2026-10-11)
+
+
+### Features
+
+* **api:** halt an agent externally after its active turn ([#427](https://github.com/genagent/gen_agent/issues/427)) ([b43d121](https://github.com/genagent/gen_agent/commit/b43d12166a1f7797e49af12b83db24cf1bfe88ce))
+* **backends:** bound and reset HTTP conversation context ([#430](https://github.com/genagent/gen_agent/issues/430)) ([37b52d0](https://github.com/genagent/gen_agent/commit/37b52d0e8f570824bbb808aa852319d21844647f))
+* **backends:** expose CLI turn model in responses ([#422](https://github.com/genagent/gen_agent/issues/422)) ([22300ef](https://github.com/genagent/gen_agent/commit/22300ef2d1344bb99dee6c13a02314bc79bab073))
+* **backends:** normalize provider failures with retry metadata ([#432](https://github.com/genagent/gen_agent/issues/432)) ([97c410e](https://github.com/genagent/gen_agent/commit/97c410e498714c5485c5c8df711aa8fd4ff5356b))
+* **core:** deliver ordinary OTP messages to agent callbacks ([#417](https://github.com/genagent/gen_agent/issues/417)) ([430938e](https://github.com/genagent/gen_agent/commit/430938e7c8485e99ec3eec893ffd5d927461f773))
+* **core:** drain agents after active turn ([#412](https://github.com/genagent/gen_agent/issues/412)) ([02e5b29](https://github.com/genagent/gen_agent/commit/02e5b298083a1d5a854a15d9968882a593be0fa0))
+* **core:** expose current agent name in callbacks ([#413](https://github.com/genagent/gen_agent/issues/413)) ([1dd173d](https://github.com/genagent/gen_agent/commit/1dd173d6ca22367814ca8e3c81ebd6c09782fc99))
+* **core:** include dispatched prompt in responses ([#414](https://github.com/genagent/gen_agent/issues/414)) ([b9f935e](https://github.com/genagent/gen_agent/commit/b9f935e01d501afa88166dca22b76365ac4d4d70))
+* **core:** publish scripted mock backend ([#416](https://github.com/genagent/gen_agent/issues/416)) ([bcb801f](https://github.com/genagent/gen_agent/commit/bcb801ff9d929121c2c425c7d930770037b56607))
+* **core:** support agent tuple child specs and static stops ([#434](https://github.com/genagent/gen_agent/issues/434)) ([7320c72](https://github.com/genagent/gen_agent/commit/7320c72a05742dad8af909894246ef13420e14ba))
+* **openai:** support stateless responses with store option ([#435](https://github.com/genagent/gen_agent/issues/435)) ([cd26b49](https://github.com/genagent/gen_agent/commit/cd26b498ed09abdb5f49cbbb23cacd23cb091026))
+* **telemetry:** report agent process termination ([#424](https://github.com/genagent/gen_agent/issues/424)) ([4f30218](https://github.com/genagent/gen_agent/commit/4f3021892945bda48568e34cfe9de0c8b5d136dc))
+
+
+### Bug Fixes
+
+* **ci:** gate releases on successful current-main CI ([#420](https://github.com/genagent/gen_agent/issues/420)) ([95f0191](https://github.com/genagent/gen_agent/commit/95f01916df490fa3c9d13c90202f57e5e8204613))
+* **ci:** make quality and release checks more reliable ([#439](https://github.com/genagent/gen_agent/issues/439)) ([9cc7e34](https://github.com/genagent/gen_agent/commit/9cc7e34a10364f99653a608b2b383449c1d200dc))
+* **ci:** publish packages from their release tags ([#419](https://github.com/genagent/gen_agent/issues/419)) ([3292b37](https://github.com/genagent/gen_agent/commit/3292b37a75830e397e066c3a329764685a958616))
+* **core:** attribute callback failures to agent and module ([#410](https://github.com/genagent/gen_agent/issues/410)) ([1f0167b](https://github.com/genagent/gen_agent/commit/1f0167bee7f335483237ecf950d95d00a41a5e6c))
+* **core:** bound tell result cache by bytes ([#411](https://github.com/genagent/gen_agent/issues/411)) ([824cf09](https://github.com/genagent/gen_agent/commit/824cf091ecc7a2ad930bca90cb96b00eb457f118))
+* **core:** reject synchronous self-stop from agent callbacks ([#438](https://github.com/genagent/gen_agent/issues/438)) ([6081bcb](https://github.com/genagent/gen_agent/commit/6081bcbb1c5b20016e4fc8a7ebf1f3d79fd5e260))
+* **ensemble:** correct production config and package metadata ([#475](https://github.com/genagent/gen_agent/issues/475)) ([4186000](https://github.com/genagent/gen_agent/commit/41860000a96e5315db36cf7fcee08a1fb9edbb91))
+* **guides:** wait for pattern completion and roll back startup ([#452](https://github.com/genagent/gen_agent/issues/452)) ([ad14135](https://github.com/genagent/gen_agent/commit/ad141353802c605cfbc14bdb12efde65d777a58e))
+
 ## [0.7.0](https://github.com/genagent/gen_agent/compare/v0.6.2...v0.7.0) (2026-10-06)
 
 
