@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.0](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.4.1...gen_agent_openai-v0.5.0) (2026-10-11)
+
+
+### Features
+
+* **backends:** bound and reset HTTP conversation context ([#430](https://github.com/genagent/gen_agent/issues/430)) ([37b52d0](https://github.com/genagent/gen_agent/commit/37b52d0e8f570824bbb808aa852319d21844647f))
+* **backends:** normalize provider failures with retry metadata ([#432](https://github.com/genagent/gen_agent/issues/432)) ([97c410e](https://github.com/genagent/gen_agent/commit/97c410e498714c5485c5c8df711aa8fd4ff5356b))
+* **backends:** report cache usage and opt in Anthropic caching ([#428](https://github.com/genagent/gen_agent/issues/428)) ([7c46c6f](https://github.com/genagent/gen_agent/commit/7c46c6fe336d18c7d7bbe1370afb9c8fc83f830e))
+* **http backends:** configure endpoint, headers, and request fields ([#440](https://github.com/genagent/gen_agent/issues/440)) ([40ee8ef](https://github.com/genagent/gen_agent/commit/40ee8ef806f5dc900bd87322048583b7fe957f24))
+* **http backends:** expose per-session Finch pool options ([#442](https://github.com/genagent/gen_agent/issues/442)) ([82b5e8b](https://github.com/genagent/gen_agent/commit/82b5e8bfadb3e199abbcfcad511436deac6dde67))
+* **openai:** support stateless responses with store option ([#435](https://github.com/genagent/gen_agent/issues/435)) ([cd26b49](https://github.com/genagent/gen_agent/commit/cd26b498ed09abdb5f49cbbb23cacd23cb091026))
+
+
+### Bug Fixes
+
+* **openai:** reset lost response chains and support truncation ([#423](https://github.com/genagent/gen_agent/issues/423)) ([b620c35](https://github.com/genagent/gen_agent/commit/b620c354ebd577324570165cd9ef7f749a8498ee))
+
 ## [0.4.1](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.4.0...gen_agent_openai-v0.4.1) (2026-10-06)
 
 
