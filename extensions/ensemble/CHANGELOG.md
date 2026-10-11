@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.7.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.6.1...gen_agent_ensemble-v0.7.0) (2026-10-11)
+
+
+### Features
+
+* **core:** publish scripted mock backend ([#416](https://github.com/genagent/gen_agent/issues/416)) ([bcb801f](https://github.com/genagent/gen_agent/commit/bcb801ff9d929121c2c425c7d930770037b56607))
+
+
+### Bug Fixes
+
+* **core:** attribute startup failures to the right component ([#366](https://github.com/genagent/gen_agent/issues/366)) ([1ffbe5c](https://github.com/genagent/gen_agent/commit/1ffbe5ce12b1793bd2d75f2ded1e051db877e95f))
+* **core:** return not_found for missing agent calls ([#379](https://github.com/genagent/gen_agent/issues/379)) ([c78c718](https://github.com/genagent/gen_agent/commit/c78c718385f23eddce8d23c3fa903160af074ca9))
+* **deps:** test HTTP adapters with published core 0.7 ([#406](https://github.com/genagent/gen_agent/issues/406)) ([ce57268](https://github.com/genagent/gen_agent/commit/ce57268f57d6893b10d5bdf501e022953a85a8d6))
+* **ensemble:** bound retained tell results ([#484](https://github.com/genagent/gen_agent/issues/484)) ([d009810](https://github.com/genagent/gen_agent/commit/d00981066e2890f052c0c22bec0814e8cbb7bdc1))
+* **ensemble:** close tokens without optional failure callbacks ([#457](https://github.com/genagent/gen_agent/issues/457)) ([2627459](https://github.com/genagent/gen_agent/commit/262745984d7e774ac04333592e21f45d3bce9521))
+* **ensemble:** configure and document ask timeouts ([#485](https://github.com/genagent/gen_agent/issues/485)) ([75ab38e](https://github.com/genagent/gen_agent/commit/75ab38e099e0bd987b4385dd7e4f7bff4136d373))
+* **ensemble:** contain built-in user function failures ([#460](https://github.com/genagent/gen_agent/issues/460)) ([1f82da7](https://github.com/genagent/gen_agent/commit/1f82da7766b3f846da8b69aa9521bdbd1fab2e75))
+* **ensemble:** correct production config and package metadata ([#475](https://github.com/genagent/gen_agent/issues/475)) ([4186000](https://github.com/genagent/gen_agent/commit/41860000a96e5315db36cf7fcee08a1fb9edbb91))
+* **ensemble:** expose caller-supervised child specifications ([#483](https://github.com/genagent/gen_agent/issues/483)) ([b139f51](https://github.com/genagent/gen_agent/commit/b139f510f57add50d72a6518cd4a2835292ea8f4))
+* **ensemble:** expose typed Consensus decisions ([#477](https://github.com/genagent/gen_agent/issues/477)) ([b07d2bd](https://github.com/genagent/gen_agent/commit/b07d2bd89eaddbddec80b712995b793955ac5e29))
+* **ensemble:** finish owned tree shutdown before session exit ([#456](https://github.com/genagent/gen_agent/issues/456)) ([a26f279](https://github.com/genagent/gen_agent/commit/a26f279b52064107e64efe9637692068d94a907e))
+* **ensemble:** keep configured sessions stopped after normal exits ([#459](https://github.com/genagent/gen_agent/issues/459)) ([90a02ff](https://github.com/genagent/gen_agent/commit/90a02ff0236e058cf72e0faf422a1a2052801d13))
+* **ensemble:** link owner before session initialization ([#444](https://github.com/genagent/gen_agent/issues/444)) ([d28e57b](https://github.com/genagent/gen_agent/commit/d28e57be27a84a054cca6e698ebeac34afbc29f5))
+* **ensemble:** preserve completed Supervisor workers and reply before cleanup ([#458](https://github.com/genagent/gen_agent/issues/458)) ([d56ff98](https://github.com/genagent/gen_agent/commit/d56ff9812f3190b161b14e1ea85bee7a1f3c9a45))
+* **ensemble:** reject invalid Supervisor worker options during startup ([#474](https://github.com/genagent/gen_agent/issues/474)) ([88b0398](https://github.com/genagent/gen_agent/commit/88b03982ea85d3e3a27eb421ac4415773f53628e))
+* **ensemble:** retain partial outputs in optional failure replies ([#468](https://github.com/genagent/gen_agent/issues/468)) ([f703261](https://github.com/genagent/gen_agent/commit/f70326192808b9128039001c73d734a121119d89))
+* **ensemble:** validate strategy startup options ([#455](https://github.com/genagent/gen_agent/issues/455)) ([f852c0e](https://github.com/genagent/gen_agent/commit/f852c0ec522a6c52af7563a4aa2b83b296dbb99e))
+
 ## [0.6.1](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.6.0...gen_agent_ensemble-v0.6.1) (2026-10-02)
 
 
