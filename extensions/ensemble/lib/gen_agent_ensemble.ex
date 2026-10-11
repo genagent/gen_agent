@@ -130,13 +130,40 @@ defmodule GenAgentEnsemble do
 
   @doc """
   Synchronous prompt. Blocks until the strategy replies or the
-  default timeout expires.
+  default timeout expires. See `ask/3` for timeout semantics.
   """
   defdelegate ask(name, prompt), to: GenAgentEnsemble.Server
 
   @doc """
   Like `ask/2` with options. Supports `timeout:` plus any
   strategy-specific keys (e.g. `agent:` for Switchboard).
+
+  ## Timeout
+
+  The timeout is a non-negative integer of milliseconds or `:infinity`.
+  Precedence: the per-call `timeout:` option, then the application
+  environment (`config :gen_agent_ensemble, ask_timeout: 120_000`), then
+  the compatibility default of 30_000. The selected value is validated
+  before any work is submitted; invalid values (including an invalid
+  application setting) raise `ArgumentError`.
+
+  Expiry is a `GenServer.call/3` timeout: the **calling process exits**
+  with `{:timeout, {GenServer, :call, _}}` (catch it if needed). The timeout
+  itself does **not** cancel the work, and a late reply is not delivered to
+  the caller as a result. The ensemble and its agents keep running the
+  request only if the ensemble survives: the caller catches the exit, or the
+  ensemble is owned by a separate process (such as a supervisor). If the
+  uncaught exit kills the process that called `start_link/1`, the ensemble
+  stops with that owner, along with its agents and in-flight work.
+  Use `cancel/2` with a `tell/3` token to stop work explicitly.
+
+  For long or recoverable waits prefer `tell/3` with `await/3` (called as
+  `GenAgentEnsemble.await/3`; `GenAgentEnsemble.IEx.await/3` raises on
+  timeout instead): the `await/3` timeout returns `{:error, :timeout}`
+  without exiting, and the result can still be retrieved later with
+  `await/3` or `poll/2` while the ensemble is alive. Budget
+  long strategies (Debate, Pipeline, Consensus, Supervisor) explicitly with
+  `timeout:` or the application setting.
   """
   defdelegate ask(name, prompt, opts), to: GenAgentEnsemble.Server
 

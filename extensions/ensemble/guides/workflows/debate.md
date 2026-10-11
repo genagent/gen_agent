@@ -96,8 +96,16 @@ config :gen_agent_ensemble,
 
 ### Sync run
 
+A debate spans many backend turns, so budget it with `timeout:` (default
+30_000 ms). Expiry exits the caller; the timeout itself does not cancel the
+debate, which keeps running only if the ensemble survives (the caller catches
+the exit, or a separate supervised owner started it). An uncaught exit that
+kills the `start_link` owner stops the ensemble. For recoverable waits use
+`GenAgentEnsemble.tell/2` + `GenAgentEnsemble.await/3` (`E.await` raises on
+timeout).
+
 ```elixir
-iex> E.ask!("redis-vs-postgres", "Should a new event-sourced audit log land in Redis Streams or a Postgres partitioned table?")
+iex> E.ask!("redis-vs-postgres", "Should a new event-sourced audit log land in Redis Streams or a Postgres partitioned table?", timeout: 600_000)
 "pro-redis:
 ...
 

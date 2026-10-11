@@ -70,12 +70,18 @@ namespacing handles isolation from other ensembles automatically.
 ### Full chain, sync
 
 ```elixir
-iex> E.ask!("brainstorm", "writing a tech blog that people actually read")
+iex> E.ask!("brainstorm", "writing a tech blog that people actually read", timeout: 300_000)
 "# Tutorials turn strangers into believers by proving you can solve their problems right now."
 ```
 
 Single call, multiple backend calls inside. Wall clock is the sum
-of all stage latencies.
+of all stage latencies, so budget it with `timeout:` (default 30_000 ms).
+Expiry exits the caller; the timeout itself does not cancel the pipeline,
+which keeps running only if the ensemble survives (the caller catches the
+exit, or a separate supervised owner started it). An uncaught exit that kills
+the `start_link` owner stops the ensemble. For recoverable waits use
+`GenAgentEnsemble.tell/2` + `GenAgentEnsemble.await/3` (`E.await` raises on
+timeout).
 
 ### Async
 
