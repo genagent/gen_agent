@@ -46,7 +46,7 @@ The package resolves a compatible GenAgent core version through its dependency.
 
 ```elixir
 def deps do
-  [{:gen_agent_ensemble, "~> 0.6.1"}] # x-release-please-version
+  [{:gen_agent_ensemble, "~> 0.7.0"}] # x-release-please-version
 end
 ```
 
