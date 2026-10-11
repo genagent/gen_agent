@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.2.7...gen_agent_claude-v0.3.0) (2026-10-11)
+
+
+### Features
+
+* **backends:** expose CLI turn model in responses ([#422](https://github.com/genagent/gen_agent/issues/422)) ([22300ef](https://github.com/genagent/gen_agent/commit/22300ef2d1344bb99dee6c13a02314bc79bab073))
+* **backends:** normalize provider failures with retry metadata ([#432](https://github.com/genagent/gen_agent/issues/432)) ([97c410e](https://github.com/genagent/gen_agent/commit/97c410e498714c5485c5c8df711aa8fd4ff5356b))
+
 ## [0.2.7](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.2.6...gen_agent_claude-v0.2.7) (2026-10-05)
 
 
