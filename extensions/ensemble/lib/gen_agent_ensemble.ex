@@ -31,8 +31,50 @@ defmodule GenAgentEnsemble do
   @doc """
   Start a new ensemble process. Takes `:name`, `:strategy`, and
   `:opts` (the strategy's own options keyword list).
+
+  Top-level `:max_completed_results` bounds retained terminal tell results,
+  default 100 (matching core's default tell result limit). Accepts a
+  non-negative integer, including 0 to disable retention, or `:infinity` to
+  opt out of the bound. Invalid values return
+  `{:error, {:invalid_option, :max_completed_results, value}}` before strategy
+  initialization or owned tree startup. The oldest result by completion
+  order is evicted first; success, error, and cancellation all count.
+  Asks are never cached. This is a result count bound, not a byte limit or
+  a bound on strategy state or pending work.
+
+  The session is linked to its caller and stops when that caller exits,
+  including normally. Runtime shutdown waits for the owned agent tree;
+  each sub-agent's configured `:shutdown` budget still applies. The session's
+  supervisor child spec uses `shutdown: :infinity` so it does not cut those
+  budgets short. Termination observers should return promptly; a blocking
+  observer or an infinite child shutdown budget can prolong cleanup indefinitely.
+  Forced kills can still skip termination callbacks.
   """
   defdelegate start_link(opts), to: GenAgentEnsemble.Server
+
+  @doc """
+  Return a child specification for supervising an ensemble with
+  `{GenAgentEnsemble, opts}`. Accepts the same options as `start_link/1`,
+  including the required `:name`.
+
+  The child ID is `{GenAgentEnsemble, name}`, allowing distinct named
+  ensembles under one supervisor without creating atoms. Restart is
+  `:transient`: explicit stops and strategy halts stay stopped, while
+  abnormal exits restart the ensemble. Shutdown is `:infinity` so the
+  owned agent tree can finish within its configured shutdown budgets.
+
+  Use `Supervisor.child_spec/2` to override these defaults when needed.
+  """
+  @spec child_spec(keyword()) :: Supervisor.child_spec()
+  def child_spec(opts) do
+    %{
+      id: {__MODULE__, Keyword.fetch!(opts, :name)},
+      start: {__MODULE__, :start_link, [opts]},
+      restart: :transient,
+      shutdown: :infinity,
+      type: :worker
+    }
+  end
 
   @doc """
   Fire-and-forget prompt. Returns `{:ok, token}` immediately; use
@@ -55,6 +97,7 @@ defmodule GenAgentEnsemble do
   The recipient defaults to the caller. It must be a PID (otherwise raises
   `FunctionClauseError`).
   Notification does not consume the result stored for `poll/2` or `inbox/1`.
+  It is delivered even when retention is disabled or the cache is full.
   Halt delivers `{:error, {:halted, reason}}` before stopping the session;
   stored results are unavailable after the session terminates.
   """
@@ -67,8 +110,9 @@ defmodule GenAgentEnsemble do
   Returns `{:ok, response}` or `{:error, reason}`. All registered waiters
   receive the terminal result. `poll/2` and `inbox/1` still consume the
   stored copy; an await processed after consumption returns
-  `{:error, :not_found}`, as does an unknown token. Server message order
-  determines races between registration, completion, and consumption.
+  `{:error, :not_found}`, as does an evicted or unknown token. Registered
+  waiters receive results even with zero retention or a full cache. Server
+  message order determines races between registration, completion, and consumption.
 
   Timeout is a non-negative number of milliseconds or `:infinity`, default
   30_000. Zero checks the current result without waiting. Expiry returns
@@ -90,7 +134,7 @@ defmodule GenAgentEnsemble do
   settlement of an external provider process.
 
   Returns `{:error, :already_finished}` for a retained result or a completion
-  that wins the race, `{:error, :not_found}` for unknown/consumed tokens
+  that wins the race, `{:error, :not_found}` for unknown/consumed/evicted tokens
   (including finished asks), and `{:error, :unsupported}` when the strategy
   lacks `handle_cancel/2`. Unsupported strategies are left unchanged.
   """
@@ -98,25 +142,54 @@ defmodule GenAgentEnsemble do
 
   @doc """
   Synchronous prompt. Blocks until the strategy replies or the
-  default timeout expires.
+  default timeout expires. See `ask/3` for timeout semantics.
   """
   defdelegate ask(name, prompt), to: GenAgentEnsemble.Server
 
   @doc """
   Like `ask/2` with options. Supports `timeout:` plus any
   strategy-specific keys (e.g. `agent:` for Switchboard).
+
+  ## Timeout
+
+  The timeout is a non-negative integer of milliseconds or `:infinity`.
+  Precedence: the per-call `timeout:` option, then the application
+  environment (`config :gen_agent_ensemble, ask_timeout: 120_000`), then
+  the compatibility default of 30_000. The selected value is validated
+  before any work is submitted; invalid values (including an invalid
+  application setting) raise `ArgumentError`.
+
+  Expiry is a `GenServer.call/3` timeout: the **calling process exits**
+  with `{:timeout, {GenServer, :call, _}}` (catch it if needed). The timeout
+  itself does **not** cancel the work, and a late reply is not delivered to
+  the caller as a result. The ensemble and its agents keep running the
+  request only if the ensemble survives: the caller catches the exit, or the
+  ensemble is owned by a separate process (such as a supervisor). If the
+  uncaught exit kills the process that called `start_link/1`, the ensemble
+  stops with that owner, along with its agents and in-flight work.
+  Use `cancel/2` with a `tell/3` token to stop work explicitly.
+
+  For long or recoverable waits prefer `tell/3` with `await/3` (called as
+  `GenAgentEnsemble.await/3`; `GenAgentEnsemble.IEx.await/3` raises on
+  timeout instead): the `await/3` timeout returns `{:error, :timeout}`
+  without exiting, and the result can still be retrieved later with
+  `await/3` or `poll/2` while the ensemble is alive. Budget
+  long strategies (Debate, Pipeline, Consensus, Supervisor) explicitly with
+  `timeout:` or the application setting.
   """
   defdelegate ask(name, prompt, opts), to: GenAgentEnsemble.Server
 
   @doc """
   Non-blocking check on a `tell`-minted token. Returns
   `{:ok, :pending}`, `{:ok, :completed, response}`, or
-  `{:error, reason}`.
+  `{:error, reason}`. Completed results are consumed; evicted or consumed
+  tokens return `{:error, :not_found}`.
   """
   defdelegate poll(name, token), to: GenAgentEnsemble.Server
 
   @doc """
-  Drain every completed `tell` token since the last call. Returns
+  Drain all currently retained completed `tell` tokens, clearing their
+  completion order bookkeeping too. Entry order is unspecified. Returns
   `{:ok, [{token, {:ok, response} | {:error, reason}}, ...]}`.
   """
   defdelegate inbox(name), to: GenAgentEnsemble.Server

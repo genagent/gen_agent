@@ -10,8 +10,10 @@ defmodule GenAgent.IntegrationTest do
 
   @moduletag capture_log: true
 
+  alias GenAgent.Backends.Mock
   alias GenAgent.Event
   import GenAgent.TestDownAssertions
+  import GenAgent.TestPollingAssertions
 
   defmodule SimpleAgent do
     use GenAgent
@@ -57,6 +59,18 @@ defmodule GenAgent.IntegrationTest do
     def handle_event(:halt_me, state) do
       {:halt, state}
     end
+  end
+
+  defmodule CustomSpecAgent do
+    use GenAgent
+
+    def child_spec(opts), do: super(opts) |> Map.put(:shutdown, 1_234)
+
+    @impl true
+    def init_agent(_opts), do: {:ok, [], %{}}
+
+    @impl true
+    def handle_response(_ref, _response, state), do: {:noreply, state}
   end
 
   defmodule MinimalAgent do
@@ -131,6 +145,178 @@ defmodule GenAgent.IntegrationTest do
         GenAgent.start_agent(SimpleAgent, name: "no-backend")
       end
     end
+
+    test "rejects invalid :watchdog_ms at start" do
+      for value <- [-5, 0, "600000", :never, 1.5] do
+        assert {:error, {:init_failed, :error, ArgumentError}} =
+                 GenAgent.start_agent(SimpleAgent,
+                   name: unique_name("bad-watchdog"),
+                   backend: GenAgent.Backends.Mock,
+                   watchdog_ms: value
+                 )
+      end
+    end
+
+    test "rejects invalid :max_tell_results at start" do
+      for value <- [-1, "100", :infinity, :unlimited, 1.5] do
+        assert {:error, {:init_failed, :error, ArgumentError}} =
+                 GenAgent.start_agent(SimpleAgent,
+                   name: unique_name("bad-tell-results"),
+                   backend: GenAgent.Backends.Mock,
+                   max_tell_results: value
+                 )
+      end
+    end
+
+    test "rejects invalid :max_tell_result_bytes at start" do
+      for value <- [-1, "8192", :infinity, :unlimited, 1.5] do
+        assert {:error, {:init_failed, :error, ArgumentError}} =
+                 GenAgent.start_agent(SimpleAgent,
+                   name: unique_name("bad-tell-result-bytes"),
+                   backend: GenAgent.Backends.Mock,
+                   max_tell_result_bytes: value
+                 )
+      end
+    end
+
+    test "accepts boundary :watchdog_ms values" do
+      for value <- [1, :infinity] do
+        name = unique_name("ok-watchdog")
+
+        assert {:ok, _pid} =
+                 GenAgent.start_agent(SimpleAgent,
+                   name: name,
+                   backend: GenAgent.Backends.Mock,
+                   watchdog_ms: value,
+                   scripts: [[Event.new(:result, %{text: "ok"})]]
+                 )
+
+        on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+      end
+    end
+
+    test "max_tell_results 0 retains nothing and 1 keeps only the newest" do
+      for {limit, expected} <- [{0, :evicted}, {1, :kept}] do
+        name = unique_name("tell-results")
+
+        {:ok, _pid} =
+          GenAgent.start_agent(SimpleAgent,
+            name: name,
+            backend: GenAgent.Backends.Mock,
+            max_tell_results: limit,
+            scripts: [
+              [Event.new(:result, %{text: "a"})],
+              [Event.new(:result, %{text: "b"})]
+            ]
+          )
+
+        on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+        {:ok, first} = GenAgent.tell_with_completion(name, "one")
+        {:ok, second} = GenAgent.tell_with_completion(name, "two")
+        assert_receive {:gen_agent, :completion, ^name, ^first, {:ok, _}}, 1_000
+        assert_receive {:gen_agent, :completion, ^name, ^second, {:ok, _}}, 1_000
+
+        assert {:error, :not_found} = GenAgent.poll(name, first)
+
+        case expected do
+          :evicted -> assert {:error, :not_found} = GenAgent.poll(name, second)
+          :kept -> assert {:ok, :completed, _} = GenAgent.poll(name, second)
+        end
+      end
+    end
+
+    test "tell result cache evicts old responses when its byte budget is reached" do
+      name = unique_name("tell-result-bytes")
+      large_text = :binary.copy("x", 300_000)
+      script = [Event.new(:text, %{text: large_text}), Event.new(:result, %{text: "ok"})]
+
+      {:ok, pid} =
+        GenAgent.start_agent(SimpleAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          max_tell_result_bytes: 700_000,
+          scripts: [script, script, script]
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+      {:ok, first} = GenAgent.tell(name, "first")
+      wait_until(fn -> match?({:ok, :completed, _}, GenAgent.poll(name, first)) end)
+
+      {:ok, second} = GenAgent.tell_with_completion(name, "second")
+      {:ok, third} = GenAgent.tell_with_completion(name, "third")
+      assert_receive {:gen_agent, :completion, ^name, ^second, {:ok, _}}, 1_000
+      assert_receive {:gen_agent, :completion, ^name, ^third, {:ok, _}}, 1_000
+
+      assert {:error, :not_found} = GenAgent.poll(name, first)
+      assert {:ok, :completed, _} = GenAgent.poll(name, second)
+      assert {:ok, :completed, _} = GenAgent.poll(name, third)
+
+      {_state, data} = :sys.get_state(pid)
+      assert data.tell_result_bytes <= 700_000
+      assert data.tell_result_bytes > 0
+      assert map_size(data.tell_results) == 2
+    end
+
+    test "an oversized completion is delivered but not cached" do
+      name = unique_name("oversized-tell-result")
+
+      {:ok, pid} =
+        GenAgent.start_agent(SimpleAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          max_tell_result_bytes: 0,
+          scripts: [[Event.new(:result, %{text: "ok"})]]
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+      {:ok, ref} = GenAgent.tell_with_completion(name, "work")
+      assert_receive {:gen_agent, :completion, ^name, ^ref, {:ok, %{text: "ok"}}}, 1_000
+      assert {:error, :not_found} = GenAgent.poll(name, ref)
+
+      {_state, data} = :sys.get_state(pid)
+      assert data.tell_result_bytes == 0
+      assert data.tell_results == %{}
+    end
+
+    test "start_agent/2 forwards :task_supervisor to init_agent/1 but strips reserved keys" do
+      test_pid = self()
+
+      defmodule EchoOpts do
+        use GenAgent
+
+        @impl true
+        def init_agent(opts) do
+          send(opts[:test_pid], {:init_opts, Keyword.delete(opts, :test_pid)})
+          {:ok, [scripts: []], []}
+        end
+
+        @impl true
+        def handle_response(_ref, _response, state), do: {:noreply, state}
+      end
+
+      name = unique_name("echo")
+
+      {:ok, _pid} =
+        GenAgent.start_agent(EchoOpts,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          task_supervisor: :some_supervisor,
+          watchdog_ms: 1_000,
+          shutdown: 10_000,
+          max_tell_results: 5,
+          max_tell_result_bytes: 5_000,
+          foo: :bar,
+          test_pid: test_pid
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+
+      assert_receive {:init_opts, opts}, 1_000
+      assert Enum.sort(opts) == [foo: :bar, task_supervisor: :some_supervisor]
+    end
   end
 
   describe "stop/1" do
@@ -149,9 +335,195 @@ defmodule GenAgent.IntegrationTest do
     test "returns {:error, :not_found} for unknown names" do
       assert {:error, :not_found} = GenAgent.stop("nope-#{System.unique_integer()}")
     end
+
+    test "a callback cannot synchronously stop its own agent" do
+      parent = self()
+      name = unique_name("self-stop")
+
+      responder = fn _ref, _response, state ->
+        send(parent, {:response_self_stop, GenAgent.stop(name)})
+        {:halt, state}
+      end
+
+      post_run = fn _state ->
+        send(parent, {:post_run_self_stop, GenAgent.stop(name)})
+        :ok
+      end
+
+      {:ok, pid} =
+        GenAgent.start_agent(GenAgent.Support.TestAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          scripts: [[Event.new(:result, %{text: "done"})]],
+          responder: responder,
+          post_run: post_run,
+          notify_pid: parent
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+      backend_pid = :gen_statem.call(pid, :get_backend_session).agent
+
+      assert {:ok, %{text: "done"}} = GenAgent.ask(name, "go", 1_000)
+      assert_received {:response_self_stop, {:error, :self_stop}}
+      assert_received {:post_run_self_stop, {:error, :self_stop}}
+      assert %{halted: true} = GenAgent.status(name)
+      assert Process.alive?(backend_pid)
+      refute_received {:test_agent, :terminate_agent, _}
+
+      assert :ok = GenAgent.stop(name)
+      assert_received {:test_agent, :terminate_agent, :shutdown}
+      refute Process.alive?(backend_pid)
+    end
+
+    test "a stream callback rejects its own stop but can stop another agent" do
+      parent = self()
+      other_name = start_simple([])
+      name = unique_name("stream-self-stop")
+
+      stream_event_handler = fn _event, state ->
+        send(parent, {:other_stop, GenAgent.stop(other_name)})
+        send(parent, {:stream_self_stop, GenAgent.stop(name)})
+        state
+      end
+
+      {:ok, pid} =
+        GenAgent.start_agent(GenAgent.Support.TestAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          scripts: [[Event.new(:result, %{text: "done"})]],
+          stream_event_handler: stream_event_handler,
+          notify_pid: parent
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+      backend_pid = :gen_statem.call(pid, :get_backend_session).agent
+
+      assert {:ok, %{text: "done"}} = GenAgent.ask(name, "go", 1_000)
+      assert_received {:other_stop, :ok}
+      assert_received {:stream_self_stop, {:error, :self_stop}}
+      assert GenAgent.whereis(other_name) == nil
+      assert Process.alive?(pid)
+      assert Process.alive?(backend_pid)
+
+      assert :ok = GenAgent.stop(name)
+      assert_received {:test_agent, :terminate_agent, :shutdown}
+      refute Process.alive?(backend_pid)
+    end
+
+    test "post_run can ask a separate process to stop after completion" do
+      parent = self()
+      name = unique_name("spawned-stop")
+
+      post_run = fn _state ->
+        spawn(fn -> send(parent, {:spawned_stop, GenAgent.stop(name)}) end)
+        :ok
+      end
+
+      {:ok, pid} =
+        GenAgent.start_agent(GenAgent.Support.TestAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          scripts: [[Event.new(:result, %{text: "done"})]],
+          responder: fn _ref, _response, state -> {:halt, state} end,
+          post_run: post_run,
+          notify_pid: parent
+        )
+
+      on_exit(fn -> if GenAgent.whereis(name), do: GenAgent.stop(name) end)
+      backend_pid = :gen_statem.call(pid, :get_backend_session).agent
+      monitor = Process.monitor(pid)
+
+      assert {:ok, _ref} = GenAgent.tell(name, "go")
+      assert_receive {:DOWN, ^monitor, :process, ^pid, :shutdown}, 1_000
+      assert_receive {:spawned_stop, :ok}
+      assert_received {:test_agent, :terminate_agent, :shutdown}
+      refute Process.alive?(backend_pid)
+    end
   end
 
   describe "caller-owned supervision" do
+    test "use GenAgent provides an overridable child_spec/1 for tuple children" do
+      opts = [
+        name: unique_name("tuple-spec"),
+        backend: GenAgent.Backends.Mock,
+        task_supervisor: self()
+      ]
+
+      assert Supervisor.child_spec({SimpleAgent, opts}, []) ==
+               GenAgent.child_spec(SimpleAgent, opts)
+
+      assert Supervisor.child_spec({CustomSpecAgent, opts}, []).shutdown == 1_234
+
+      assert_raise KeyError, fn ->
+        Supervisor.child_spec({SimpleAgent, Keyword.delete(opts, :task_supervisor)}, [])
+      end
+    end
+
+    test "a static tuple child handles prompts and stop/2 terminates it" do
+      task_supervisor = start_supervised!(Task.Supervisor)
+      name = unique_name("static")
+
+      opts = [
+        name: name,
+        backend: GenAgent.Backends.Mock,
+        task_supervisor: task_supervisor,
+        scripts: [[Event.new(:result, %{text: "static"})]]
+      ]
+
+      {:ok, supervisor} = Supervisor.start_link([{SimpleAgent, opts}], strategy: :one_for_one)
+      Process.unlink(supervisor)
+      on_exit(fn -> if Process.alive?(supervisor), do: Supervisor.stop(supervisor) end)
+
+      pid = GenAgent.whereis(name)
+      monitor = Process.monitor(pid)
+      assert {:ok, %{text: "static"}} = GenAgent.ask(name, "hi")
+      assert {:error, :not_found} = GenAgent.stop(name)
+      assert Process.alive?(pid)
+      assert :ok = GenAgent.stop(name, supervisor)
+      assert_receive {:DOWN, ^monitor, :process, ^pid, _}
+      assert Supervisor.which_children(supervisor) == []
+      assert {:error, :not_found} = Supervisor.restart_child(supervisor, name)
+    end
+
+    test "a crashed static tuple child is removed instead of restarting" do
+      task_supervisor = start_supervised!(Task.Supervisor)
+      name = unique_name("static-crash")
+
+      {:ok, supervisor} =
+        Supervisor.start_link(
+          [
+            {SimpleAgent,
+             name: name, backend: GenAgent.Backends.Mock, task_supervisor: task_supervisor}
+          ],
+          strategy: :one_for_one
+        )
+
+      Process.unlink(supervisor)
+      on_exit(fn -> if Process.alive?(supervisor), do: Supervisor.stop(supervisor) end)
+
+      pid = GenAgent.whereis(name)
+      monitor = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^monitor, :process, ^pid, :killed}
+      assert Supervisor.which_children(supervisor) == []
+      assert {:error, :not_found} = Supervisor.restart_child(supervisor, name)
+    end
+
+    test "child_spec/2 passes through and validates the shutdown timeout" do
+      opts = [
+        name: unique_name("shutdown-spec"),
+        backend: GenAgent.Backends.Mock,
+        task_supervisor: self()
+      ]
+
+      assert GenAgent.child_spec(SimpleAgent, opts).shutdown == 5_000
+      assert GenAgent.child_spec(SimpleAgent, opts ++ [shutdown: :infinity]).shutdown == :infinity
+
+      assert_raise ArgumentError, ~r/:shutdown/, fn ->
+        GenAgent.child_spec(SimpleAgent, opts ++ [shutdown: -1])
+      end
+    end
+
     test "requires an explicit task supervisor and preserves temporary children" do
       assert_raise KeyError, fn ->
         GenAgent.child_spec(SimpleAgent,
@@ -386,32 +758,47 @@ defmodule GenAgent.IntegrationTest do
 
   describe "interrupt/1" do
     test "cancels an in-flight ask and returns {:error, :interrupted}" do
-      slow = fn _ ->
-        Stream.resource(
-          fn -> :s end,
-          fn
-            :s ->
-              Process.sleep(500)
-              {[Event.new(:result, %{text: "never"})], :d}
+      gate =
+        Mock.gate(:integration_interrupt, [Event.new(:result, %{text: "never"})])
 
-            :d ->
-              {:halt, :d}
-          end,
-          fn _ -> :ok end
-        )
-      end
-
-      name = start_simple([slow])
+      name = start_simple([gate])
 
       caller = Task.async(fn -> GenAgent.ask(name, "start") end)
-      Process.sleep(20)
+      assert_receive {:mock_blocked, :integration_interrupt, turn_pid}
+      monitor = Process.monitor(turn_pid)
       assert :ok = GenAgent.interrupt(name)
 
       assert {:error, :interrupted} = Task.await(caller)
+      assert_receive {:DOWN, ^monitor, :process, ^turn_pid, :killed}
     end
   end
 
   describe "resume/1" do
+    test "an ask accepted while halted waits for resume" do
+      name = unique_name("halted-ask")
+
+      {:ok, _} =
+        GenAgent.start_agent(EventDrivenAgent,
+          name: name,
+          backend: GenAgent.Backends.Mock,
+          scripts: [[Event.new(:result, %{text: "after resume"})]]
+        )
+
+      on_exit(fn ->
+        if GenAgent.whereis(name), do: GenAgent.stop(name)
+      end)
+
+      GenAgent.notify(name, :halt_me)
+      wait_until(fn -> GenAgent.status(name).halted end)
+
+      caller = Task.async(fn -> GenAgent.ask(name, "queued") end)
+      wait_until(fn -> GenAgent.runtime_snapshot(name).pending_prompts == 1 end)
+      assert Task.yield(caller, 0) == nil
+
+      assert :ok = GenAgent.resume(name)
+      assert {:ok, %{text: "after resume"}} = Task.await(caller)
+    end
+
     test "unhalts an agent and drains the mailbox" do
       name = unique_name("event")
 
@@ -652,22 +1039,4 @@ defmodule GenAgent.IntegrationTest do
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
-
-  defp wait_until(fun, timeout \\ 1_000, interval \\ 10) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_wait(fun, deadline, interval)
-  end
-
-  defp do_wait(fun, deadline, interval) do
-    if fun.() do
-      :ok
-    else
-      if System.monotonic_time(:millisecond) >= deadline do
-        flunk("wait_until timeout")
-      else
-        Process.sleep(interval)
-        do_wait(fun, deadline, interval)
-      end
-    end
-  end
 end

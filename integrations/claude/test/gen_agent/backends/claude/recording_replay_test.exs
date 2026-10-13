@@ -8,12 +8,13 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
   @external_resource Path.join(@directory, "manifest.json")
   @manifest @directory |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
   @kinds %{
-    "text" => [:text, :usage, :result],
-    "tool-partial" => [:tool_use, :tool_result] ++ List.duplicate(:text, 6) ++ [:usage, :result],
-    "subagent" => [:text, :tool_use, :tool_result, :text, :usage, :result],
-    "plan" => [:tool_use, :tool_result, :text, :usage, :result],
-    "error-max-turns" => [:tool_use, :tool_result, :usage, :error],
-    "json-schema" => [:tool_use, :tool_result, :usage, :result]
+    "text" => [:session, :text, :usage, :result],
+    "tool-partial" =>
+      [:session, :tool_use, :tool_result] ++ List.duplicate(:text, 6) ++ [:usage, :result],
+    "subagent" => [:session, :text, :tool_use, :tool_result, :text, :usage, :result],
+    "plan" => [:session, :tool_use, :tool_result, :text, :usage, :result],
+    "error-max-turns" => [:session, :tool_use, :tool_result, :usage, :error],
+    "json-schema" => [:session, :tool_use, :tool_result, :usage, :result]
   }
 
   for {scenario, metadata} <- @manifest["scenarios"] do
@@ -37,6 +38,7 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
       assert result.data["session_id"] == init.data["session_id"]
       events = parsed |> EventTranslator.translate_stream() |> Enum.to_list()
       assert Enum.map(events, & &1.kind) == @kinds[context.scenario]
+      assert hd(events).data.model == init.data["model"]
 
       rate_limits = Enum.filter(parsed, &(&1.type == "rate_limit_event"))
       assert rate_limits != []
@@ -52,9 +54,8 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
 
       expected_tools = Enum.filter(blocks, &(&1["type"] in ["tool_use", "tool_result"]))
       tools = Enum.filter(events, &(&1.kind in [:tool_use, :tool_result]))
-      # Issue #119: tool payloads lose envelope parent IDs and dedupe without parent scope.
+      # These recordings contain no parent-bearing tool blocks, so their raw payloads stay intact.
       assert Enum.map(tools, & &1.data) == expected_tools
-      assert Enum.all?(tools, &(not Map.has_key?(&1.data, "parent_tool_use_id")))
 
       texts = events |> Enum.filter(&(&1.kind == :text)) |> Enum.map(& &1.data.text)
 
@@ -68,7 +69,7 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
       assert Enum.join(texts) == Enum.join(expected_texts)
       assert_scenario(context.scenario, parsed, events, texts)
 
-      # Issue #118: normalized usage currently omits the recorded cache token fields.
+      # Normalized usage omits the recorded cache token fields.
       usage = %{
         input_tokens: result.data["usage"]["input_tokens"],
         output_tokens: result.data["usage"]["output_tokens"]
@@ -77,36 +78,48 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
       assert Enum.at(events, -2).data == usage
       assert is_integer(result.data["usage"]["cache_read_input_tokens"])
       assert is_integer(result.data["usage"]["cache_creation_input_tokens"])
-      assert_terminal(List.last(events), result.data, usage)
+      assert_terminal(List.last(events), result.data, usage, init.data["model"])
     end
   end
 
-  defp assert_terminal(%{kind: :error, data: data}, raw, usage) do
+  defp assert_terminal(%{kind: :error, data: data}, raw, usage, model) do
     assert raw["errors"] == ["Reached maximum number of turns (1)"]
     refute Map.has_key?(raw, "result")
-    # Issue #118: the errors array currently yields message :unknown.
+
+    expected_reason = %{
+      provider: :claude,
+      subtype: "error_max_turns",
+      message: "Reached maximum number of turns (1)",
+      errors: raw["errors"],
+      num_turns: raw["num_turns"],
+      session_id: raw["session_id"],
+      cost_usd: raw["total_cost_usd"],
+      usage: usage
+    }
+
     assert data == %{
              data: raw,
-             reason: %{
-               provider: :claude,
-               subtype: "error_max_turns",
-               message: :unknown,
-               session_id: raw["session_id"],
-               cost_usd: raw["total_cost_usd"],
-               usage: usage
-             }
+             model: model,
+             reason: GenAgent.ClaudeErrors.expected(expected_reason)
            }
   end
 
-  defp assert_terminal(%{kind: :result, data: data}, raw, _usage) do
-    assert data == %{
-             text: raw["result"],
-             session_id: raw["session_id"],
-             cost_usd: raw["total_cost_usd"],
-             duration_ms: raw["duration_ms"],
-             num_turns: raw["num_turns"],
-             is_error: false
-           }
+  defp assert_terminal(%{kind: :result, data: data}, raw, _usage, model) do
+    expected = %{
+      session_id: raw["session_id"],
+      cost_usd: raw["total_cost_usd"],
+      duration_ms: raw["duration_ms"],
+      num_turns: raw["num_turns"],
+      is_error: false,
+      raw: raw
+    }
+
+    expected = Map.put(expected, :model, model)
+
+    expected =
+      if raw["result"] in [nil, ""], do: expected, else: Map.put(expected, :text, raw["result"])
+
+    assert data == expected
   end
 
   defp assert_scenario("text", _parsed, _events, texts), do: assert(texts == ["pong"])
@@ -119,7 +132,7 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
     nested = Enum.filter(parsed, &(&1.data["parent_tool_use_id"] != nil))
     assert nested != []
     assert Enum.all?(nested, &(&1.type == "user"))
-    # Issue #119: parent-bearing user text is filtered; the Agent call and return survive.
+    # User text is filtered; the Agent call and return survive.
     assert nested |> EventTranslator.translate_stream() |> Enum.to_list() == []
     assert Enum.find(events, &(&1.kind == :tool_use)).data["name"] == "Agent"
   end

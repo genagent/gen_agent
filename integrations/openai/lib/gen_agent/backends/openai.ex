@@ -5,30 +5,38 @@ defmodule GenAgent.Backends.OpenAI do
 
   Unlike the CLI-backed backends (`GenAgent.Backends.Claude`,
   `GenAgent.Backends.Codex`), this backend talks directly to an HTTP
-  API. Unlike `GenAgent.Backends.Anthropic`, it does **not** resend
-  the full conversation history on every turn -- OpenAI holds
-  conversation state server-side, and the backend threads one
-  `previous_response_id` value across turns.
+  API. By default, OpenAI holds conversation state server-side and the
+  backend threads one `previous_response_id` value across turns. With
+  `store: false`, the backend keeps the conversation in the session and
+  resends its input and output items on each turn instead.
 
-  This makes the OpenAI backend structurally simpler than the
-  Anthropic one: there's no messages array to manage, and
-  multi-turn just works as long as `update_session/2` runs after
-  each terminal `:result` event.
+  This backend uses response IDs for stored conversations and a local
+  list of input and output items for stateless conversations. Multi-turn
+  works as long as `update_session/2` runs after each terminal `:result`
+  event.
 
   ## How the two halves of a turn land in the session
 
-  1. `prompt/2` POSTs `{input: [{role: "user", content: prompt}],
-     previous_response_id: session.previous_response_id, instructions,
-     store: true}`, parses the response, and returns `{:ok, events,
-     session}`. The session itself is **not** mutated here -- the
-     request body is built from `session.previous_response_id` as it
-     stood entering the turn.
+  1. `prompt/2` builds the request from the incoming session, parses the
+     response, and returns `{:ok, events, session}`. For `store: false`,
+     the returned session also holds the completed turn pending delivery
+     of its terminal event.
   2. When the state machine delivers the terminal `:result` event,
-     it calls `update_session/2` with the event's data. The event's
-     `:response_id` becomes `session.previous_response_id` for the
-     next turn.
-  3. The next `prompt/2` uses the new `previous_response_id` and
-     OpenAI replays all prior context on the server side.
+     it calls `update_session/2` with the event's data. This records the
+     response ID or appends the completed input and output items to the
+     local history, depending on the `:store` setting.
+  3. With `store: true`, the next `prompt/2` uses the new
+     `previous_response_id` and OpenAI replays prior context. With
+     `store: false`, it sends the locally retained input and output items
+     instead; no `previous_response_id` is sent.
+
+  If the API reports `previous_response_not_found` or a context-window
+  failure for an established chain, the turn emits `{:conversation_lost,
+  body}` as a terminal error and clears `previous_response_id`. The next
+  prompt starts a fresh conversation without restarting the agent process.
+  The failed prompt is not retried automatically. Other HTTP failures leave
+  the conversation ID intact. In stateless mode, only successful turns are
+  added to the local history; resetting the session clears that history.
 
   ## Instructions do not persist across previous_response_id chains
 
@@ -49,6 +57,8 @@ defmodule GenAgent.Backends.OpenAI do
   the message item -- but surfaces `reasoning_tokens` (from
   `usage.output_tokens_details.reasoning_tokens`) in the `:usage`
   event when present, so patterns can reason about cost.
+  When present, `usage.input_tokens_details.cached_tokens` is also
+  included as `:cached_input_tokens`; it is a subset of `:input_tokens`.
 
   Set `:reasoning_effort` to request a specific effort level, for
   example `:low`, `:medium`, or `:high`; leave it `nil` for the model
@@ -62,40 +72,109 @@ defmodule GenAgent.Backends.OpenAI do
     * `:api_key` -- OpenAI API key. Defaults to `System.get_env("OPENAI_API_KEY")`.
       `start_session/1` returns `{:error, :missing_api_key}` when neither
       provides a non-empty key, unless a one-arity `:http_fn` is supplied.
+    * `:base_url` -- API prefix. Defaults to `"https://api.openai.com/v1"`;
+      `/responses` is appended. HTTPS is required except for loopback HTTP.
+      The configured host receives the API key and conversation content.
+    * `:headers` -- map or list of `{name, value}` pairs with string keys and
+      values. Auth, content type, and transport headers cannot be overridden;
+      names are matched case-insensitively. Values must contain only printable
+      ASCII or horizontal tabs.
+    * `:request_fields` -- map of additional JSON request fields, such as
+      `%{temperature: 0.2}`. Fields managed by the backend, including input,
+      storage, continuation, reasoning, streaming, and tools, cannot be
+      overridden.
     * `:model` -- model name. Defaults to `"gpt-5"`.
-    * `:instructions` -- system prompt (string). Resent every turn; see note above.
+    * `:store` -- whether OpenAI stores responses for server-side continuation.
+      Defaults to `true`. With `false`, completed turns are held in the local
+      session and resent on each request; prompts grow with the conversation.
+      This does not change OpenAI's separate abuse-monitoring retention policy.
+    * `:system_prompt` -- system prompt (string). Resent every turn as API
+      `instructions`; `:instructions` and `:system` remain deprecated aliases.
     * `:reasoning_effort` -- an atom or string passed through as
       `reasoning.effort` (for example `:low`, `:medium`, `:high`), or
       `nil` for the model default. Accepted values depend on the model.
       When set, adds `{"reasoning": {"effort": ...}}` to each request.
-    * `:max_output_tokens` -- cap on output tokens per turn. Defaults to `nil` (model default).
+    * `:max_output_tokens` -- cap on output tokens per turn. Defaults to `nil`
+      (model default). `:max_tokens` remains a deprecated alias.
+    * `:truncation` -- `"auto"` or `"disabled"` for the Responses API.
+      Omitted by default, which uses the API's `"disabled"` default.
+      `"auto"` drops older conversation items when the context window fills.
     * `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults to
       `60_000`; increase it for long-context or slow reasoning turns.
     * `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults to
-      Req's default when unset.
+      Req's default when unset. With a named Finch pool, configure this when
+      starting Finch instead; the two session options cannot be combined.
+    * `:finch` -- per-session Finch options: `:pool_timeout` (milliseconds or
+      `:infinity`), `:size` and `:count` (positive integers for a dynamically
+      started pool), or `:name` (an already started Finch pool). A named pool
+      cannot also set `:size` or `:count`. Without this option, Req uses its
+      default HTTP/1 pool of 50 connections per host with a 5-second checkout
+      timeout. For example, `finch: [size: 100, pool_timeout: 20_000]` selects
+      a larger pool and wait limit. Req shares dynamic pools with identical
+      pool configuration across sessions; `:size` is per pool shard.
     * `:http_fn` -- a 1-arity function `(request_map) -> {:ok, response_map} | {:error, term}`
       that replaces the default `Req`-backed HTTP call. Intended for tests.
+
+  Unknown option keys return `{:error, {:unknown_option, key}}`. Conflicting
+  values for the shared name and an alias return `{:error, {:conflicting_options,
+  keys}}`.
   """
 
   @behaviour GenAgent.Backend
 
-  alias GenAgent.Event
+  require Logger
 
-  @endpoint "https://api.openai.com/v1/responses"
+  alias GenAgent.Backend.Error
+  alias GenAgent.Event
+  @compile {:no_warn_undefined, Error}
+
+  @default_base_url "https://api.openai.com/v1"
   @default_model "gpt-5"
   @default_receive_timeout 60_000
-
-  defstruct [
+  @conversation_error_codes [
+    "previous_response_not_found",
+    "context_length_exceeded",
+    "context_window_exceeded"
+  ]
+  @known_options [
     :api_key,
+    :base_url,
+    :headers,
+    :request_fields,
+    :finch,
     :model,
+    :store,
+    :system_prompt,
+    :system,
     :instructions,
     :reasoning_effort,
     :max_output_tokens,
+    :truncation,
+    :max_tokens,
+    :receive_timeout,
+    :connect_timeout,
+    :http_fn
+  ]
+
+  defstruct [
+    :api_key,
+    :base_url,
+    :headers,
+    :request_fields,
+    :finch,
+    :model,
+    :store,
+    :instructions,
+    :reasoning_effort,
+    :max_output_tokens,
+    :truncation,
     :receive_timeout,
     :connect_timeout,
     :http_fn,
     :client_session_id,
-    :previous_response_id
+    :previous_response_id,
+    :history,
+    :pending_turn
   ]
 
   @typedoc "Passed through as `reasoning.effort`; accepted values depend on the model."
@@ -103,44 +182,253 @@ defmodule GenAgent.Backends.OpenAI do
 
   @type t :: %__MODULE__{
           api_key: String.t() | nil,
+          base_url: String.t(),
+          headers: [{String.t(), String.t()}],
+          request_fields: map(),
+          finch: keyword() | nil,
           model: String.t(),
+          store: boolean(),
           instructions: String.t() | nil,
           reasoning_effort: reasoning_effort(),
           max_output_tokens: pos_integer() | nil,
+          truncation: String.t() | nil,
           receive_timeout: timeout(),
           connect_timeout: timeout() | nil,
           http_fn: (map() -> {:ok, map()} | {:error, term()}),
           client_session_id: String.t(),
-          previous_response_id: String.t() | nil
+          previous_response_id: String.t() | nil,
+          history: [map()],
+          pending_turn: {[map()], [map()]} | nil
         }
 
   @impl GenAgent.Backend
   def start_session(opts) do
-    api_key = present(Keyword.get(opts, :api_key)) || present(System.get_env("OPENAI_API_KEY"))
+    with :ok <- validate_opts(opts),
+         :ok <- validate_store(Keyword.get(opts, :store, true)),
+         :ok <- validate_truncation(Keyword.get(opts, :truncation)),
+         {:ok, base_url} <- normalize_base_url(Keyword.get(opts, :base_url, @default_base_url)),
+         {:ok, headers} <- normalize_headers(Keyword.get(opts, :headers, [])),
+         {:ok, request_fields} <-
+           normalize_request_fields(Keyword.get(opts, :request_fields, %{})),
+         {:ok, finch} <- normalize_finch(Keyword.get(opts, :finch)),
+         :ok <- validate_connect_timeout(Keyword.get(opts, :connect_timeout)),
+         {:ok, finch} <- resolve_finch(finch, Keyword.get(opts, :connect_timeout)),
+         {:ok, opts} <- normalize_opts(opts) do
+      api_key = present(Keyword.get(opts, :api_key)) || present(System.get_env("OPENAI_API_KEY"))
 
-    # A caller-supplied :http_fn replaces the HTTP call (a stub or a proxy that
-    # adds credentials), so only the default transport requires a key.
-    if is_nil(api_key) and not is_function(Keyword.get(opts, :http_fn), 1) do
-      {:error, :missing_api_key}
-    else
-      build_session(api_key, opts)
+      # A caller-supplied :http_fn replaces the HTTP call (a stub or a proxy that
+      # adds credentials), so only the default transport requires a key.
+      if is_nil(api_key) and not is_function(Keyword.get(opts, :http_fn), 1) do
+        {:error, :missing_api_key}
+      else
+        build_session(api_key, opts, base_url, headers, request_fields, finch)
+      end
     end
   end
 
-  defp build_session(api_key, opts) do
+  defp validate_opts(opts) do
+    if Keyword.keyword?(opts),
+      do: validate_known_opts(opts),
+      else: {:error, {:invalid_options, opts}}
+  end
+
+  defp validate_known_opts(opts) do
+    case Enum.find(opts, fn {key, _} -> key not in @known_options end) do
+      {key, _} -> {:error, {:unknown_option, key}}
+      nil -> :ok
+    end
+  end
+
+  defp validate_truncation(value) when value in [nil, "auto", "disabled"], do: :ok
+  defp validate_truncation(value), do: {:error, {:invalid_option, :truncation, value}}
+
+  defp validate_store(value) when is_boolean(value), do: :ok
+  defp validate_store(value), do: {:error, {:invalid_option, :store, value}}
+
+  defp normalize_base_url(value) when is_binary(value) do
+    case URI.new(value) do
+      {:ok, %URI{scheme: scheme, host: host, userinfo: nil, query: nil, fragment: nil}}
+      when scheme in ["https", "http"] and is_binary(host) and host != "" ->
+        if not String.match?(value, ~r/\s/) and
+             (scheme == "https" or String.downcase(host) in ["localhost", "127.0.0.1", "::1"]) do
+          {:ok, String.trim_trailing(value, "/")}
+        else
+          {:error, {:invalid_option, :base_url, :invalid}}
+        end
+
+      _ ->
+        {:error, {:invalid_option, :base_url, :invalid}}
+    end
+  end
+
+  defp normalize_base_url(_value), do: {:error, {:invalid_option, :base_url, :invalid}}
+
+  @reserved_headers ~w(authorization content-type host content-length transfer-encoding)
+  defp normalize_headers(value) when is_map(value) or is_list(value) do
+    pairs = if is_map(value), do: Map.to_list(value), else: value
+
+    if Enum.all?(pairs, fn
+         {name, header_value} when is_binary(name) and is_binary(header_value) ->
+           String.match?(name, ~r/^[A-Za-z0-9-]+$/) and
+             valid_header_value?(header_value) and
+             String.downcase(name) not in @reserved_headers
+
+         _ ->
+           false
+       end) and
+         Enum.uniq_by(pairs, fn {name, _} -> String.downcase(name) end) == pairs do
+      {:ok, Enum.map(pairs, fn {name, header_value} -> {String.downcase(name), header_value} end)}
+    else
+      {:error, {:invalid_option, :headers, :invalid}}
+    end
+  end
+
+  defp normalize_headers(_value), do: {:error, {:invalid_option, :headers, :invalid}}
+
+  defp valid_header_value?(value) do
+    value
+    |> :binary.bin_to_list()
+    |> Enum.all?(&(&1 == 9 or &1 in 32..126))
+  end
+
+  @reserved_request_fields ~w(model input instructions previous_response_id conversation store include max_output_tokens truncation reasoning stream background tools tool_choice)
+  defp normalize_request_fields(value) when is_map(value) do
+    if valid_json_map?(value) and
+         Enum.all?(Map.keys(value), &(json_key(&1) not in @reserved_request_fields)) do
+      {:ok, Map.new(value, fn {key, field_value} -> {json_key(key), field_value} end)}
+    else
+      {:error, {:invalid_option, :request_fields, :invalid}}
+    end
+  end
+
+  defp normalize_request_fields(_value),
+    do: {:error, {:invalid_option, :request_fields, :invalid}}
+
+  defp valid_json_map?(value) do
+    keys = Map.keys(value)
+
+    not is_struct(value) and Enum.all?(keys, &valid_json_key?/1) and
+      length(Enum.uniq(Enum.map(keys, &json_key/1))) == length(keys) and
+      Enum.all?(Map.values(value), &valid_json?/1)
+  end
+
+  defp valid_json?(value) when is_map(value), do: valid_json_map?(value)
+  defp valid_json?(value) when is_list(value), do: Enum.all?(value, &valid_json?/1)
+
+  defp valid_json?(value) when is_binary(value) or is_number(value) or is_atom(value),
+    do: true
+
+  defp valid_json?(_value), do: false
+
+  defp valid_json_key?(key) when is_binary(key), do: key != ""
+  defp valid_json_key?(key) when is_atom(key), do: key not in [nil, true, false]
+  defp valid_json_key?(_key), do: false
+
+  defp json_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp json_key(key), do: key
+
+  defp normalize_finch(nil), do: {:ok, nil}
+
+  defp normalize_finch(options) when is_list(options) do
+    valid? =
+      Keyword.keyword?(options) and
+        unique_finch_keys?(options) and
+        Enum.all?(options, &valid_finch_option?/1) and
+        not named_pool_config_conflict?(options)
+
+    if valid?, do: {:ok, if(options == [], do: nil, else: options)}, else: invalid_finch()
+  end
+
+  defp normalize_finch(_value), do: invalid_finch()
+  defp invalid_finch, do: {:error, {:invalid_option, :finch, :invalid}}
+
+  defp unique_finch_keys?(options) do
+    keys = Keyword.keys(options)
+    length(keys) == length(Enum.uniq(keys))
+  end
+
+  defp valid_finch_option?({:name, name}), do: is_atom(name) and not is_nil(name)
+  defp valid_finch_option?({:pool_timeout, timeout}), do: valid_timeout?(timeout)
+
+  defp valid_finch_option?({key, size}) when key in [:size, :count],
+    do: is_integer(size) and size > 0
+
+  defp valid_finch_option?(_), do: false
+
+  defp named_pool_config_conflict?(options) do
+    Keyword.has_key?(options, :name) and
+      (Keyword.has_key?(options, :size) or Keyword.has_key?(options, :count))
+  end
+
+  defp validate_connect_timeout(nil), do: :ok
+
+  defp validate_connect_timeout(timeout) do
+    if valid_timeout?(timeout),
+      do: :ok,
+      else: {:error, {:invalid_option, :connect_timeout, timeout}}
+  end
+
+  defp valid_timeout?(:infinity), do: true
+  defp valid_timeout?(timeout), do: is_integer(timeout) and timeout >= 0
+
+  defp resolve_finch(nil, _timeout), do: {:ok, nil}
+  defp resolve_finch(finch, nil), do: {:ok, finch}
+
+  defp resolve_finch(finch, timeout) do
+    if Keyword.has_key?(finch, :name) do
+      {:error, {:conflicting_options, [:finch, :connect_timeout]}}
+    else
+      {:ok, Keyword.put(finch, :conn_opts, transport_opts: [timeout: timeout])}
+    end
+  end
+
+  defp normalize_opts(opts) do
+    case normalize_aliases(opts, :system_prompt, [:instructions, :system]) do
+      {:ok, opts} -> normalize_aliases(opts, :max_output_tokens, [:max_tokens])
+      error -> error
+    end
+  end
+
+  defp normalize_aliases(opts, canonical, aliases) do
+    present = Enum.filter([canonical | aliases], &Keyword.has_key?(opts, &1))
+
+    case Enum.uniq(Enum.map(present, &Keyword.fetch!(opts, &1))) do
+      [_first, _second | _] ->
+        {:error, {:conflicting_options, present}}
+
+      _ ->
+        Enum.each(present -- [canonical], fn alias_key ->
+          Logger.warning("#{inspect(alias_key)} is deprecated; use #{inspect(canonical)}")
+        end)
+
+        value = if present == [], do: nil, else: Keyword.fetch!(opts, hd(present))
+        opts = Keyword.drop(opts, aliases)
+        {:ok, if(present == [], do: opts, else: Keyword.put(opts, canonical, value))}
+    end
+  end
+
+  defp build_session(api_key, opts, base_url, headers, request_fields, finch) do
     http_fn = Keyword.get(opts, :http_fn, &default_http/1)
 
     session = %__MODULE__{
       api_key: api_key,
+      base_url: base_url,
+      headers: headers,
+      request_fields: request_fields,
+      finch: finch,
       model: Keyword.get(opts, :model, @default_model),
-      instructions: Keyword.get(opts, :instructions),
+      store: Keyword.get(opts, :store, true),
+      instructions: Keyword.get(opts, :system_prompt),
       reasoning_effort: Keyword.get(opts, :reasoning_effort),
       max_output_tokens: Keyword.get(opts, :max_output_tokens),
+      truncation: Keyword.get(opts, :truncation),
       receive_timeout: Keyword.get(opts, :receive_timeout, @default_receive_timeout),
       connect_timeout: Keyword.get(opts, :connect_timeout),
       http_fn: http_fn,
       client_session_id: generate_session_id(),
-      previous_response_id: nil
+      previous_response_id: nil,
+      history: [],
+      pending_turn: nil
     }
 
     {:ok, session}
@@ -158,23 +446,69 @@ defmodule GenAgent.Backends.OpenAI do
 
     case session.http_fn.(request) do
       {:ok, body} ->
-        events = response_to_events(body, session.client_session_id)
-        {:ok, events, session}
+        with {:ok, events} <- parse_response(body, session.client_session_id) do
+          {:ok, events, remember_pending_turn(session, prompt, body, events)}
+        end
 
       {:error, reason} ->
-        {:error, reason}
+        case conversation_lost_body(session, reason) do
+          {:ok, body} ->
+            error = Event.new(:error, %{reason: backend_error({:conversation_lost, body})})
+            {:ok, [error], %{session | previous_response_id: nil}}
+
+          :not_lost ->
+            {:error, backend_error(reason)}
+        end
     end
   rescue
-    e -> {:error, {:http_fn_raised, Exception.message(e)}}
+    e -> {:error, backend_error({:http_fn_raised, Exception.message(e)})}
+  end
+
+  defp parse_response(body, client_session_id) when is_map(body) do
+    {:ok, response_to_events(body, client_session_id)}
+  rescue
+    e -> {:error, invalid_response(body, Exception.message(e))}
+  end
+
+  defp parse_response(body, _client_session_id),
+    do: {:error, invalid_response(body, "Expected a map response body")}
+
+  defp invalid_response(body, message) do
+    if Code.ensure_loaded?(Error),
+      do: Error.new(:openai, :invalid_response, body, message: message),
+      else: {:invalid_response, body}
+  end
+
+  defp backend_error(reason) do
+    if Code.ensure_loaded?(Error),
+      do: Error.normalize(:openai, reason),
+      else: reason
   end
 
   @impl GenAgent.Backend
+  def update_session(%__MODULE__{store: false, pending_turn: {input, output}} = session, %{
+        text: _text
+      }) do
+    %{
+      session
+      | previous_response_id: nil,
+        history: session.history ++ input ++ output,
+        pending_turn: nil
+    }
+  end
+
   def update_session(%__MODULE__{} = session, %{response_id: response_id})
-      when is_binary(response_id) and response_id != "" do
+      when session.store and is_binary(response_id) and response_id != "" do
     %{session | previous_response_id: response_id}
   end
 
   def update_session(%__MODULE__{} = session, _data), do: session
+
+  if {:reset_session, 1} in GenAgent.Backend.behaviour_info(:callbacks),
+    do: @impl(GenAgent.Backend)
+
+  def reset_session(%__MODULE__{} = session),
+    do: {:ok, %{session | previous_response_id: nil, history: [], pending_turn: nil}}
 
   @impl GenAgent.Backend
   def terminate_session(%__MODULE__{}), do: :ok
@@ -184,34 +518,90 @@ defmodule GenAgent.Backends.OpenAI do
   # ---------------------------------------------------------------------------
 
   defp build_request(%__MODULE__{} = session, prompt) do
+    input = [%{role: "user", content: prompt}]
+
     body =
       %{
         model: session.model,
-        input: [%{role: "user", content: prompt}],
-        store: true
+        input: if(session.store, do: input, else: session.history ++ input),
+        store: session.store
       }
       |> maybe_put(:instructions, session.instructions)
-      |> maybe_put(:previous_response_id, session.previous_response_id)
+      |> maybe_put_previous_response_id(session)
+      |> maybe_include_reasoning(session)
       |> maybe_put(:max_output_tokens, session.max_output_tokens)
+      |> maybe_put(:truncation, session.truncation)
       |> maybe_put_reasoning(session.reasoning_effort)
+      |> Map.merge(session.request_fields)
 
     %{
-      url: @endpoint,
-      headers: [
-        {"authorization", "Bearer #{session.api_key || ""}"},
-        {"content-type", "application/json"}
-      ],
+      url: session.base_url <> "/responses",
+      headers:
+        [
+          {"authorization", "Bearer #{session.api_key || ""}"},
+          {"content-type", "application/json"}
+        ] ++ session.headers,
       body: body,
       receive_timeout: session.receive_timeout,
-      connect_timeout: session.connect_timeout
+      connect_timeout: session.connect_timeout,
+      finch: session.finch
     }
   end
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
+  defp maybe_put_previous_response_id(map, %__MODULE__{store: true} = session),
+    do: maybe_put(map, :previous_response_id, session.previous_response_id)
+
+  defp maybe_put_previous_response_id(map, _session), do: map
+
+  defp maybe_include_reasoning(map, %__MODULE__{store: false}),
+    do: Map.put(map, :include, ["reasoning.encrypted_content"])
+
+  defp maybe_include_reasoning(map, _session), do: map
+
+  defp remember_pending_turn(%__MODULE__{store: false} = session, prompt, body, events) do
+    if Enum.any?(events, &(&1.kind == :result)) do
+      input = [%{role: "user", content: prompt}]
+      output = if is_list(body["output"]), do: body["output"], else: []
+      %{session | pending_turn: {input, output}}
+    else
+      session
+    end
+  end
+
+  defp remember_pending_turn(session, _prompt, _body, _events), do: session
+
   defp maybe_put_reasoning(map, nil), do: map
   defp maybe_put_reasoning(map, effort), do: Map.put(map, :reasoning, %{effort: effort})
+
+  defp conversation_lost_body(
+         %__MODULE__{store: true, previous_response_id: previous_id},
+         {:http_error, status, %{"error" => %{} = error} = body}
+       )
+       when is_binary(previous_id) and status in [400, 404] do
+    code = error["code"] || error["type"]
+
+    if code in @conversation_error_codes and
+         (status == 400 or code == "previous_response_not_found"),
+       do: {:ok, body},
+       else: :not_lost
+  end
+
+  defp conversation_lost_body(
+         %__MODULE__{} = session,
+         %{__struct__: Error, status: status, raw: %Req.Response{body: body}}
+       ),
+       do: conversation_lost_body(session, {:http_error, status, body})
+
+  defp conversation_lost_body(
+         %__MODULE__{} = session,
+         %{__struct__: Error, status: status, raw: %{body: body}}
+       ),
+       do: conversation_lost_body(session, {:http_error, status, body})
+
+  defp conversation_lost_body(_session, _reason), do: :not_lost
 
   # ---------------------------------------------------------------------------
   # Response parsing
@@ -245,7 +635,7 @@ defmodule GenAgent.Backends.OpenAI do
 
         reason ->
           error_data =
-            %{reason: reason, response_id: response_id, status: status}
+            %{reason: backend_error(reason), response_id: response_id, status: status}
             |> drop_nil_values()
 
           Event.new(:error, error_data)
@@ -304,9 +694,10 @@ defmodule GenAgent.Backends.OpenAI do
     output = usage["output_tokens"]
     total = usage["total_tokens"]
     reasoning = get_in(usage, ["output_tokens_details", "reasoning_tokens"])
+    cached = get_in(usage, ["input_tokens_details", "cached_tokens"])
 
-    case {input, output, total, reasoning} do
-      {nil, nil, nil, nil} ->
+    case {input, output, total, reasoning, cached} do
+      {nil, nil, nil, nil, nil} ->
         nil
 
       _ ->
@@ -314,7 +705,8 @@ defmodule GenAgent.Backends.OpenAI do
           input_tokens: input,
           output_tokens: output,
           total_tokens: total,
-          reasoning_tokens: reasoning
+          reasoning_tokens: reasoning,
+          cached_input_tokens: cached
         }
         |> drop_nil_values()
     end
@@ -328,22 +720,36 @@ defmodule GenAgent.Backends.OpenAI do
 
   defp default_http(%{url: url, headers: headers, body: body} = request) do
     req_opts =
-      [headers: headers, json: body, retry: false]
+      [headers: headers, json: body, retry: false, redirect: false]
       |> maybe_put_opt(:receive_timeout, request[:receive_timeout])
-      |> maybe_put_opt(:connect_options, connect_options(request[:connect_timeout]))
+      |> maybe_put_opt(:finch, request[:finch])
+      |> maybe_put_connect_timeout(request[:finch], request[:connect_timeout])
 
     case Req.post(url, req_opts) do
-      {:ok, %Req.Response{status: 200, body: body}} -> {:ok, body}
-      {:ok, %Req.Response{status: status, body: body}} -> {:error, {:http_error, status, body}}
-      {:error, reason} -> {:error, reason}
+      {:ok, %Req.Response{status: 200, body: body}} ->
+        {:ok, body}
+
+      {:ok, %Req.Response{status: status, body: body, headers: headers} = response} ->
+        if Code.ensure_loaded?(Error) do
+          {:error, Error.http(:openai, status, body, headers, response)}
+        else
+          {:error, {:http_error, status, body}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
   defp maybe_put_opt(opts, _key, nil), do: opts
   defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
-  defp connect_options(nil), do: nil
-  defp connect_options(timeout), do: [timeout: timeout]
+  defp maybe_put_connect_timeout(opts, _finch, nil), do: opts
+  defp maybe_put_connect_timeout(opts, finch, _timeout) when not is_nil(finch), do: opts
+
+  defp maybe_put_connect_timeout(opts, nil, timeout) do
+    opts |> Keyword.put(:finch, nil) |> Keyword.put(:connect_options, timeout: timeout)
+  end
 
   defp generate_session_id do
     "openai-" <>

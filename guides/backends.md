@@ -297,7 +297,7 @@ does not establish the value.
 | System prompt option | `:system_prompt` (also `:append_system_prompt`) | None. Use `AGENTS.md` or Codex configuration | `:system` | `:instructions`, resent every turn |
 | Default model | Not set by the backend; CLI default not documented | Not set by the backend; CLI default not documented | `"claude-sonnet-4-5"` | `"gpt-5"` |
 | Output token option | None | None | `:max_tokens`, default `1024` | `:max_output_tokens`, default unset |
-| Session continuity | CLI `session_id`, passed as `--resume` on later turns | Codex `thread_id`, continued with `codex exec resume` | Full messages array kept in the session and resent each turn | `previous_response_id` with `store: true` |
+| Session continuity | CLI `session_id`, passed as `--resume` on later turns | Codex `thread_id`, continued with `codex exec resume` | Full messages array kept in the session and resent each turn | `previous_response_id` with `store: true` (default); local input/output history resent with `store: false` |
 | Checkpoints (`prompt/3`) | Yes, from `system`, `result`, or `error` events | Yes, from `thread.started`, `turn.completed`, `turn.failed`, and `error` events | No | No |
 | Text as deltas | Yes, with `:include_partial_messages` (on by default) | No. One `:text` per completed message, with `message_boundary: true` | No. Text only on `:result` | No. Text only on `:result` |
 | Tool events | `:tool_use` and `:tool_result` from CLI content blocks | `:tool_use` and `:tool_result` from completed items | None | None |
@@ -320,8 +320,9 @@ does not establish the value.
   has no equivalent of `--system-prompt`. `GenAgent.Backends.Anthropic`
   puts `:system` in the request body.
   `GenAgent.Backends.OpenAI.build_request/2` puts `:instructions` on
-  every request because the Responses API does not carry instructions
-  across `previous_response_id`.
+  every request. The Responses API does not carry instructions across
+  `previous_response_id`, and stateless requests replay conversation
+  items while resending the configured instructions.
 - **Default model.** The CLI backends add `--model` only when
   `:model` is set (`ClaudeWrapper.Query`, `CodexWrapper.Exec`). The
   HTTP defaults are the `@default_model` attributes.
@@ -336,8 +337,11 @@ does not establish the value.
   `"anthropic-"`; history lives in `session.messages`, and
   `update_session/2` removes the unanswered user message on an empty
   or refused reply. The OpenAI `:result` carries a client-generated
-  `session_id` beginning with `"openai-"` and a `:response_id`, which
-  `update_session/2` stores as `previous_response_id`.
+  `session_id` beginning with `"openai-"` and a `:response_id`. With
+  `store: true`, `update_session/2` saves the response ID for the next
+  request. With `store: false`, it adds the completed input and output
+  items to local history; the next request resends them without a
+  `previous_response_id`.
 - **Text.** `GenAgent.Backends.Claude.EventTranslator` turns stream
   deltas into `:text` events and drops text from the completed
   assistant message that was already streamed. The Codex translator

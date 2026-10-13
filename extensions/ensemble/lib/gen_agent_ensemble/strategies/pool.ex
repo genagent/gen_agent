@@ -9,8 +9,8 @@ defmodule GenAgentEnsemble.Strategies.Pool do
 
   ## Options
 
-    * `:worker_count` (required) -- integer, number of workers to
-      start.
+    * `:worker_count` (required) -- positive integer, number of
+      workers to start. Anything else raises `ArgumentError` at init.
     * `:worker_template` (required) -- `{name_prefix, module, opts}`.
       Workers are named `"\#{prefix}-1"`, ..., `"\#{prefix}-N"`.
 
@@ -45,6 +45,11 @@ defmodule GenAgentEnsemble.Strategies.Pool do
   def init(opts) do
     count = Keyword.fetch!(opts, :worker_count)
     {prefix, mod, w_opts} = Keyword.fetch!(opts, :worker_template)
+
+    unless is_integer(count) and count > 0 do
+      raise ArgumentError,
+            "Pool :worker_count must be a positive integer, got: #{inspect(count)}"
+    end
 
     names = for i <- 1..count, do: "#{prefix}-#{i}"
     start_specs = for n <- names, do: {n, mod, w_opts}

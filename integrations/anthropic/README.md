@@ -34,12 +34,11 @@ environment, or pass `:api_key` as a backend option.
 
 ## Installation
 
+Add `gen_agent` using the current requirement in the [core installation guide](https://github.com/genagent/gen_agent#installation).
+
 ```elixir
 def deps do
-  [
-    {:gen_agent, "~> 0.3.0"},
-    {:gen_agent_anthropic, "~> 0.2.0"}
-  ]
+  [{:gen_agent_anthropic, "~> 0.4.2"}] # x-release-please-version
 end
 ```
 
@@ -56,8 +55,8 @@ defmodule MyApp.Assistant do
   @impl true
   def init_agent(_opts) do
     backend_opts = [
-      system: "You are a concise, helpful assistant.",
-      max_tokens: 512
+      system_prompt: "You are a concise, helpful assistant.",
+      max_output_tokens: 512
     ]
 
     {:ok, backend_opts, %State{}}
@@ -94,10 +93,38 @@ session struct so multi-turn conversations work transparently:
 
 Conversation history lives in `session.messages` as an in-order list
 of `%{role: ..., content: ...}` maps with atom keys. The user message is
-appended on dispatch. The assistant message is appended when the terminal
-`:result` event carries non-blank text. If the response is a refusal
-(`stop_reason: "refusal"`) or its text is empty or only whitespace, the
-unanswered user message is removed instead, so history keeps alternating.
+included in the API request. The assistant message is appended when the
+terminal `:result` event carries non-blank text. If that text is empty or
+only whitespace, the unanswered user message is removed. Refusals and
+incomplete responses also leave prior history intact, so a later turn does
+not resend a failed prompt.
+When extended thinking is enabled, the backend retains the full assistant
+content blocks, including signatures and redacted blocks, for the next turn;
+the result event still exposes only the answer text.
+
+Set `:max_history_turns` to a nonnegative integer to retain only that many
+completed user/assistant pairs for the next request. The default,
+`:infinity`, keeps the full history; `0` makes each turn independent. You can
+also call `GenAgent.reset_session(name)` between turns to clear the history
+without restarting the agent or discarding its application state. Reset
+returns `{:error, :busy}` during an active turn.
+
+`end_turn` and `stop_sequence` are successful stops. Their terminal event
+data includes `:stop_reason` and, when the API provides it,
+`:stop_details`; callers can read them through `response.terminal.data`.
+A refusal, incomplete response, or unexpected stop returns
+`{:error, %GenAgent.Backend.Error{}}` when using a core version with that
+struct. Its `:kind` distinguishes `:refusal`, `:response_incomplete`, and
+`:unexpected_stop_reason`; `:raw` retains the prior tuple and stop details.
+Older core versions still receive the tuple. This text-only backend cannot
+complete a paused or tool-use turn.
+
+HTTP failures use the same error struct. A 429 response has
+`kind: :rate_limited`, `retryable?: true`, and the original `Req.Response`
+in `:raw`, including headers. The `:retry_after` field preserves the
+unparsed `Retry-After` header when present. A 200 response with an invalid
+body has `kind: :invalid_response`, distinct from an exception raised by
+the injected `:http_fn`.
 
 ## Backend options
 
@@ -106,19 +133,54 @@ unanswered user message is removed instead, so history keeps alternating.
   returns `{:error, :missing_api_key}` (through `GenAgent.start_agent/2`,
   `{:error, {:backend_start_failed, :missing_api_key}}`), unless a one-arity
   `:http_fn` is supplied.
+- `:base_url` -- API prefix, default `"https://api.anthropic.com/v1"`.
+  The backend appends `/messages`. HTTPS is required except for loopback
+  HTTP. The configured host receives the API key and conversation content.
+- `:api_version` -- `anthropic-version` header, default `"2023-06-01"`.
+- `:headers` -- additional headers as a string-keyed map or list of
+  `{name, value}` pairs. Auth, version, content type, and transport headers
+  cannot be overridden. Values must contain only printable ASCII or
+  horizontal tabs.
+- `:request_fields` -- extra JSON body fields such as `%{temperature: 0.2}`.
+  For extended thinking, use a supported model with `max_output_tokens: 2048`
+  and `request_fields: %{thinking: %{type: "enabled", budget_tokens: 1024}}`.
+  Backend-owned fields (messages, model, token limit, caching, streaming,
+  and tools) cannot be overridden.
 - `:model` -- model name. Defaults to `"claude-sonnet-4-5"`.
-- `:max_tokens` -- max tokens per turn. Defaults to `1024`.
-- `:system` -- system prompt (string).
+- `:max_output_tokens` -- max tokens per turn. Defaults to `1024`.
+  `:max_tokens` remains a deprecated alias.
+- `:system_prompt` -- system prompt (string). `:system` and
+  `:instructions` remain deprecated aliases.
+- `:cache` -- opt in to automatic 5-minute prompt caching. When `true`,
+  each request includes `cache_control: %{type: "ephemeral"}`. Defaults to
+  `false` because single turns and idle conversations can incur cache-write
+  cost without a later hit. `Response.usage` includes
+  `:cache_creation_input_tokens` and `:cache_read_input_tokens` when the API
+  reports them; total input is their sum plus `:input_tokens`.
+- `:max_history_turns` -- completed user/assistant pairs retained between
+  turns. Defaults to `:infinity`; `0` retains none.
 - `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
   to `60_000`. The 60-second default can be short for long reasoning turns.
 - `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults
-  to `nil` (Req's default).
+  to `nil` (Req's default). Configure it when starting a named Finch pool;
+  `:connect_timeout` cannot be combined with `finch: [name: MyFinch]`.
+- `:finch` -- per-session Finch options. Use
+  `finch: [size: 100, pool_timeout: 20_000]` for a dynamic pool, or start
+  a Finch child with a larger pool and pass `finch: [name: MyFinch]`.
+  `:count` is also supported for dynamic pools; `:pool_timeout` is accepted
+  with either kind. Req's default HTTP/1 pool has 50 connections per host
+  and a 5-second checkout timeout. Named pools set connection options at
+  startup; pool `:size` and `:count` cannot be combined with `:name`.
+  Dynamic pools with identical pool configuration are shared across sessions;
+  `:size` limits connections per shard.
 - `:http_fn` -- a 1-arity function
   `(request_map) -> {:ok, response_map} | {:error, term}`
   that replaces the default `Req`-backed HTTP call. Intended for
   tests that want to stub out the API.
 
 See `GenAgent.Backends.Anthropic` for the full module docs.
+Unknown keys fail session startup with `{:unknown_option, key}`; conflicting
+values supplied through aliases fail with `{:conflicting_options, keys}`.
 
 ## Why no tool use?
 

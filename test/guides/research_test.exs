@@ -58,7 +58,7 @@ defmodule GenAgent.ResearchGuideTest do
       GenAgent.tell(name, "list")
 
       if unquote(terminal) == :done do
-        respond({:text, "question"})
+        respond({:text, "question?"})
         respond({:text, "answer"})
         respond({:text, "report"})
       else
@@ -71,7 +71,7 @@ defmodule GenAgent.ResearchGuideTest do
 
       if unquote(terminal) == :done do
         assert before.final_report == "report"
-        assert before.answered == [{"question", "answer"}]
+        assert before.answered == [{"question?", "answer"}]
         assert before.turns == 3
       end
 

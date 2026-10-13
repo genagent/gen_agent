@@ -9,6 +9,54 @@ defmodule GenAgent.HookBlockingTest do
 
   @blocked_ms 100
 
+  defmodule ShutdownBackend do
+    @behaviour GenAgent.Backend
+
+    @impl true
+    def start_session(opts), do: {:ok, Keyword.fetch!(opts, :observer)}
+
+    @impl true
+    def prompt(observer, _prompt),
+      do: {:ok, [GenAgent.Event.new(:result, %{text: "ok"})], observer}
+
+    @impl true
+    def terminate_session(observer) do
+      send(observer, :backend_terminated)
+      :ok
+    end
+  end
+
+  defmodule ShutdownAgent do
+    use GenAgent
+
+    @impl true
+    def init_agent(opts) do
+      observer = Keyword.fetch!(opts, :observer)
+      {:ok, [observer: observer], observer}
+    end
+
+    @impl true
+    def handle_response(_ref, _response, observer), do: {:noreply, observer}
+
+    @impl true
+    def handle_event(_event, observer), do: {:prompt, "generated", observer}
+
+    @impl true
+    def pre_turn(prompt, observer) do
+      send(observer, {:gated, self()})
+
+      receive do
+        :release -> {:ok, prompt, observer}
+      end
+    end
+
+    @impl true
+    def terminate_agent(reason, observer) do
+      send(observer, {:agent_terminated, reason})
+      :ok
+    end
+  end
+
   defp start(opts) do
     name = "hook-blocking-#{System.unique_integer([:positive])}"
 
@@ -43,6 +91,24 @@ defmodule GenAgent.HookBlockingTest do
 
   defp assert_blocked(task) do
     assert Task.yield(task, @blocked_ms) == nil
+  end
+
+  defp start_shutdown_agent(shutdown) do
+    name = "shutdown-hook-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      GenAgent.start_agent(ShutdownAgent,
+        name: name,
+        backend: ShutdownBackend,
+        observer: self(),
+        shutdown: shutdown
+      )
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: DynamicSupervisor.terminate_child(GenAgent.AgentSupervisor, pid)
+    end)
+
+    {name, pid}
   end
 
   describe "pre_run/1 gated" do
@@ -111,6 +177,35 @@ defmodule GenAgent.HookBlockingTest do
       assert :ok = Task.await(notify_ack, 2_000)
       assert {:ok, _} = Task.await(tell, 2_000)
       assert {:ok, _} = Task.await(ask, 2_000)
+    end
+  end
+
+  describe "supervised shutdown during a blocked callback" do
+    test "a configured shutdown window lets the callback finish and runs cleanup" do
+      {name, pid} = start_shutdown_agent(1_000)
+
+      assert :ok = GenAgent.notify(name, :go)
+      assert_receive {:gated, ^pid}, 1_000
+
+      stop = Task.async(fn -> GenAgent.stop(name) end)
+      assert_blocked(stop)
+      send(pid, :release)
+
+      assert :ok = Task.await(stop, 1_000)
+      assert_receive {:agent_terminated, :shutdown}, 1_000
+      assert_receive :backend_terminated, 1_000
+    end
+
+    test "a shorter shutdown window kills the blocked callback without cleanup" do
+      {name, pid} = start_shutdown_agent(50)
+      monitor = Process.monitor(pid)
+
+      assert :ok = GenAgent.notify(name, :go)
+      assert_receive {:gated, ^pid}, 1_000
+      assert :ok = GenAgent.stop(name)
+      assert_receive {:DOWN, ^monitor, :process, ^pid, :killed}, 1_000
+      refute_received {:agent_terminated, _}
+      refute_received :backend_terminated
     end
   end
 end

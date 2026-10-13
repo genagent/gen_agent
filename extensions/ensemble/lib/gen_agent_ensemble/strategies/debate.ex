@@ -3,20 +3,26 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   Two agents take turns arguing about a prompt until they converge
   or a round cap is reached.
 
-  The incoming prompt hits the first agent. That agent's response
-  text becomes the prompt for the second agent, whose response
-  becomes the prompt for the first again, and so on. Each agent's
-  own `GenAgent` session keeps the full back-and-forth in its
-  backend memory, so turn N sees turns 1..N-1 in context.
+  The incoming prompt hits the first agent. On turn 2 and beyond,
+  each agent receives the original question, the previous speaker's
+  name, and that speaker's response text. Each agent's own `GenAgent`
+  session keeps the full back-and-forth in its backend memory, so
+  turn N sees turns 1..N-1 in context.
 
   ## Options
+
+    * `:failure_reply` (optional) -- `:legacy` (default) preserves existing
+      reasons. `:structured` returns `GenAgentEnsemble.Strategies.Failure`
+      for handled terminal turn, dispatch and guarded callback failures,
+      with completed text partials. Agent death, halt, cancellation, timeout,
+      initialization and custom strategy failures keep their existing contracts.
 
     * `:agents` (required) -- exactly two `{name, module, opts}`
       specs. Names must be distinct.
     * `:first` (optional) -- name of the agent who speaks first.
       Defaults to the first entry in `:agents`.
-    * `:rounds` (optional) -- hard cap on total agent responses.
-      Defaults to 6 (three exchanges per side).
+    * `:rounds` (optional) -- hard cap on total agent responses; a
+      positive integer. Defaults to 6 (three exchanges per side).
     * `:converge` (optional) -- `(String.t() -> boolean())`. Called
       on each response's text starting from turn 2. Returning `true`
       ends the debate immediately. Defaults to `fn _ -> false end`
@@ -39,12 +45,23 @@ defmodule GenAgentEnsemble.Strategies.Debate do
       reason; next queued prompt (if any) starts.
     * If either agent's process dies, the session halts -- neither
       agent alone can debate.
+    * A `:converge` function that raises, throws or exits, or a
+      `{:synthesize, fun}` reply function that fails or returns a
+      non-binary, fails the token and the next queued prompt starts. The
+      caller receives `{:error, {:strategy_function_failed, label, kind,
+      class}}` or `{:error, {:invalid_strategy_result, label}}`, where
+      `label` is `:converge` or `:synthesizer_reply`, `kind` is `:error`,
+      `:throw` or `:exit`, and `class` is the exception module or
+      `:other`. Messages, stacktraces and returned values are never
+      included. A `:converge` return other than `true` means "not
+      converged" and is not an error.
   """
 
   @behaviour GenAgentEnsemble.Strategy
 
   alias GenAgent.Response
   alias GenAgentEnsemble.Queue
+  alias GenAgentEnsemble.Strategies.{Failure, Guard}
   alias GenAgentEnsemble.Usage
 
   defstruct [
@@ -54,7 +71,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
     :rounds,
     :converge,
     :reply_kind,
-    agents: MapSet.new(),
+    failure_reply: :legacy,
     phase: :idle,
     queue: nil,
     usage: Usage.new()
@@ -87,8 +104,13 @@ defmodule GenAgentEnsemble.Strategies.Debate do
     end
 
     rounds = Keyword.get(opts, :rounds, 6)
+    validate_rounds!(rounds)
+
     converge = Keyword.get(opts, :converge, fn _ -> false end)
+    validate_converge!(converge)
+
     reply_kind = Keyword.get(opts, :reply, :transcript)
+    validate_reply!(reply_kind)
 
     state = %__MODULE__{
       a: a_name,
@@ -97,11 +119,33 @@ defmodule GenAgentEnsemble.Strategies.Debate do
       rounds: rounds,
       converge: converge,
       reply_kind: reply_kind,
-      agents: MapSet.new([a_name, b_name]),
-      queue: Queue.new()
+      queue: Queue.new(),
+      failure_reply: Failure.option!(opts)
     }
 
     {:ok, state, specs}
+  end
+
+  defp validate_rounds!(rounds) do
+    unless is_integer(rounds) and rounds > 0 do
+      raise ArgumentError, "Debate :rounds must be a positive integer, got: #{inspect(rounds)}"
+    end
+  end
+
+  defp validate_converge!(converge) do
+    unless is_function(converge, 1) do
+      raise ArgumentError,
+            "Debate :converge must be a 1-arity function, got: #{inspect(converge)}"
+    end
+  end
+
+  defp validate_reply!(reply_kind) do
+    unless reply_kind in [:transcript, :last] or
+             match?({:synthesize, f} when is_function(f, 1), reply_kind) do
+      raise ArgumentError,
+            "Debate :reply must be :transcript, :last, or {:synthesize, fun/1}, got: " <>
+              inspect(reply_kind)
+    end
   end
 
   @impl true
@@ -111,7 +155,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   def handle_ask(prompt, _opts, token, state), do: start_or_queue(prompt, token, state)
 
   defp start_or_queue(prompt, token, %{phase: :idle} = state) do
-    phase = {:running, token, state.first, 0, []}
+    phase = {:running, token, state.first, 0, [], prompt}
     {:ok, [{:dispatch, state.first, prompt, token}], %{state | phase: phase, usage: Usage.new()}}
   end
 
@@ -122,64 +166,96 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   @impl true
   def handle_response(agent, response, state) do
     case state.phase do
-      {:running, token, awaiting, turns, transcript} when agent == awaiting ->
-        advance(token, agent, response, turns, transcript, state)
+      {:running, token, awaiting, turns, transcript, original_prompt} when agent == awaiting ->
+        advance(token, agent, response, turns, transcript, original_prompt, state)
 
       _ ->
         {:ok, [], state}
     end
   end
 
-  defp advance(token, agent, response, turns, transcript, state) do
+  defp advance(token, agent, response, turns, transcript, original_prompt, state) do
     state = %{state | usage: Usage.add(state.usage, agent, response.usage)}
     transcript = transcript ++ [{agent, response.text}]
     turns = turns + 1
-    converged? = turns >= 2 and safely_converged?(state.converge, response.text)
 
-    if converged? or turns >= state.rounds do
-      finalize(token, transcript, state)
-    else
-      other = other_agent(agent, state)
+    case converged?(turns, state.converge, response.text) do
+      {:ok, converged?} when converged? or turns >= state.rounds ->
+        finalize(token, transcript, state)
 
-      {:ok, [{:dispatch, other, response.text, token}],
-       %{state | phase: {:running, token, other, turns, transcript}}}
+      {:ok, _} ->
+        other = other_agent(agent, state)
+        next_prompt = "#{original_prompt}\n\n#{agent}:\n#{response.text}"
+
+        {:ok, [{:dispatch, other, next_prompt, token}],
+         %{state | phase: {:running, token, other, turns, transcript, original_prompt}}}
+
+      {:error, reason} ->
+        fail_turn(token, reason, state, :converge, agent, transcript)
     end
   end
 
-  defp safely_converged?(fun, text) do
-    fun.(text) == true
+  # Only an exact `true` ends the debate early; other returns mean "keep going".
+  defp converged?(turns, converge, text) when turns >= 2 do
+    with {:ok, value} <- Guard.call(:converge, converge, [text]), do: {:ok, value == true}
+  end
+
+  defp converged?(_turns, _converge, _text), do: {:ok, false}
+
+  defp fail_turn(token, reason, state, phase, agent, transcript) do
+    partial =
+      if state.failure_reply == :structured do
+        transcript
+        |> Enum.with_index(1)
+        |> Enum.map(fn {{name, text}, index} ->
+          %{agent: name, phase: :turn, index: index, text: text}
+        end)
+      else
+        []
+      end
+
+    reason = Failure.wrap(state.failure_reply, __MODULE__, phase, agent, reason, partial)
+    state = %{state | phase: :idle}
+    {ops, state} = maybe_start_next(state, [{:reply_error, token, reason}])
+    {:ok, ops, state}
   end
 
   defp other_agent(name, %{a: a, b: b}) when name == a, do: b
   defp other_agent(name, %{a: a, b: b}) when name == b, do: a
 
   defp finalize(token, transcript, state) do
-    text = render_reply(state.reply_kind, transcript)
-    response = %Response{text: text, usage: Usage.to_usage(state.usage)}
-    state = %{state | phase: :idle}
-    {ops, state} = maybe_start_next(state, [{:reply, token, response}])
-    {:ok, ops, state}
+    case render_reply(state.reply_kind, transcript) do
+      {:ok, text} ->
+        response = %Response{text: text, usage: Usage.to_usage(state.usage)}
+        state = %{state | phase: :idle}
+        {ops, state} = maybe_start_next(state, [{:reply, token, response}])
+        {:ok, ops, state}
+
+      {:error, reason} ->
+        fail_turn(token, reason, state, :synthesizer_reply, nil, transcript)
+    end
   end
 
   defp render_reply(:transcript, transcript) do
-    Enum.map_join(transcript, "\n\n", fn {agent, text} -> "#{agent}:\n#{text}" end)
+    {:ok, Enum.map_join(transcript, "\n\n", fn {agent, text} -> "#{agent}:\n#{text}" end)}
   end
 
   defp render_reply(:last, transcript) do
     case List.last(transcript) do
-      {_agent, text} -> text
-      nil -> ""
+      {_agent, text} -> {:ok, text}
+      nil -> {:ok, ""}
     end
   end
 
-  defp render_reply({:synthesize, fun}, transcript), do: fun.(transcript)
+  defp render_reply({:synthesize, fun}, transcript),
+    do: Guard.call(:synthesizer_reply, fun, [transcript], &is_binary/1)
 
   defp maybe_start_next(%{phase: :idle} = state, ops_so_far) do
     case Queue.pop(state.queue) do
       {:ok, {token, prompt}, rest} ->
         state = %{
           state
-          | phase: {:running, token, state.first, 0, []},
+          | phase: {:running, token, state.first, 0, [], prompt},
             queue: rest,
             usage: Usage.new()
         }
@@ -192,12 +268,12 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   end
 
   @impl true
-  def handle_error(_agent, reason, state) do
+  def handle_error(agent, reason, state), do: terminal_error(agent, reason, :turn, state)
+
+  defp terminal_error(agent, reason, phase, state) do
     case state.phase do
-      {:running, token, _, _, _} ->
-        state = %{state | phase: :idle}
-        {ops, state} = maybe_start_next(state, [{:reply_error, token, reason}])
-        {:ok, ops, state}
+      {:running, token, _, _, transcript, _} ->
+        fail_turn(token, reason, state, phase, agent, transcript)
 
       _ ->
         {:ok, [], state}
@@ -209,7 +285,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
     state = %{state | queue: Queue.delete(state.queue, token)}
 
     case state.phase do
-      {:running, ^token, _, _, _} ->
+      {:running, ^token, _, _, _, _} ->
         {ops, state} = maybe_start_next(%{state | phase: :idle, usage: Usage.new()}, [])
         {:ok, ops, state}
 
@@ -221,8 +297,12 @@ defmodule GenAgentEnsemble.Strategies.Debate do
   @impl true
   def handle_dispatch_rejected(agent, token, reason, state) do
     case state.phase do
-      {:running, ^token, _, _, _} -> handle_error(agent, reason, state)
-      _ -> {:ok, [{:reply_error, token, reason}], state}
+      {:running, ^token, _, _, _, _} ->
+        terminal_error(agent, reason, :dispatch, state)
+
+      _ ->
+        reason = Failure.wrap(state.failure_reply, __MODULE__, :dispatch, agent, reason, [])
+        {:ok, [{:reply_error, token, reason}], state}
     end
   end
 
@@ -241,7 +321,7 @@ defmodule GenAgentEnsemble.Strategies.Debate do
         :idle ->
           :idle
 
-        {:running, _token, awaiting, turns, transcript} ->
+        {:running, _token, awaiting, turns, transcript, _original_prompt} ->
           %{awaiting: awaiting, turns: turns, transcript_len: length(transcript)}
       end
 

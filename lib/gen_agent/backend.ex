@@ -13,7 +13,7 @@ defmodule GenAgent.Backend do
   once when the agent boots, `prompt/2` (or optional `prompt/3`) on each turn, and
   `terminate_session/1` from its termination callback. These three callbacks
   are required; `prompt/3`, `checkpoint_session/2`, `update_session/2`, and
-  `resume_session/2` are optional.
+  `resume_session/2`, and `reset_session/1` are optional.
 
   ## Session values
 
@@ -128,6 +128,17 @@ defmodule GenAgent.Backend do
               {:ok, session()} | {:error, term()}
 
   @doc """
+  Reset conversation context in place while preserving backend configuration.
+
+  Called only while the agent is idle by `GenAgent.reset_session/2`.
+  The returned session replaces the current one atomically. The callback
+  should be quick and manage any backend resources it replaces. On error,
+  the existing session remains unchanged. Optional; unsupported backends
+  return `{:error, :unsupported}` from the public API.
+  """
+  @callback reset_session(session()) :: {:ok, session()} | {:error, term()}
+
+  @doc """
   Tear down a session.
 
   Called from the agent's termination callback on shutdown and crashes
@@ -137,5 +148,11 @@ defmodule GenAgent.Backend do
   """
   @callback terminate_session(session()) :: :ok
 
-  @optional_callbacks [prompt: 3, checkpoint_session: 2, resume_session: 2, update_session: 2]
+  @optional_callbacks [
+    prompt: 3,
+    checkpoint_session: 2,
+    resume_session: 2,
+    update_session: 2,
+    reset_session: 1
+  ]
 end

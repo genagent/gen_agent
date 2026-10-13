@@ -26,6 +26,12 @@ for package in "${packages[@]}"; do
   (
     cd "${root}/${package}"
     export GEN_AGENT_HEX=1
+    # Ensemble's backend dependencies are test-only. Exercise the sibling
+    # adapters against the published core without requiring their next Hex
+    # releases to have already been published.
+    if [[ "${package}" == "extensions/ensemble" ]]; then
+      export GEN_AGENT_BACKENDS_PATH=1
+    fi
     mix deps.get
     if [[ "${package}" != "." && "${core_status}" == "200" ]]; then
       echo "Compiling and testing ${package} with Hex core ${core_version}"
@@ -41,15 +47,18 @@ for package in "${packages[@]}"; do
       mix compile --warnings-as-errors
       mix test
     fi
+    unset GEN_AGENT_BACKENDS_PATH
     mix hex.build
 
     app="$(sed -n 's/^[[:space:]]*app: :\([a-z_]*\),/\1/p' mix.exs | head -1)"
     version="$(sed -n 's/^[[:space:]]*@version "\([0-9.]*\)"/\1/p' mix.exs | head -1)"
     archive="${app}-${version}.tar"
-    metadata="$(tar -xOf "${archive}" metadata.config)"
-
     if [[ -z "${app}" || -z "${version}" || ! -f "${archive}" ]]; then
       echo "Missing archive or package identity for ${package}" >&2
+      exit 1
+    fi
+    if ! metadata="$(tar -xOf "${archive}" metadata.config)"; then
+      echo "Unable to read metadata from ${archive}" >&2
       exit 1
     fi
 

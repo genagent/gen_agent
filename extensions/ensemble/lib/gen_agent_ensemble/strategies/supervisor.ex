@@ -11,14 +11,25 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
 
   When every worker has reported back, the strategy concatenates their
   responses (or runs a user-supplied `:synthesizer` if given) and
-  issues `{:reply, token, response}` plus `{:stop, worker}` per worker.
+  issues `{:reply, token, response}` first, then `{:stop, worker}` per
+  worker, so the caller is not delayed by worker shutdown. Stops precede
+  the dispatch of the next queued run.
 
   ## Options
+
+    * `:failure_reply` (optional) -- `:legacy` (default) preserves existing
+      reasons. `:structured` returns `GenAgentEnsemble.Strategies.Failure`
+      for handled terminal turn, dispatch and guarded callback failures,
+      with completed text partials. Agent death, halt, cancellation, timeout,
+      initialization and custom strategy failures keep their existing contracts.
 
     * `:coordinator` (required) -- `{name, module, opts}` spec for the
       coordinator agent.
     * `:worker_template` (required) -- `{name_prefix, module, opts}`.
       Workers are named `"\#{prefix}-1"`, `"\#{prefix}-2"`, ...
+      `opts` must be a keyword list containing `:backend`; otherwise init
+      raises `ArgumentError`, even if the decomposer would never produce
+      work. The error never includes the options.
     * `:decomposer` (required) -- `(String.t() -> [String.t()])` that
       turns coordinator output into sub-prompts.
     * `:synthesizer` (optional) -- a function accepting ordered
@@ -34,19 +45,36 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
 
   ## Limits
 
-  Only one in-flight prompt at a time in this first version. If a
+  Only one in-flight prompt at a time. If a
   second `tell`/`ask` arrives while a fan-out is in progress, it is
   queued and dispatched after the current one completes.
 
-  If a worker process dies during fan-out, the current run and every
-  queued request fail with `{:worker_down, worker, reason}`. Remaining
-  workers are stopped, and a later fresh request may start a new run.
+  If a worker that has not yet responded dies during fan-out, the current
+  run and every queued request fail with `{:worker_down, worker, reason}`.
+  Remaining workers are stopped, and a later fresh request may start a new
+  run. The death of a worker that already responded does not fail the run
+  or queued requests; it is cleaned up at fan-in.
+
+  A `:decomposer` that raises, throws or exits, or returns anything but a
+  proper list of binaries, fails the run before any worker starts. A
+  caller-supplied `:synthesizer` that fails or returns a non-binary fails the run after fan-in: the caller
+  gets the error first, then every worker is stopped. Either way the caller
+  receives `{:error, {:strategy_function_failed, label, kind, class}}` or
+  `{:error, {:invalid_strategy_result, label}}` with `label` `:decomposer` or
+  `:synthesizer`, `kind` `:error`, `:throw` or `:exit`, and `class` the
+  exception module or `:other`. Messages, stacktraces and returned values are
+  never included. The session keeps running and queued requests proceed.
+
+  The coordinator name must not equal a generated worker name
+  (`"\#{prefix}-N"` for N in `1..max_subtasks`); init raises
+  `ArgumentError` otherwise.
   """
 
   @behaviour GenAgentEnsemble.Strategy
 
   alias GenAgent.Response
   alias GenAgentEnsemble.Queue
+  alias GenAgentEnsemble.Strategies.{Failure, Guard}
   alias GenAgentEnsemble.Usage
 
   @default_max_subtasks 10
@@ -59,7 +87,10 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     :decomposer,
     :synthesizer,
     max_subtasks: @default_max_subtasks,
+    custom_synthesizer?: false,
     subtasks: [],
+    failure_reply: :legacy,
+    partial: [],
     phase: :idle,
     queue: nil,
     usage: Usage.new()
@@ -73,9 +104,31 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     synthesizer = Keyword.get(opts, :synthesizer, &default_synthesizer/2)
     max_subtasks = Keyword.get(opts, :max_subtasks, @default_max_subtasks)
 
+    unless Keyword.keyword?(w_opts) and Keyword.has_key?(w_opts, :backend) do
+      raise ArgumentError,
+            "Supervisor :worker_template options must be a keyword list containing :backend"
+    end
+
+    unless is_function(decomposer, 1) do
+      raise ArgumentError,
+            "Supervisor :decomposer must be a 1-arity function, got: #{inspect(decomposer)}"
+    end
+
+    unless is_function(synthesizer, 1) or is_function(synthesizer, 2) do
+      raise ArgumentError,
+            "Supervisor :synthesizer must be a 1- or 2-arity function, got: " <>
+              inspect(synthesizer)
+    end
+
     unless is_integer(max_subtasks) and max_subtasks > 0 do
       raise ArgumentError,
             "Supervisor :max_subtasks must be a positive integer, got: #{inspect(max_subtasks)}"
+    end
+
+    if generated_worker_name?(c_name, w_prefix, max_subtasks) do
+      raise ArgumentError,
+            "Supervisor :coordinator name #{inspect(c_name)} collides with a generated " <>
+              "worker name (#{inspect(w_prefix)}-1 .. #{inspect(w_prefix)}-#{max_subtasks})"
     end
 
     state = %__MODULE__{
@@ -85,11 +138,27 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
       worker_opts: w_opts,
       decomposer: decomposer,
       synthesizer: synthesizer,
+      custom_synthesizer?: Keyword.has_key?(opts, :synthesizer),
       max_subtasks: max_subtasks,
-      queue: Queue.new()
+      queue: Queue.new(),
+      failure_reply: Failure.option!(opts)
     }
 
     {:ok, state, [{c_name, c_mod, c_opts}]}
+  end
+
+  # Parses the name instead of enumerating 1..max_subtasks, so a large limit
+  # costs nothing. Only the canonical form "prefix-N" (N in 1..max) collides.
+  defp generated_worker_name?(name, prefix, max_subtasks) do
+    with true <- is_binary(name),
+         marker = "#{prefix}-",
+         true <- String.starts_with?(name, marker),
+         suffix = binary_part(name, byte_size(marker), byte_size(name) - byte_size(marker)),
+         {index, ""} <- Integer.parse(suffix) do
+      index >= 1 and index <= max_subtasks and Integer.to_string(index) == suffix
+    else
+      _ -> false
+    end
   end
 
   @impl true
@@ -99,7 +168,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   def handle_ask(prompt, _opts, token, state), do: start_or_queue(prompt, token, state)
 
   defp start_or_queue(prompt, token, %{phase: :idle} = state) do
-    state = %{state | usage: Usage.new(), subtasks: [], phase: {:decomposing, token}}
+    state = %{state | partial: [], usage: Usage.new(), subtasks: [], phase: {:decomposing, token}}
     {:ok, [{:dispatch, state.coordinator, prompt, token}], state}
   end
 
@@ -123,21 +192,33 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
 
   defp decompose(token, response, state) do
     state = %{state | usage: Usage.add(state.usage, state.coordinator, response.usage)}
-    sub_prompts = state.decomposer.(response.text)
+    state = Failure.record(state, state.coordinator, :coordinator, 0, response.text)
 
-    case length(sub_prompts) do
-      count when count > state.max_subtasks ->
-        reject_decomposition(token, count, state)
+    case Guard.call(:decomposer, state.decomposer, [response.text], &sub_prompts?/1) do
+      {:ok, sub_prompts} when length(sub_prompts) > state.max_subtasks ->
+        reject_decomposition(
+          token,
+          {:too_many_subtasks, length(sub_prompts), state.max_subtasks},
+          state
+        )
 
-      _ ->
+      {:ok, sub_prompts} ->
         fan_out(token, response, sub_prompts, state)
+
+      {:error, reason} ->
+        reject_decomposition(token, reason, state)
     end
   end
 
-  defp reject_decomposition(token, count, state) do
-    reason = {:too_many_subtasks, count, state.max_subtasks}
-    state = %{state | phase: :idle, subtasks: []}
-    {ops, state} = maybe_prepend_next(state, [{:reply_error, token, reason}])
+  # Total: any term, including an improper list, yields a boolean.
+  defp sub_prompts?([]), do: true
+  defp sub_prompts?([head | tail]), do: is_binary(head) and sub_prompts?(tail)
+  defp sub_prompts?(_), do: false
+
+  defp reject_decomposition(token, reason, state) do
+    reason = failure(state, :decomposer, state.coordinator, reason)
+    state = %{state | phase: :idle, partial: [], subtasks: []}
+    {ops, state} = maybe_append_next(state, [{:reply_error, token, reason}])
     {:ok, ops, state}
   end
 
@@ -158,8 +239,8 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
       0 ->
         response = %{response | usage: Usage.to_usage(state.usage)}
         # Nothing to fan out; reply immediately with coordinator's text.
-        state = %{state | phase: :idle, subtasks: []}
-        {ops, state} = maybe_prepend_next(state, [{:reply, token, response}])
+        state = %{state | phase: :idle, partial: [], subtasks: []}
+        {ops, state} = maybe_append_next(state, [{:reply, token, response}])
         {:ok, ops, state}
 
       _ ->
@@ -169,6 +250,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
 
   defp collect_worker(agent, response, token, progress, state) do
     state = %{state | usage: Usage.add(state.usage, agent, response.usage)}
+    state = record_worker(state, agent, response.text)
     progress = Map.put(progress, agent, {:done, response})
 
     if Enum.all?(progress, fn {_, v} -> match?({:done, _}, v) end) do
@@ -176,6 +258,13 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
     else
       {:ok, [], %{state | phase: {:fanning_out, token, progress}}}
     end
+  end
+
+  defp record_worker(%{failure_reply: :legacy} = state, _agent, _text), do: state
+
+  defp record_worker(state, agent, text) do
+    index = agent |> String.replace_prefix("#{state.worker_prefix}-", "") |> String.to_integer()
+    Failure.record(state, agent, :worker, index, text)
   end
 
   defp finalize(token, progress, state) do
@@ -188,27 +277,42 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
         |> String.to_integer()
       end)
 
-    combined =
-      if is_function(state.synthesizer, 2) do
-        state.synthesizer.(worker_outputs, state.subtasks)
-      else
-        state.synthesizer.(worker_outputs)
+    args =
+      if is_function(state.synthesizer, 2),
+        do: [worker_outputs, state.subtasks],
+        else: [worker_outputs]
+
+    # Reply (or error) first, then worker cleanup, then the next queued run.
+    reply_op =
+      case synthesize(state, args) do
+        {:ok, combined} ->
+          {:reply, token, %Response{text: combined, usage: Usage.to_usage(state.usage)}}
+
+        {:error, reason} ->
+          {:reply_error, token, failure(state, :synthesizer, nil, reason)}
       end
 
-    final_response = %Response{text: combined, usage: Usage.to_usage(state.usage)}
     stop_ops = Enum.map(progress, fn {worker, _} -> {:stop, worker} end)
 
-    state = %{state | phase: :idle, subtasks: []}
-    {ops, state} = maybe_prepend_next(state, stop_ops ++ [{:reply, token, final_response}])
+    state = %{state | phase: :idle, partial: [], subtasks: []}
+    {ops, state} = maybe_append_next(state, [reply_op | stop_ops])
     {:ok, ops, state}
   end
 
-  defp maybe_prepend_next(%{phase: :idle} = state, ops_so_far) do
+  # Only a caller-supplied synthesizer is user code. The built-in default
+  # runs unguarded so its own failures (corrupted strategy state) propagate.
+  defp synthesize(%{custom_synthesizer?: true} = state, args),
+    do: Guard.call(:synthesizer, state.synthesizer, args, &is_binary/1)
+
+  defp synthesize(state, args), do: {:ok, apply(state.synthesizer, args)}
+
+  defp maybe_append_next(%{phase: :idle} = state, ops_so_far) do
     case Queue.pop(state.queue) do
       {:ok, {token, prompt}, rest} ->
         state = %{
           state
-          | usage: Usage.new(),
+          | partial: [],
+            usage: Usage.new(),
             subtasks: [],
             phase: {:decomposing, token},
             queue: rest
@@ -222,19 +326,34 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   end
 
   @impl true
-  def handle_error(agent, reason, state) do
+  def handle_error(agent, reason, state), do: terminal_error(agent, reason, :turn, state)
+
+  defp failure(state, phase, agent, reason) do
+    Failure.wrap(
+      state.failure_reply,
+      __MODULE__,
+      phase,
+      agent,
+      reason,
+      Enum.sort_by(state.partial, & &1.index)
+    )
+  end
+
+  defp terminal_error(agent, reason, phase, state) do
     case state.phase do
       {:decomposing, token} when agent == state.coordinator ->
-        state = %{state | phase: :idle, subtasks: []}
-        {ops, state} = maybe_prepend_next(state, [{:reply_error, token, reason}])
+        reason = failure(state, phase, agent, reason)
+        state = %{state | phase: :idle, partial: [], subtasks: []}
+        {ops, state} = maybe_append_next(state, [{:reply_error, token, reason}])
         {:ok, ops, state}
 
       {:fanning_out, token, progress} ->
         stop_ops = for {worker, _} <- progress, do: {:stop, worker}
-        state = %{state | phase: :idle, subtasks: []}
+        reason = failure(state, phase, agent, {agent, reason})
+        state = %{state | phase: :idle, partial: [], subtasks: []}
 
         {ops, state} =
-          maybe_prepend_next(state, stop_ops ++ [{:reply_error, token, {agent, reason}}])
+          maybe_append_next(state, stop_ops ++ [{:reply_error, token, reason}])
 
         {:ok, ops, state}
 
@@ -260,17 +379,26 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   end
 
   defp cancel_run(state, stop_ops) do
-    state = %{state | phase: :idle, subtasks: [], usage: Usage.new()}
-    {ops, state} = maybe_prepend_next(state, stop_ops)
+    state = %{state | phase: :idle, partial: [], subtasks: [], usage: Usage.new()}
+    {ops, state} = maybe_append_next(state, stop_ops)
     {:ok, ops, state}
   end
 
   @impl true
   def handle_dispatch_rejected(agent, token, reason, state) do
     case state.phase do
-      {:decomposing, ^token} -> handle_error(agent, reason, state)
-      {:fanning_out, ^token, _} -> handle_error(agent, reason, state)
-      _ -> {:ok, [{:reply_error, token, {agent, reason}}], state}
+      {:decomposing, ^token} ->
+        terminal_error(agent, reason, :dispatch, state)
+
+      {:fanning_out, ^token, _} ->
+        terminal_error(agent, reason, :dispatch, state)
+
+      _ ->
+        {:ok,
+         [
+           {:reply_error, token,
+            failure(%{state | partial: []}, :dispatch, agent, {agent, reason})}
+         ], state}
     end
   end
 
@@ -294,11 +422,13 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
   defp fail_fan_out_on_worker_down(agent, reason, state) do
     {:fanning_out, token, progress} = state.phase
 
-    if Map.has_key?(progress, agent) do
+    # A worker that already reported (`{:done, _}`) has nothing left to lose;
+    # its later death must not fail the run or the queued requests.
+    if Map.get(progress, agent) == :pending do
       failure = {:worker_down, agent, reason}
       stop_ops = for {worker, _} <- progress, worker != agent, do: {:stop, worker}
       fail_ops = [{:reply_error, token, failure} | queued_fail_ops(state.queue, failure)]
-      state = %{state | phase: :idle, subtasks: [], queue: Queue.new()}
+      state = %{state | phase: :idle, partial: [], subtasks: [], queue: Queue.new()}
       {:ok, stop_ops ++ fail_ops, state}
     else
       {:ok, [], state}

@@ -1,7 +1,7 @@
 defmodule GenAgentOpenAI.MixProject do
   use Mix.Project
 
-  @version "0.3.0"
+  @version "0.4.1"
   @source_url "https://github.com/genagent/gen_agent"
   @source_path "integrations/openai"
 
@@ -53,7 +53,7 @@ defmodule GenAgentOpenAI.MixProject do
 
   defp gen_agent_dep do
     if System.get_env("GEN_AGENT_HEX") == "1" do
-      {:gen_agent, "~> 0.2.0 or ~> 0.3.0 or ~> 0.4.0 or ~> 0.5.0 or ~> 0.6.0"}
+      {:gen_agent, "~> 0.2.0 or ~> 0.3.0 or ~> 0.4.0 or ~> 0.5.0 or ~> 0.6.0 or ~> 0.7.0"}
     else
       {:gen_agent, path: "../.."}
     end

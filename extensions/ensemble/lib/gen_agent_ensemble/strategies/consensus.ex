@@ -15,6 +15,11 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   toward the threshold but don't block convergence either. The
   abstaining agent still participates in subsequent rounds.
 
+  Convergence requires a **unique leading verdict** whose count meets
+  the threshold. If two verdicts tie for the highest count (possible
+  with `{:at_least, n}` when `n <= N/2`), the round does not converge:
+  the panel is re-prompted, or diverges at the round cap.
+
   Unlike `GenAgentEnsemble.Strategies.Debate`, Consensus's output
   is a *programmable decision*: the strategy holds a parsed verdict
   atom and the reply synthesizes it alongside per-agent rationales.
@@ -23,12 +28,21 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
 
   ## Options
 
+    * `:failure_reply` (optional) -- `:legacy` (default) preserves existing
+      reasons. `:structured` returns `GenAgentEnsemble.Strategies.Failure`
+      for handled terminal turn, dispatch and guarded callback failures,
+      with completed text partials. Agent death, halt, cancellation, timeout,
+      initialization and custom strategy failures keep their existing contracts.
+
     * `:agents` (required) -- list of `{name, module, opts}` specs,
-      2 or more. Names must be distinct.
+      2 or more. Names must be distinct. Every entry must be a
+      `{name, module, keyword_opts}` tuple; a malformed entry raises
+      `ArgumentError` at init naming only its index.
     * `:verdict_parser` (required) -- `(String.t() -> {:ok, atom,
       String.t()} | :error)`. Called on each agent's response text.
-      The atom is the verdict category; the string is the rationale
-      with verdict markers stripped.
+      The atom is the verdict category (never `nil`); the string is the
+      rationale with verdict markers stripped. `:error` abstains; any
+      other return fails the token (see Failure semantics).
     * `:threshold` (optional) -- convergence rule. Defaults to
       `:majority`.
         * `:unanimous` -- all parseable verdicts agree AND no
@@ -37,7 +51,8 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
           verdict.
         * `{:at_least, n}` -- at least `n` agents agree on the same
           verdict.
-    * `:rounds` (optional) -- hard cap on rounds. Defaults to 3.
+    * `:rounds` (optional) -- hard cap on rounds; a positive integer.
+      Defaults to 3.
       Exceeding the cap returns a divergence report.
     * `:reply` (optional) -- response shape:
         * `:synthesis` (default) -- converged case: verdict +
@@ -49,6 +64,27 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
           raw_text}, ...]` in agent order; `verdict` is nil when
           diverged.
 
+  ## Typed decision
+
+  Every successful response (converged or diverged, with any `:reply`)
+  carries the decision in `response.metadata.consensus` while
+  `response.text` stays a binary:
+
+      %{
+        status: :converged | :diverged,
+        verdict: atom | nil,
+        rounds: pos_integer,
+        threshold: :unanimous | :majority | {:at_least, n},
+        votes: [%{agent: name, verdict: atom | nil, rationale: String.t()}]
+      }
+
+  `votes` are in configured agent order; `verdict: nil` is an abstain
+  (unparseable or tolerated turn error). Failed turns return errors and
+  carry no decision.
+
+      {:ok, %{metadata: %{consensus: %{status: :converged, verdict: verdict}}}} =
+        GenAgentEnsemble.ask(name, prompt)
+
   ## Concurrency
 
   One consensus at a time per ensemble. Additional `tell`/`ask`
@@ -56,17 +92,39 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
 
   ## Failure semantics
 
-    * A turn error aborts the round: the token fails with
-      `{agent, reason}`, any in-flight parallel responses are
-      discarded, the next queued prompt (if any) starts.
+    * A turn error is tolerated while the threshold is still
+      reachable. The failed agent is recorded as an abstain for the
+      round (nil verdict, an explanatory rationale, empty raw text) and
+      the round waits for the remaining agents. The panel size stays
+      fixed, so the required vote count does not shrink.
+    * If the largest current vote count plus the outstanding turns can
+      no longer meet the threshold, the token fails with the first
+      `{agent, reason}` of the round, any in-flight parallel responses
+      are discarded, and the next queued prompt (if any) starts.
+      `:unanimous` therefore fails on the first turn error.
+    * Tolerated errors are tracked per round. Each re-prompted round
+      starts clean, and a failed agent is dispatched again.
     * Agent process death halts the session -- the panel size is
       fixed; a missing agent invalidates the threshold.
+    * A `:verdict_parser` that returns `:error` abstains. A parser that
+      raises, throws or exits, or returns anything other than `:error` or
+      `{:ok, verdict, rationale}` (a non-nil atom and a binary), fails the
+      token; so does a `{:synthesize, fun}` reply function that fails or
+      returns a non-binary. The caller receives
+      `{:error, {:strategy_function_failed, label, kind, class}}` or
+      `{:error, {:invalid_strategy_result, label}}`, where `label` is
+      `:verdict_parser` or `:synthesizer_reply`, `kind` is `:error`,
+      `:throw` or `:exit`, and `class` is the exception module or
+      `:other`. Messages, stacktraces and returned values are never
+      included. In-flight responses are discarded, the session keeps
+      running and the next queued prompt starts.
   """
 
   @behaviour GenAgentEnsemble.Strategy
 
   alias GenAgent.Response
   alias GenAgentEnsemble.Queue
+  alias GenAgentEnsemble.Strategies.{Failure, Guard}
   alias GenAgentEnsemble.Usage
 
   defstruct [
@@ -75,7 +133,10 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     :threshold,
     :rounds,
     :reply_kind,
+    failure_reply: :legacy,
+    partial: [],
     phase: :idle,
+    errors: [],
     queue: nil,
     usage: Usage.new()
   ]
@@ -83,6 +144,7 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   @impl true
   def init(opts) do
     specs = Keyword.fetch!(opts, :agents)
+    validate_specs!(specs)
 
     if length(specs) < 2 do
       raise ArgumentError,
@@ -106,7 +168,10 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     validate_threshold!(threshold, length(names))
 
     rounds = Keyword.get(opts, :rounds, 3)
+    validate_rounds!(rounds)
+
     reply_kind = Keyword.get(opts, :reply, :synthesis)
+    validate_reply!(reply_kind)
 
     state = %__MODULE__{
       agents: names,
@@ -114,10 +179,50 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
       threshold: threshold,
       rounds: rounds,
       reply_kind: reply_kind,
-      queue: Queue.new()
+      queue: Queue.new(),
+      failure_reply: Failure.option!(opts)
     }
 
     {:ok, state, specs}
+  end
+
+  # Reports only the index: spec options may carry credentials.
+  defp validate_specs!(specs) do
+    unless is_list(specs) do
+      raise ArgumentError, "Consensus :agents must be a list of {name, module, opts} specs"
+    end
+
+    Enum.each(Enum.with_index(specs), &validate_spec!/1)
+
+    :ok
+  end
+
+  defp validate_spec!({{_name, module, spec_opts}, index})
+       when is_atom(module) and is_list(spec_opts) do
+    if Keyword.keyword?(spec_opts), do: :ok, else: bad_spec!(index)
+  end
+
+  defp validate_spec!({_spec, index}), do: bad_spec!(index)
+
+  defp bad_spec!(index) do
+    raise ArgumentError,
+          "Consensus :agents entry #{index} must be {name, module, keyword_opts}"
+  end
+
+  defp validate_rounds!(rounds) do
+    unless is_integer(rounds) and rounds > 0 do
+      raise ArgumentError,
+            "Consensus :rounds must be a positive integer, got: #{inspect(rounds)}"
+    end
+  end
+
+  defp validate_reply!(reply_kind) do
+    unless reply_kind == :synthesis or
+             match?({:synthesize, f} when is_function(f, 1), reply_kind) do
+      raise ArgumentError,
+            "Consensus :reply must be :synthesis or {:synthesize, fun/1}, got: " <>
+              inspect(reply_kind)
+    end
   end
 
   defp validate_threshold!(:unanimous, _n), do: :ok
@@ -140,7 +245,15 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
 
   defp start_or_queue(prompt, token, %{phase: :idle} = state) do
     ops = for agent <- state.agents, do: {:dispatch, agent, prompt, token}
-    {:ok, ops, %{state | usage: Usage.new(), phase: {:running, token, prompt, 1, %{}}}}
+
+    {:ok, ops,
+     %{
+       state
+       | partial: [],
+         usage: Usage.new(),
+         errors: [],
+         phase: {:running, token, prompt, 1, %{}}
+     }}
   end
 
   defp start_or_queue(prompt, token, state) do
@@ -152,13 +265,11 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     case state.phase do
       {:running, token, original, round, pending} ->
         state = %{state | usage: Usage.add(state.usage, agent, response.usage)}
-        parsed = parse_response(state.verdict_parser, response.text)
-        pending = Map.put(pending, agent, parsed)
+        state = Failure.record(state, agent, :turn, round, response.text)
 
-        if map_size(pending) == length(state.agents) do
-          complete_round(token, original, round, pending, state)
-        else
-          {:ok, [], %{state | phase: {:running, token, original, round, pending}}}
+        case parse_response(state.verdict_parser, response.text) do
+          {:ok, parsed} -> record(agent, parsed, {token, original, round, pending}, state)
+          {:error, reason} -> fail_round(token, reason, state, :verdict_parser, agent)
         end
 
       _ ->
@@ -166,15 +277,69 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
     end
   end
 
-  defp parse_response(parser, text) do
-    case parser.(text) do
-      {:ok, verdict, rationale} when is_atom(verdict) and is_binary(rationale) ->
-        {verdict, rationale, text}
+  defp record(agent, entry, {token, original, round, pending}, state) do
+    pending = Map.put(pending, agent, entry)
+    state = %{state | phase: {:running, token, original, round, pending}}
 
-      _ ->
-        {nil, text, text}
+    cond do
+      state.errors != [] and threshold_unreachable?(pending, state) ->
+        {agent, _reason} = error = hd(state.errors)
+        fail_round(token, error, state, :turn, agent)
+
+      map_size(pending) == length(state.agents) ->
+        complete_round(token, original, round, pending, %{state | errors: []})
+
+      true ->
+        {:ok, [], state}
     end
   end
+
+  defp threshold_unreachable?(pending, state) do
+    n_agents = length(state.agents)
+
+    best =
+      pending
+      |> Enum.flat_map(fn {_agent, {v, _, _}} -> List.wrap(v) end)
+      |> Enum.frequencies()
+      |> Map.values()
+      |> Enum.max(fn -> 0 end)
+
+    best + (n_agents - map_size(pending)) < required_votes(state.threshold, n_agents)
+  end
+
+  defp required_votes(:unanimous, n_agents), do: n_agents
+  defp required_votes(:majority, n_agents), do: div(n_agents, 2) + 1
+  defp required_votes({:at_least, n}, _n_agents), do: n
+
+  defp fail_round(token, error, state, phase, agent) do
+    partial =
+      Enum.sort_by(state.partial, fn entry ->
+        {entry.index, Enum.find_index(state.agents, &(&1 == entry.agent))}
+      end)
+
+    error = Failure.wrap(state.failure_reply, __MODULE__, phase, agent, error, partial)
+    state = %{state | phase: :idle, partial: [], errors: []}
+    {ops, state} = maybe_start_next(state, [{:reply_error, token, error}])
+    {:ok, ops, state}
+  end
+
+  # `:error` is the parser's explicit abstain; anything else that is not a
+  # verdict atom (never nil, the internal abstain marker) with a binary
+  # rationale is a malformed result that fails the token.
+  defp parse_response(parser, text) do
+    case Guard.call(:verdict_parser, parser, [text], &valid_parse?/1) do
+      {:ok, :error} -> {:ok, {nil, text, text}}
+      {:ok, {:ok, verdict, rationale}} -> {:ok, {verdict, rationale, text}}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp valid_parse?(:error), do: true
+
+  defp valid_parse?({:ok, verdict, rationale}),
+    do: is_atom(verdict) and verdict != nil and is_binary(rationale)
+
+  defp valid_parse?(_), do: false
 
   defp complete_round(token, original, round, pending, state) do
     case converged?(pending, state.threshold, length(state.agents)) do
@@ -218,9 +383,15 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   end
 
   defp check_threshold(counts, needed) do
-    case Enum.max_by(counts, fn {_v, c} -> c end, fn -> nil end) do
-      {verdict, count} when count >= needed -> {:converged, verdict}
-      _ -> :not_converged
+    case Enum.sort_by(counts, fn {_v, c} -> -c end) do
+      [{verdict, count}] when count >= needed ->
+        {:converged, verdict}
+
+      [{verdict, count}, {_, second} | _] when count >= needed and count > second ->
+        {:converged, verdict}
+
+      _ ->
+        :not_converged
     end
   end
 
@@ -266,25 +437,53 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   defp finalize(token, status, verdict, rounds_used, pending, state) do
     responses = collect_responses(state.agents, pending)
 
-    text =
+    summary = %{
+      status: status,
+      verdict: verdict,
+      rounds: rounds_used,
+      threshold: state.threshold,
+      responses: responses
+    }
+
+    result =
       case state.reply_kind do
         :synthesis ->
-          render_synthesis(status, verdict, rounds_used, state.threshold, responses)
+          {:ok, render_synthesis(status, verdict, rounds_used, state.threshold, responses)}
 
         {:synthesize, fun} ->
-          fun.(%{
-            status: status,
-            verdict: verdict,
-            rounds: rounds_used,
-            threshold: state.threshold,
-            responses: responses
-          })
+          Guard.call(:synthesizer_reply, fun, [summary], &is_binary/1)
       end
 
-    response = %Response{text: text, usage: Usage.to_usage(state.usage)}
-    state = %{state | phase: :idle}
-    {ops, state} = maybe_start_next(state, [{:reply, token, response}])
-    {:ok, ops, state}
+    case result do
+      {:ok, text} ->
+        response = %Response{
+          text: text,
+          usage: Usage.to_usage(state.usage),
+          metadata: %{consensus: decision(summary)}
+        }
+
+        state = %{state | phase: :idle, partial: [], errors: []}
+        {ops, state} = maybe_start_next(state, [{:reply, token, response}])
+        {:ok, ops, state}
+
+      {:error, reason} ->
+        fail_round(token, reason, state, :synthesizer_reply, nil)
+    end
+  end
+
+  # Typed decision exposed at `response.metadata.consensus`. Raw agent text is
+  # left out; `votes` are in configured agent order.
+  defp decision(summary) do
+    %{
+      status: summary.status,
+      verdict: summary.verdict,
+      rounds: summary.rounds,
+      threshold: summary.threshold,
+      votes:
+        for {agent, verdict, rationale, _raw} <- summary.responses do
+          %{agent: agent, verdict: verdict, rationale: rationale}
+        end
+    }
   end
 
   defp collect_responses(agents, pending) do
@@ -339,7 +538,9 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
 
         state = %{
           state
-          | usage: Usage.new(),
+          | partial: [],
+            usage: Usage.new(),
+            errors: [],
             phase: {:running, token, prompt, 1, %{}},
             queue: rest
         }
@@ -354,10 +555,14 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   @impl true
   def handle_error(agent, reason, state) do
     case state.phase do
-      {:running, token, _, _, _} ->
-        state = %{state | phase: :idle}
-        {ops, state} = maybe_start_next(state, [{:reply_error, token, {agent, reason}}])
-        {:ok, ops, state}
+      {:running, token, original, round, pending} ->
+        if Map.has_key?(pending, agent) do
+          {:ok, [], state}
+        else
+          state = %{state | errors: state.errors ++ [{agent, reason}]}
+          entry = {nil, "turn error: #{inspect(reason)}", ""}
+          record(agent, entry, {token, original, round, pending}, state)
+        end
 
       _ ->
         {:ok, [], state}
@@ -370,7 +575,12 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
 
     case state.phase do
       {:running, ^token, _, _, _} ->
-        {ops, state} = maybe_start_next(%{state | phase: :idle, usage: Usage.new()}, [])
+        {ops, state} =
+          maybe_start_next(
+            %{state | phase: :idle, partial: [], errors: [], usage: Usage.new()},
+            []
+          )
+
         {:ok, ops, state}
 
       _ ->
@@ -381,8 +591,17 @@ defmodule GenAgentEnsemble.Strategies.Consensus do
   @impl true
   def handle_dispatch_rejected(agent, token, reason, state) do
     case state.phase do
-      {:running, ^token, _, _, _} -> handle_error(agent, reason, state)
-      _ -> {:ok, [{:reply_error, token, {agent, reason}}], state}
+      {:running, ^token, _, _, _} when state.failure_reply == :structured ->
+        fail_round(token, {agent, reason}, state, :dispatch, agent)
+
+      {:running, ^token, _, _, _} ->
+        handle_error(agent, reason, state)
+
+      _ ->
+        error =
+          Failure.wrap(state.failure_reply, __MODULE__, :dispatch, agent, {agent, reason}, [])
+
+        {:ok, [{:reply_error, token, error}], state}
     end
   end
 

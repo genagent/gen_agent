@@ -4,15 +4,17 @@ defmodule GenAgentEnsemble.Strategies.Switchboard do
   specifies its target agent via `opts[:agent]`.
 
   No decomposition, no coordination across agents, no default
-  target -- if the caller doesn't say which agent, the call fails
-  loud with `{:error, :no_agent_specified}`. Pick this strategy
+  target -- if the caller doesn't say which agent, the request fails
+  with `:no_agent_specified` (returned by `ask`, retrieved through the
+  token from `tell`). Pick this strategy
   when you want an explicit routed fleet ("the code review team")
   rather than an implicit pool or a decomposing coordinator.
 
   ## Options
 
     * `:agents` (required) -- list of `{name, module, opts}` specs,
-      one per sub-agent. Names must be unique within this ensemble.
+      one per sub-agent. Must be non-empty (an empty fleet raises
+      `ArgumentError` at init). Names must be unique within this ensemble.
 
   ## Addressing
 
@@ -31,12 +33,18 @@ defmodule GenAgentEnsemble.Strategies.Switchboard do
 
   ## Failure modes
 
+  Routing errors close the token rather than raising. `ask` returns
+  the error immediately; `tell` still returns `{:ok, token}`, and the
+  error is delivered later through `await`, `poll`, or `inbox`.
+
     * `opts[:agent]` missing -- `{:error, :no_agent_specified}`
     * `opts[:agent]` not in the fleet -- `{:error, {:unknown_agent, name}}`
     * An agent's turn errors -- that token fails; the agent stays
       available for subsequent turns.
     * An agent dies -- its pending tokens all fail with
-      `{:agent_down, reason}`; remaining agents keep serving.
+      `{:agent_down, reason}` and it is removed from the fleet, so
+      later calls addressed to it fail with `{:unknown_agent, name}`;
+      remaining agents keep serving.
     * All agents die -- the session halts.
   """
 
@@ -48,6 +56,10 @@ defmodule GenAgentEnsemble.Strategies.Switchboard do
   def init(opts) do
     specs = Keyword.fetch!(opts, :agents)
     names = for {name, _mod, _opts} <- specs, do: name
+
+    if names == [] do
+      raise ArgumentError, "Switchboard requires at least 1 agent, got none"
+    end
 
     # Reject duplicate names at init time for a clear error.
     case names -- Enum.uniq(names) do

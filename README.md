@@ -24,6 +24,9 @@ The [`claude_wrapper`](https://github.com/genagent/claude_wrapper_ex) and
 [`codex_wrapper`](https://github.com/genagent/codex_wrapper_ex) repositories
 remain independent.
 
+If you are deciding between calling a wrapper directly, running a GenAgent,
+or enqueuing an Oban job, see [Choosing a layer](guides/choosing_a_layer.md).
+
 Each agent is a `:gen_statem` process wrapping a persistent LLM session.
 Every interaction is a prompt-response turn, and the implementation decides
 what happens between turns.
@@ -38,15 +41,16 @@ semantics of turns.
 ```elixir
 def deps do
   [
-    {:gen_agent, "~> 0.6.2"}, # x-release-please-version
-    # Plus at least one backend:
-    {:gen_agent_claude, "~> 0.2.0"},
-    {:gen_agent_codex, "~> 0.4.0"},
-    {:gen_agent_anthropic, "~> 0.3.0"},
-    {:gen_agent_openai, "~> 0.3.0"}
+    {:gen_agent, "~> 0.7.0"} # x-release-please-version
   ]
 end
 ```
+
+Add at least one backend using its own installation guide:
+[Claude](https://github.com/genagent/gen_agent/tree/main/integrations/claude),
+[Codex](https://github.com/genagent/gen_agent/tree/main/integrations/codex),
+[Anthropic](https://github.com/genagent/gen_agent/tree/main/integrations/anthropic),
+or [OpenAI](https://github.com/genagent/gen_agent/tree/main/integrations/openai).
 
 ## Quick start
 
@@ -167,11 +171,16 @@ entry point, see the [local GenAgent app example](examples/gen_agent_app/README.
 An agent is a state machine with two states:
 
 ```
-idle --- ask/tell/notify ---> processing
+idle --- ask/tell ---------------------------> processing
+idle --- notify -> handle_event/2 -> {:prompt, ..} -> processing
+idle --- notify -> handle_event/2 -> {:noreply, ..} -> idle (no turn)
                                   |
                                   v
 idle <--- handle_response --- processing (turn done)
 ```
+
+A notification only starts a turn when `handle_event/2` returns
+`{:prompt, text, state}`; `{:noreply, state}` leaves the agent idle.
 
 - **:idle** -- waiting for work. On enter, drains the mailbox (queued
   prompts) in FIFO order.
@@ -182,10 +191,146 @@ idle <--- handle_response --- processing (turn done)
   Useful for multi-step work that the agent drives itself.
 - **Halting** -- `handle_response/3`, `handle_error/3`, `handle_event/2`,
   or `pre_turn/2` can return `{:halt, state}` to go idle but freeze the
-  mailbox. A halted agent ignores queued prompts until `GenAgent.resume/1`
+  mailbox. `GenAgent.halt/1` requests the same pause externally, after
+  any active turn completes. A halted agent ignores queued prompts until
+  `GenAgent.resume/1`
   is called.
 - **Watchdog** -- a `:state_timeout` kills any turn that runs longer than
-  the configured deadline (default 10 minutes). Configurable per agent.
+  the `:watchdog_ms` deadline (positive integer milliseconds or `:infinity`,
+  default 10 minutes). `:max_tell_results` (default 100) and
+  `:max_tell_result_bytes` (default 8 MiB) bound the completed tell results
+  retained for `poll/2`. Both are non-negative integers; zero retains none.
+  The byte budget uses `:erlang.external_size/1` for each ref and result,
+  including results also sent by `tell_with_completion/4`. The oldest
+  results are evicted first; a result larger than the budget is not retained.
+
+Halting does not terminate the agent. It remains registered with its final
+state and backend session. An external owner can read `GenAgent.status(name)`
+after completion, persist the state it needs, then call `GenAgent.stop(name)`
+to release resources. Use `stop/2` with the owning supervisor for a
+caller-owned agent. Calling `stop/1` or `stop/2` for that same agent from one
+of its callbacks, including `handle_stream_event/2` in the prompt task,
+returns `{:error, :self_stop}` because waiting for its exit would block
+cleanup. If final state and cached results are not needed, a
+`post_run/1` callback can spawn a separate process to stop a global agent:
+
+```elixir
+def post_run(_state) do
+  name = GenAgent.current_name()
+  spawn(fn -> GenAgent.stop(name) end)
+  :ok
+end
+```
+
+An ordinary `ask/3` sent to a halted agent waits until `resume/1`, and its
+watchdog does not bound that wait. `tell/3` and `tell_with_completion/4`
+accept requests while halted, but `poll/3` reports `{:ok, :pending}` until
+they run. Check `status/2` or `runtime_snapshot/2` to distinguish a halt
+from an active turn. Callers that cannot resume the agent can use
+`tell_with_completion/5` with `on_halt: :fail`.
+
+## Core callbacks
+
+Only `init_agent/1` and `handle_response/3` are required. `use GenAgent`
+supplies defaults for the rest, except `handle_info/2`, which stays
+undefined so unexpected messages are logged and discarded. A "decision"
+is `{:noreply, state}`, `{:prompt, text, state}` (text must be a binary),
+or `{:halt, state}`.
+
+| Callback | Runs in | Valid returns | Use it for |
+|---|---|---|---|
+| `init_agent/1` | agent | `{:ok, backend_opts, state}` or `{:error, reason}` | Backend options and initial state |
+| `handle_response/3` | agent | decision | A turn succeeded: record it, chain, or halt |
+| `handle_error/3` | agent | decision | A turn failed: stay idle, retry, or halt |
+| `handle_event/2` | agent | decision | Events from `notify/2` and `notify_ack/3` |
+| `handle_info/2` | agent | decision | Timers, monitors, and other OTP messages |
+| `handle_stream_event/2` | prompt task | next state (any term) | Mid-turn backend events |
+| `terminate_agent/2` | agent | any term (ignored) | Cleanup on shutdown |
+
+`pre_run/1`, `pre_turn/2`, `post_turn/3`, and `post_run/1` are covered
+under [Lifecycle hooks](#lifecycle-hooks). The `GenAgent` moduledoc has the
+full callback contract table, including invalid returns and logging.
+
+**Errors.** `handle_error/3` receives backend errors, a terminal `:error`
+event, a stream that ends without a terminal event, a prompt-task crash
+(`{:task_crashed, reason}`), `:timeout`, `:interrupted`, and
+`:task_supervisor_unavailable`. It also receives overload or `pre_turn/2`
+rejections of generated prompts. It returns a decision, so `{:prompt, text,
+state}` retries; there is no built-in retry cap. A raise or invalid return
+from `handle_error/3`, `handle_event/2`, or `handle_info/2` is logged and
+keeps the previous state; the same failure in `handle_response/3` stops the
+agent.
+
+**Events.** An event handled while idle runs immediately. During a turn it
+is buffered and delivered in arrival order after the decision callback and
+`post_turn/3`, using the resulting state. See the keyless
+[log-triage example](examples/log_triage/README.md) for an OTP Logger handler
+that forwards crash reports and batches deferred notifications into agent turns.
+
+**Stream events.** `handle_stream_event/2` runs in the prompt task. Its
+state starts as the agent state at dispatch and is threaded through the
+stream inside that task; the agent process does not see intermediate
+values. The final value is merged only when the stream finishes normally,
+which includes a terminal `:error` event or EOF without a terminal event.
+A task crash, interruption, or watchdog kill discards it, and the agent
+continues from its pre-stream state. A crash inside the callback is a task
+crash.
+
+**Terminate.** `terminate_agent/2` runs in the agent process on shutdown
+for cleanup; its return value is ignored. It does not run for an
+untrappable kill.
+
+### Request refs and acknowledgments
+
+`interrupt_request/3` cancels the active turn only if `ref` is still the
+current request, so it cannot hit a successor turn. It returns
+`{:ok, :accepted}`, `{:error, :not_current}`, `{:error, :idle}`, or
+`{:error, :not_found}`. Use `cancel_request/3` for a queued tell.
+
+```elixir
+try do
+  with {:ok, ref} <- GenAgent.tell("my-coder", "Run the tests", 5_000) do
+    interruption =
+      case GenAgent.interrupt_request("my-coder", ref, 5_000) do
+        {:ok, :accepted} = result -> result
+        {:error, reason} when reason in [:not_current, :idle] ->
+          GenAgent.cancel_request("my-coder", ref, 5_000)
+        {:error, reason} -> {:error, reason}
+      end
+
+    %{ref: ref, interruption: interruption}
+  end
+catch
+  :exit, reason -> {:error, {:agent_call_failed, reason}}
+end
+```
+
+`{:ok, :accepted}` reports the agent's decision and BEAM task cancellation,
+not that a provider process has stopped. `{:error, :not_current}` can also
+mean the request has finished or is queued. `:idle` includes a tell queued
+while halted, so both results fall back to `cancel_request/3`, which may
+itself return `{:error, :current}` or `{:error, :already_finished}`.
+The example returns the ref and admission result without waiting for completion.
+Read the eventual outcome with `GenAgent.poll/3`, or use
+`tell_with_completion/4` when you want ref-tagged completion messages.
+Each call has a finite timeout, and the catch handles timeout or agent-death
+exits. A call timeout does not prove rejection; check agent state before retrying.
+
+`notify_ack/3` waits for admission, not for model work. While a turn is
+running, `:ok` means the event was retained for delivery after the turn.
+
+```elixir
+case GenAgent.notify_ack("my-coder", {:ci_failed, "test_auth"}, 5_000) do
+  :ok -> :accepted
+  {:error, {:overloaded, info}} -> {:rejected, info}
+  {:error, :not_found} -> :no_such_agent
+  {:error, :draining} -> :shutting_down
+end
+```
+
+The acknowledgment is in-memory only. A prompt that `handle_event/2` later
+generates can still be rejected, and `handle_error/3` receives that
+overload. `notify/2` is a best-effort cast that returns `:ok` regardless.
 
 ## Lifecycle hooks
 
@@ -198,7 +343,7 @@ around the agent's full run:
 | `pre_run/1` | Once, after `init_agent/1`, before the first turn | Slow async setup: clone a repo, create a worktree, fetch secrets |
 | `pre_turn/2` | Before each prompt dispatch | Prompt augmentation, rate limiting, `:skip`/`:halt` as a gate |
 | `post_turn/3` | After each turn, post-decision | State-mutating side effects: commit per turn, record usage |
-| `post_run/1` | On clean `{:halt, state}` from a decision callback or `pre_turn/2` | Completion actions: open a PR, post a summary |
+| `post_run/1` | On clean `{:halt, state}` from a decision callback or `pre_turn/2`, or an external `halt/1` | Completion actions: open a PR, post a summary |
 
 All four are optional with default no-op implementations. The guiding
 principle is **telemetry first, callbacks for state mutation** --
@@ -232,15 +377,25 @@ The contract has three required callbacks (`start_session/1`, `prompt/2`,
 `terminate_session/1`). `prompt/3` and `checkpoint_session/2` let CLI
 backends acknowledge a session ID during an active turn, so a later failure
 or interruption does not discard it. `update_session/2` and
-`resume_session/2` remain optional. See `GenAgent.Backend` for details.
+`resume_session/2` and `reset_session/1` remain optional. See
+`GenAgent.Backend` for details.
+
+The four bundled adapters normalize turn failures as
+`GenAgent.Backend.Error` when this core version is present. Its `:kind`,
+`:retryable?`, `:status`, and `:retry_after` fields support shared retry
+policies; `:raw` retains the provider's original reason. A retry is always
+the application's decision.
 
 See the [Backends guide](guides/backends.md) for backend implementation rules and a capability and option comparison.
+For the tradeoffs between wrappers, GenAgent, and Oban workers, see
+[Choosing a layer](guides/choosing_a_layer.md).
 
 ## Public API
 
 | Function | What it does |
 |---|---|
 | `start_agent/2` | Start an agent under the supervision tree. |
+| `current_name/0` | Read the registered name from an agent callback. |
 | `ask/3` | Synchronous prompt. Blocks until the turn finishes. |
 | `tell/3` | Async prompt. Returns a ref for `poll/3`. |
 | `tell_with_completion/4` | Async prompt with a request-scoped completion message. |
@@ -250,9 +405,12 @@ See the [Backends guide](guides/backends.md) for backend implementation rules an
 | `interrupt/1` | Cancel an in-flight turn. |
 | `interrupt_request/3` | Acknowledge cancellation only if the active request ref matches. |
 | `cancel_request/3` | Remove a queued tell by its exact request ref. |
+| `halt/1` | Pause dispatch after the active turn, without stopping the agent. |
 | `resume/1` | Unhalt an agent and drain its mailbox. |
+| `reset_session/2` | Clear supported backend conversation context between turns while retaining agent state. |
 | `status/2` | Read the agent's current state. |
 | `runtime_snapshot/2` | Read bounded runtime metadata and pending-input counts. |
+| `drain/2` | Refuse new work, finish the active turn, and wait for the agent to exit. |
 | `stop/1` | Terminate the agent. |
 | `child_spec/2` | Build an agent child spec for a caller-owned supervisor. |
 | `stop/2` | Terminate an agent under a caller-owned supervisor. |
@@ -261,14 +419,24 @@ See the [Backends guide](guides/backends.md) for backend implementation rules an
 Names resolve through a `Registry`, so callers address agents by name
 (any term). Agents use `restart: :temporary`: a crashed or stopped agent
 must be started explicitly, and its previous state is not restored.
+Callbacks can use `GenAgent.current_name()` in both the agent process and
+the prompt task; no duplicate `agent_name` option is needed.
 
-`runtime_snapshot/2` reports the coordinator's current phase, halted
+`runtime_snapshot/2` reports the coordinator's current phase, halted, pending-halt and draining
 flag, queued prompt and buffered notification counts, pending self-chain,
 and active request ref, origin and elapsed/watchdog time. It contains no
 prompt, callback state, backend session or event payload. It is a
 point-in-time observation, not durable state or permission to dispatch.
 The older `status/2` API remains available; its `agent_state` is the
 server's latest retained state, not a live read of an in-flight task.
+
+Use `GenAgent.drain(name, timeout)` during an orderly shutdown. It rejects
+new asks, tells, and acknowledged notifications with `{:error, :draining}`;
+queued asks and completion recipients receive the same error. The active
+turn finishes its callbacks before the agent and backend session terminate.
+`drain/2` returns `:ok` only after that cleanup and process exit. The
+default timeout is `:infinity`; a caller timeout does not cancel a drain
+already accepted by the agent. `stop/1` remains immediate.
 
 ## Request completion messages
 
@@ -332,9 +500,10 @@ the rejection telemetry event to observe cast overloads.
 
 Deferred event callbacks may generate prompts when a turn finishes.
 Those prompts use the bounded pending-prompt queue; on overload,
-`handle_error/3` receives the reason. Self-chain prompts from
-`handle_response/3` or `handle_error/3` use one reserved slot outside
-the prompt count cap, but must fit the prompt byte cap. A halted agent
+`handle_error/3` receives the reason. Response follow-ups and error retries
+use one reserved slot outside the prompt count cap, but must fit the prompt
+byte cap. Error retries of ask and tell turns retain their original caller
+and ref; response follow-ups are independent turns. A halted agent
 retains admitted work until `resume/1`; interruption or completion
 releases queue capacity as work is drained. These limits bound accepted
 internal storage, not arbitrary messages already waiting in the BEAM
@@ -401,11 +570,35 @@ spec =
 :ok = GenAgent.stop("worker-1", MyApp.Agents)
 ```
 
+For an agent that starts with your application, a module that uses
+`GenAgent` can also be a static supervisor child:
+
+```elixir
+children = [
+  {Task.Supervisor, name: MyApp.AgentTasks},
+  {MyApp.Watcher,
+   name: "watcher",
+   backend: MyBackend,
+   task_supervisor: MyApp.AgentTasks}
+]
+
+{:ok, owner} = Supervisor.start_link(children, strategy: :rest_for_one)
+{:ok, response} = GenAgent.ask("watcher", "Hello")
+:ok = GenAgent.stop("watcher", owner)
+```
+
+`use GenAgent` provides an overridable `child_spec/1` for this tuple form.
+It delegates to `GenAgent.child_spec/2`, so the options and validation are
+the same. The child ID is its registered name. A static agent also has
+`restart: :temporary`: after a stop or crash, the supervisor removes it
+and does not restart it. Start a new agent explicitly if needed; its
+previous state is not restored.
+
 `child_spec/2` requires an explicit, running task supervisor; it never
 silently uses the global one. Both globally and caller-owned agents use
 `GenAgent.Registry`, so names must be unique across them and normal
 name-based calls work for either. `stop/1` targets only the global agent
-supervisor; pass the caller's `DynamicSupervisor` to `stop/2`.
+supervisor; pass the owning supervisor to `stop/2`.
 The agent child is temporary and is never automatically replayed after
 a crash. With `:rest_for_one`, failure of the task supervisor also stops
 the agent supervisor. On ordinary shutdown, the agent supervisor stops
@@ -423,7 +616,8 @@ If the selected task supervisor is unavailable before a task can start,
 the request fails with `:task_supervisor_unavailable`, reaches
 `handle_error/3`, and leaves the agent idle. A callback's immediate retry
 is discarded in this case; a later request can run after the supervisor
-returns.
+returns. When this happens during a caller-owned retry, the original ask or
+poll receives the final `:task_supervisor_unavailable` error.
 
 The prompt task belongs to its agent: it is stopped when the agent exits,
 including abrupt exits that bypass termination callbacks. Interruption and
@@ -448,7 +642,7 @@ copy, and adapt -- they are **not** installed as public API modules:
 - **[Watcher][wc]** -- reactive event-driven agent, idle until triggered
 - **[Heartbeat][hb]** -- periodic agent driven by timer events
 - **[Checkpointer][cp]** -- human-in-the-loop review workflow
-- **[Retry][rt]** -- handle_error self-chain for transient failures
+- **[Retry][rt]** -- caller-owned handle_error retries for transient failures
 - **[Workspace][ws]** -- all four lifecycle hooks around a git workspace
 
 Start with the [patterns overview][overview] for a "choose your
@@ -484,6 +678,7 @@ GenAgent emits telemetry events for observability:
 [:gen_agent, :mailbox, :queued]  # %{agent, depth}
 [:gen_agent, :input, :rejected]  # %{agent, reason: {:overloaded, info}}
 [:gen_agent, :halted]            # %{agent}
+[:gen_agent, :terminated]        # %{agent, reason}; callback-driven exits only
 ```
 
 Enough to build a communication graph, track latency, alert on stuck
@@ -518,9 +713,30 @@ These commands check the root package. Run `scripts/quality.sh` to validate
 all six packages; see the [contributor guide](https://github.com/genagent/gen_agent/blob/main/CONTRIBUTING.md)
 for setup and release conventions.
 
-The test suite uses an in-process `GenAgent.Backends.Mock` (in
-`test/support/`) that lets you script backend responses without any
-external process. See `test/gen_agent/server_test.exs` for examples.
+`GenAgent.Backends.Mock` ships with the core package so applications can
+test their own agent callbacks without a provider account or CLI. Return
+`scripts:` from `init_agent/1`, one script per turn:
+
+```elixir
+def init_agent(opts) do
+  events = [GenAgent.Event.new(:result, %{text: "done"})]
+  {:ok, [scripts: [events]], %{observer: Keyword.fetch!(opts, :observer)}}
+end
+
+{:ok, _pid} = GenAgent.start_agent(MyAgent,
+  name: "test-worker",
+  backend: GenAgent.Backends.Mock,
+  observer: self()
+)
+
+assert {:ok, response} = GenAgent.ask("test-worker", "work")
+assert response.text == "done"
+assert GenAgent.Backends.Mock.history("test-worker") == ["work"]
+```
+
+Use `GenAgent.Backends.Mock.gate/2` when a test needs to inspect an active
+turn or queue before releasing it. See the module documentation for the
+release message and supported script shapes.
 
 ## License
 

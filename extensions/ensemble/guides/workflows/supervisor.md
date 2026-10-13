@@ -107,8 +107,16 @@ form above or put the `start_link/1` call in your application's
 
 ### Single decomposed run
 
+Decompose, fan out and recombine take several backend turns, so budget the
+call with `timeout:` (default 30_000 ms). Expiry exits the caller; the
+timeout itself does not cancel the work, which keeps running only if the
+ensemble survives (the caller catches the exit, or a separate supervised
+owner started it). An uncaught exit that kills the `start_link` owner stops
+the ensemble. For recoverable waits use `GenAgentEnsemble.tell/2` +
+`GenAgentEnsemble.await/3` (`E.await` raises on timeout).
+
 ```elixir
-iex> E.ask!("research", "why does Erlang have a separate process per stage?")
+iex> E.ask!("research", "why does Erlang have a separate process per stage?", timeout: 300_000)
 """
 - The BEAM's process model makes this cheap...
 - Isolation: a crashing stage can't corrupt the others...
@@ -137,7 +145,7 @@ iex> E.await("research", tok) |> E.puts()
 
 ## Variations
 
-- **Decomposer shape.** Any `String.t -> [String.t]`. Newline
+- **Decomposer shape.** Any `String.t -> [String.t]` (a list of binaries). Newline
   splitting is the simplest; regex or JSON parsing (if the
   coordinator is prompted to emit JSON) are common next steps.
 - **Synthesizer shape.** A one-argument function receives ordered
@@ -175,12 +183,19 @@ iex> E.await("research", tok) |> E.puts()
 - **Coordinator is persistent.** The coordinator agent's session
   lives across runs, so its input tokens grow as you reuse the
   ensemble. Restart if you want a clean coordinator.
-- **Decomposer/synthesizer exceptions stop the ensemble.** If your
-  user-supplied function raises, the strategy does not convert it into
-  a `:halt` or an error reply. The Server's callback wrapper catches
-  it, logs a sanitized message, and stops the ensemble with
-  `{:callback_failed, kind, reason_kind}`. Wrap defensively if the
-  coordinator output might be malformed.
+- **Decomposer/synthesizer failures fail the run, not the ensemble.** If
+  your `:decomposer` raises, throws or exits, or returns anything other
+  than a list of binaries, or your `:synthesizer` fails or returns a
+  non-binary, the caller receives
+  `{:error, {:strategy_function_failed, label, kind, class}}` or
+  `{:error, {:invalid_strategy_result, label}}`, with `label` either
+  `:decomposer` or `:synthesizer`. Messages, stacktraces and returned
+  values are not included. A decomposer failure happens before any worker
+  starts. A synthesizer failure is replied first, then all workers are
+  stopped. The ensemble keeps running and queued requests proceed. This
+  covers only these built-in callbacks; it is not a general containment
+  guarantee for custom strategies, and the built-in default synthesizer is
+  not wrapped: only functions you supply are treated as user code.
 - **Decomposition determines synthesizer order.** The synthesizer
   receives `[{worker_name, output_text}]` in the original sub-prompt
   order, regardless of worker completion order. For two-argument
@@ -197,3 +212,46 @@ when no turn reports usage. Nonnumeric fields are dropped, and each invocation
 starts fresh. Failed turns cannot be counted; session-cumulative backend usage
 would overcount. See [usage accounting](overview.md#usage-accounting) for the
 complete shape and per-turn reporting assumption.
+
+## Opt-in structured runtime failures
+
+Set `failure_reply: :structured` in the strategy's `opts` to receive:
+
+```elixir
+{:error, %GenAgentEnsemble.Strategies.Failure{
+  strategy: strategy_module,
+  phase: phase,
+  agent: agent_name_or_nil,
+  reason: original_reason,
+  partial: [%{agent: name, phase: output_phase, index: index, text: text}]
+}}
+```
+
+`failure_reply: :legacy` is the default and preserves existing error reasons
+and operation ordering. Other option values raise `ArgumentError` at init.
+Migrate caller error matches before opting in, for example:
+
+```elixir
+{:error, %GenAgentEnsemble.Strategies.Failure{agent: agent, reason: reason, partial: partial}}
+```
+
+This contract covers handled backend turn errors that abort the token, guarded
+callback failures or malformed outputs, and scoped dispatch rejection. `reason`
+is exactly the original legacy reason (including any agent tuple) or the
+redacted Guard reason. Known turn, dispatch and callback agents are identified;
+aggregate synthesis uses `agent: nil`.
+
+Supervisor partials contain coordinator text with phase `:coordinator` and index 0, followed by completed workers with phase `:worker` and numeric assignment indexes starting at 1. Failure phases are `:turn`, `:dispatch`, `:decomposer` (including excessive decomposition), and `:synthesizer`. Empty decomposition remains successful. Worker start operation semantics are unchanged: a subsequent dispatch rejection identifies the worker but cannot recover the original worker-start error.
+
+Partials contain only completed successful response texts, including the response
+that triggers a callback failure and all completed synthesis inputs. Failed turns
+and outstanding turns contribute no invented outputs or streamed fragments.
+Only text is journaled in structured mode; retained text is cleared on success,
+terminal failure, cancellation and successor start. Partials never mix queued
+requests. Guard still redacts callback payloads, messages and stacktraces from
+`reason`; response text and backend reasons may contain application data.
+
+Agent deaths, halt, cancellation, timeouts, initialization/startup errors and
+custom strategy/framework errors are outside this structured guarantee and keep
+their existing semantics. Callers must handle those outcomes separately.
+Structured failures are optional; the default contract remains legacy.

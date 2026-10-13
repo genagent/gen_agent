@@ -8,13 +8,17 @@ defmodule GenAgent.Support.TestAgent do
       that decides what `handle_response/3` returns. Defaults to `{:noreply, state}`.
     * `:event_handler` is a 2-arity function `(event, state) -> callback_return`
       that decides what `handle_event/2` returns. Defaults to `{:noreply, state}`.
+    * `:stream_event_handler` is a 2-arity function `(event, state) -> state`
+      invoked after a stream event is recorded.
+    * `:terminate_handler` is a 2-arity function `(reason, state) -> term`
+      invoked from `terminate_agent/2`.
     * `:notify_pid` -- if set, all callback invocations are echoed to this
       pid as `{:test_agent, callback_name, args}` tuples so tests can assert
       on callback ordering.
 
   The `State` struct accumulates a full trace of everything the agent saw:
-  responses, events, stream events. Tests read it via `GenAgent.Server.call`
-  with `:status` to peek at `agent_state`.
+  responses, events, stream events. Tests read it via `GenAgent.status/2`
+  or `:gen_statem.call(pid, :status)` to peek at `agent_state`.
   """
 
   @behaviour GenAgent
@@ -28,6 +32,8 @@ defmodule GenAgent.Support.TestAgent do
               responder: nil,
               error_handler: nil,
               event_handler: nil,
+              stream_event_handler: nil,
+              terminate_handler: nil,
               notify_pid: nil,
               extra: %{}
   end
@@ -55,6 +61,9 @@ defmodule GenAgent.Support.TestAgent do
         {:noreply, state}
       end)
 
+    stream_event_handler = Keyword.get(opts, :stream_event_handler, fn _event, state -> state end)
+    terminate_handler = Keyword.get(opts, :terminate_handler, fn _reason, _state -> :ok end)
+
     notify_pid = Keyword.get(opts, :notify_pid)
     extra = Keyword.get(opts, :extra, %{})
 
@@ -72,6 +81,8 @@ defmodule GenAgent.Support.TestAgent do
       responder: responder,
       error_handler: error_handler,
       event_handler: event_handler,
+      stream_event_handler: stream_event_handler,
+      terminate_handler: terminate_handler,
       notify_pid: notify_pid,
       extra: extra
     }
@@ -104,13 +115,13 @@ defmodule GenAgent.Support.TestAgent do
   def handle_stream_event(event, %State{} = state) do
     state = %{state | stream_events: state.stream_events ++ [event]}
     maybe_notify(state, :handle_stream_event, event)
-    state
+    state.stream_event_handler.(event, state)
   end
 
   @impl true
   def terminate_agent(reason, %State{} = state) do
     maybe_notify(state, :terminate_agent, reason)
-    :ok
+    state.terminate_handler.(reason, state)
   end
 
   @impl true

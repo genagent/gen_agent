@@ -93,7 +93,7 @@ defmodule Research.Agent do
 
     case questions do
       [] ->
-        {:halt, %{new_state | phase: :done}}
+        {:halt, %{new_state | phase: :failed, last_error: :no_questions}}
 
       [first | _] ->
         {:prompt, answer_prompt(first), new_state}
@@ -169,7 +169,7 @@ defmodule Research.Agent do
     You are a concise research assistant.
 
     When asked to list sub-questions: output them one per line,
-    plain text, no numbering or markup.
+    plain text questions ending in ?, no preamble, numbering or markup.
 
     When asked to answer a sub-question: 2-3 short sentences, no
     preamble.
@@ -183,13 +183,64 @@ defmodule Research.Agent do
     text
     |> String.split("\n")
     |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(&String.replace(&1, ~r/^\d+[.)]\s+/, ""))
+    |> Enum.filter(&String.ends_with?(&1, "?"))
+  end
+
+  # Bound both polling and each status call; halted processes retain final state.
+  def await_completion(name, timeout \\ 30_000) do
+    wait([name], System.monotonic_time(:millisecond) + timeout)
+  end
+
+  defp wait(names, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      {:error, :timeout}
+    else
+      try do
+        statuses =
+          Enum.map(names, fn name ->
+            call_timeout = deadline - System.monotonic_time(:millisecond)
+            if call_timeout > 0,
+              do: GenAgent.status(name, call_timeout),
+              else: {:error, :timeout}
+          end)
+
+        case Enum.find(statuses, &match?({:error, _}, &1)) do
+          {:error, reason} ->
+            {:error, reason}
+
+          nil ->
+            if Enum.all?(statuses, & &1.halted) do
+              states = Enum.map(statuses, & &1.agent_state)
+
+              case Enum.find(states, fn state -> state.phase == :failed end) do
+                nil -> {:ok, hd(states)}
+                state -> {:error, state.last_error}
+              end
+            else
+              Process.sleep(min(10, max(0, deadline - System.monotonic_time(:millisecond))))
+              wait(names, deadline)
+            end
+        end
+      catch
+        :exit, {:timeout, _} -> {:error, :timeout}
+        :exit, reason -> {:error, {:status_unavailable, reason}}
+      end
+    end
   end
 end
 ```
 
 Resuming a terminal agent and sending another ask/tell preserves its report
 and terminal phase, then halts again.
+
+Questions must occupy one line each and end in `?`. The parser strips numeric
+prefixes such as `1.` and `2)`, and ignores blank lines and preambles without a
+trailing question mark before applying the question limit. A preamble ending
+in `?` counts as a question; wrapped questions and other list markup are outside
+this simple format. A listing with no valid questions fails with `:no_questions`.
 
 ## Using it
 
@@ -206,16 +257,14 @@ and terminal phase, then halts again.
 {:ok, _ref} = GenAgent.tell("octopus-research",
   "List 3 sub-questions about: why do octopuses have three hearts?")
 
-# Poll progress any time.
-GenAgent.status("octopus-research")
-# => %{agent_state: %Research.Agent.State{phase: :answering, ...}, ...}
-
-# Wait for :done (in practice, a small poll loop in the manager).
-# Then read the final report:
-%{agent_state: %{final_report: report}} = GenAgent.status("octopus-research")
-IO.puts(report)
-
-GenAgent.stop("octopus-research")
+try do
+  case Research.Agent.await_completion("octopus-research", 30_000) do
+    {:ok, %{final_report: report}} -> IO.inspect(report, label: "report")
+    {:error, reason} -> IO.inspect(reason, label: "research failed or timed out")
+  end
+after
+  GenAgent.stop("octopus-research")
+end
 ```
 
 ## Variations

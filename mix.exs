@@ -1,7 +1,7 @@
 defmodule GenAgent.MixProject do
   use Mix.Project
 
-  @version "0.6.2"
+  @version "0.7.0"
   @source_url "https://github.com/genagent/gen_agent"
 
   def project do
@@ -34,6 +34,7 @@ defmodule GenAgent.MixProject do
   defp deps do
     [
       {:telemetry, "~> 1.0"},
+      {:stream_data, "~> 1.2", only: :test},
       {:ex_doc, "~> 0.35", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
@@ -50,6 +51,7 @@ defmodule GenAgent.MixProject do
         "MIGRATION.md",
         "CHANGELOG.md",
         "LICENSE",
+        "guides/choosing_a_layer.md": [title: "Choosing a Layer"],
         "guides/backends.md": [title: "Backends"],
         "guides/patterns/overview.md": [title: "Patterns Overview"],
         "guides/patterns/solo.md": [title: "Solo"],
@@ -84,7 +86,10 @@ defmodule GenAgent.MixProject do
   defp package do
     [
       licenses: ["MIT"],
-      links: %{"GitHub" => @source_url},
+      links: %{
+        "GitHub" => @source_url,
+        "Changelog" => "#{@source_url}/blob/main/CHANGELOG.md"
+      },
       files: ~w(lib guides mix.exs README.md MIGRATION.md CHANGELOG.md LICENSE .formatter.exs),
       maintainers: ["Josh Rotenberg"]
     ]

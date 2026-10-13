@@ -3,13 +3,17 @@ defmodule GenAgent.ResponseTest do
 
   alias GenAgent.{Event, Response}
 
+  doctest Response
+
   test "manually constructed responses leave final_message unspecified" do
     assert %Response{text: "synthetic"}.final_message == nil
+    assert %Response{text: "synthetic"}.prompt == nil
   end
 
   test "metadata defaults to an empty map for manual and backend responses" do
     assert %Response{}.metadata == %{}
     assert Response.from_events([Event.new(:result, %{text: "done"})]).metadata == %{}
+    assert Response.from_events([Event.new(:result, %{text: "done"})]).prompt == nil
   end
 
   describe "from_events/2" do
@@ -100,6 +104,18 @@ defmodule GenAgent.ResponseTest do
 
       assert response.duration_ms == 1234
       assert response.session_id == "sess-abc"
+    end
+
+    test "exposes model from the terminal event even when the event list is compacted" do
+      terminal = Event.new(:result, %{text: "done", model: "claude-sonnet-4-5"})
+      assert Response.from_events([terminal]).model == "claude-sonnet-4-5"
+
+      compact =
+        Response.from_capture([], terminal, nil, Response.new_text_acc(),
+          event_coverage: %{mode: :compact}
+        )
+
+      assert compact.model == "claude-sonnet-4-5"
     end
 
     test "defaults duration_ms to 0 and session_id to nil" do

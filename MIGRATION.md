@@ -1,5 +1,45 @@
 # Upgrading GenAgent
 
+## Unreleased: common backend errors
+
+The Claude, Codex, Anthropic HTTP, and OpenAI HTTP adapters now pass
+`%GenAgent.Backend.Error{}` to `GenAgent.ask/3`, `poll/3`, and
+`handle_error/3` for backend failures when paired with a core version that
+provides the struct. Match on `kind`, `retryable?`, `status`, or
+`retry_after` instead of a provider-specific tuple, string, or map. The
+original reason remains in `raw`. `retry_after` is the unparsed HTTP header
+value, either seconds or an HTTP date; no automatic retry is performed.
+Core-generated errors such as `:no_terminal_event` keep their existing shape.
+
+Adapters still return their previous error values when paired with an older
+published core that does not provide `GenAgent.Backend.Error`. Applications
+supporting both core generations should handle both shapes until they raise
+their minimum core requirement.
+
+## Unreleased: caller-owned error retries
+
+`handle_error/3` returning `{:prompt, prompt, state}` now retries an ask or tell
+for its original caller. Previously the first error was delivered immediately
+and the follow-up result was discarded. Ask now waits for the final outcome;
+poll remains pending across attempts, and completion recipients receive exactly
+one final outcome. Use `{:noreply, state}` to deliver an error immediately.
+Keep retry budgets in agent state; there is no built-in cap, and the watchdog
+restarts for each attempt.
+Timer-based retries that return `{:noreply, state}` and later prompt from
+`handle_event/2` remain separate turns: the original request receives its
+first error. The Retry guide shows both forms.
+
+Telemetry consumers must correlate dispatched start/terminal events by
+`(ref, attempt)`, rather than ref alone. Each attempt retains the original
+ask/tell origin and request ref. `turn.*` and `prompt.*` start, stop, and error
+metadata include the 1-based attempt.
+
+Interruptions still end the caller's request. A subsequent prompt from the
+error callback is independent, as are event/self-chain error follow-ups and
+all response callback follow-ups. Pending retries survive halt for asks,
+plain tells, and `on_halt: :queue`; `on_halt: :fail` receives `:halted`.
+A halted pending tell retry can be cancelled by its original ref.
+
 ## Runtime changes since 0.2.0
 
 The core package and its integrations have separate versions. Check the

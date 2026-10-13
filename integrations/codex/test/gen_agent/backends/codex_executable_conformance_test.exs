@@ -13,7 +13,9 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
       second_prompt: "follow-up prompt",
       error_prompt: "replay:failure",
       hold_prompt: "hold",
-      assert_error: fn reason -> assert reason == Transcripts.failure() end,
+      assert_error: fn reason ->
+        assert reason == Transcripts.expected_error(Transcripts.failure())
+      end,
       assert_threaded: fn first, _second ->
         resume_args = args(context.directory, :resume)
         assert Enum.take(resume_args, 2) == ["exec", "resume"]
@@ -107,7 +109,7 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
     assert {:ok, first} = GenAgent.ask(name, "first prompt")
     assert first.text == "ok"
     assert first.session_id == Transcripts.thread_id("resume-initial")
-    Transcripts.assert_events(first.events, "resume-initial")
+    Transcripts.assert_events(first.events, "resume-initial", nil, "fixture-model")
 
     fresh_args = args(context.directory, :fresh)
     assert hd(fresh_args) == "exec"
@@ -123,7 +125,20 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
 
     assert {:ok, second} = GenAgent.ask(name, "follow-up prompt")
     assert second.text == "42"
-    Transcripts.assert_events(second.events, "resume-followup")
+
+    Transcripts.assert_events(
+      second.events,
+      "resume-followup",
+      %{
+        input_tokens: 14_982,
+        cached_input_tokens: 12_160,
+        cache_write_input_tokens: 0,
+        output_tokens: 5,
+        reasoning_output_tokens: 0
+      },
+      "fixture-model"
+    )
+
     assert second.session_id == first.session_id
 
     resume_args = args(context.directory, :resume)
@@ -143,6 +158,90 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
     assert File.read!(Path.join(context.directory, "resume.env")) == "configured\n"
   end
 
+  test "response_text: :final_message selects the last message and never reaches the CLI",
+       context do
+    name = start_agent(context, response_text: :final_message)
+
+    assert {:ok, response} = GenAgent.ask(name, "replay:command")
+    assert response.text == "```text\ncodex-fixture\n```"
+
+    assert Enum.map(response.events, & &1.kind) == [
+             :text,
+             :tool_use,
+             :tool_result,
+             :text,
+             :usage,
+             :result
+           ]
+
+    assert Enum.at(response.events, 0).data.text == "I’ll run the command and report its output."
+
+    fresh_args = args(context.directory, :fresh)
+    assert List.last(fresh_args) == "replay:command"
+    refute Enum.any?(fresh_args, &String.contains?(&1, ["response_text", "final_message"]))
+
+    assert {:ok, second} = GenAgent.ask(name, "follow-up prompt")
+    assert second.text == "42"
+    resume_args = args(context.directory, :resume)
+    assert Enum.take(resume_args, 2) == ["exec", "resume"]
+    refute Enum.any?(resume_args, &String.contains?(&1, ["response_text", "final_message"]))
+  end
+
+  test "a quiet CLI turn reports the configured idle timeout", context do
+    name = start_agent(context, idle_timeout_ms: 200, timeout: 5_000)
+
+    reason = Transcripts.expected_error({:idle_timeout, 200})
+    assert {:error, ^reason} = GenAgent.ask(name, "hold")
+    assert_receive {:failed, _ref, ^reason}
+  end
+
+  test "the whole-turn deadline is distinct from the idle timeout", context do
+    name = start_agent(context, idle_timeout_ms: nil, timeout: 200)
+
+    reason = Transcripts.expected_error({:timeout, 200})
+    assert {:error, ^reason} = GenAgent.ask(name, "hold")
+    assert_receive {:failed, _ref, ^reason}
+  end
+
+  test "a completed turn keeps its buffered terminal event after slow consumption", context do
+    exec_fn = fn prompt, session ->
+      stream =
+        prompt
+        |> CodexWrapper.Exec.new()
+        |> CodexWrapper.Exec.stream(session.config)
+        |> Stream.transform(false, fn event, paused? ->
+          unless paused?, do: Process.sleep(350)
+          {[event], true}
+        end)
+
+      {:ok, stream}
+    end
+
+    name = start_agent(context, timeout: 200, idle_timeout_ms: nil, exec_fn: exec_fn)
+
+    assert {:ok, response} = GenAgent.ask(name, "first prompt")
+    assert response.session_id == Transcripts.thread_id("resume-initial")
+  end
+
+  test "an oversized CLI JSONL event fails the turn instead of losing its text", context do
+    output_path = Path.join(context.directory, "oversized.jsonl")
+
+    oversized =
+      Jason.encode!(%{
+        "type" => "item.completed",
+        "item" => %{"type" => "agent_message", "text" => String.duplicate("x", 1_048_600)}
+      })
+
+    File.write!(output_path, oversized <> "\n" <> ~s({"type":"turn.completed"}) <> "\n")
+    File.write!(context.binary, "#!/bin/sh\ncat \"$GEN_AGENT_OUTPUT\"\n")
+
+    name = start_agent(context, env: [{"GEN_AGENT_OUTPUT", output_path}])
+
+    reason = Transcripts.expected_error({:line_too_long, 1_048_576})
+    assert {:error, ^reason} = GenAgent.ask(name, "oversized")
+    assert_receive {:failed, _ref, ^reason}
+  end
+
   for recording <- Transcripts.names() do
     @tag recording: recording
     test "replays #{recording} through the wrapper and Port runner", context do
@@ -151,9 +250,10 @@ defmodule GenAgent.Backends.CodexExecutableConformanceTest do
       name = start_agent(context)
 
       if recording == "failure" do
-        reason = Transcripts.failure()
+        reason = Transcripts.expected_error(Transcripts.failure())
         assert {:error, ^reason} = GenAgent.ask(name, "replay:#{recording}")
         assert GenAgent.status(name).agent_state.errors == [reason]
+        assert_receive {:stream_event, :tool_result, _}
         assert_receive {:stream_event, :error, _}
         refute_receive {:stream_event, _, _}
       else

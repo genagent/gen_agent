@@ -83,8 +83,8 @@ event to retry.
 
 Current core behavior differs from the original issue sketch: an empty-buffer
 `pre_turn/2` skip emits `[:gen_agent, :turn, :rejected]` with
-`reason_kind: :pre_turn_skipped`, but does not call `handle_error/3` for the
-event-origin prompt. The registered `:name` is still stripped before
+`reason_kind: :pre_turn_skipped` and calls `handle_error/3` with
+`:pre_turn_skipped` for the event-origin prompt. The registered `:name` is still stripped before
 `init_agent/1`; this agent receives its sink explicitly and does not infer a name.
 The keyless backend lives here because core does not ship one.
 
@@ -99,5 +99,5 @@ They cover FIFO sample retention, duplicate counts, exactly two turns, count and
 byte overload results and telemetry, feedback filtering, report reduction, and
 OTP handler installation and cleanup.
 
-The root README events link and CI job are follow-up integration work outside
-this example's permitted change scope.
+The root README links this example from its events section. CI compiles it,
+checks formatting, and runs its keyless tests.

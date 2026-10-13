@@ -16,7 +16,10 @@ defmodule GenAgent.Backends.ClaudeExecutableConformanceTest do
       error_prompt: "fail",
       hold_prompt: "hold",
       assert_error: fn reason ->
-        assert match?(%{provider: :claude, subtype: "error_max_turns"}, reason)
+        assert match?(
+                 %{provider: :claude, subtype: "error_max_turns"},
+                 GenAgent.ClaudeErrors.raw(reason)
+               )
       end,
       assert_threaded: fn first, _second ->
         assert flag_value(args(context.directory, :resume), "--resume") == first.session_id
@@ -89,10 +92,10 @@ defmodule GenAgent.Backends.ClaudeExecutableConformanceTest do
     assert first.usage == %{input_tokens: 3, output_tokens: 2}
 
     assert Enum.map(first.events, & &1.kind) ==
-             [:text, :text, :tool_use, :tool_result, :usage, :result]
+             [:session, :text, :text, :tool_use, :tool_result, :usage, :result]
 
-    assert Enum.at(first.events, 2).data["id"] == "call-1"
-    assert Enum.at(first.events, 3).data["tool_use_id"] == "call-1"
+    assert Enum.at(first.events, 3).data["id"] == "call-1"
+    assert Enum.at(first.events, 4).data["tool_use_id"] == "call-1"
 
     fresh_args = args(context.directory, :fresh)
     assert "--print" in fresh_args
@@ -144,11 +147,13 @@ defmodule GenAgent.Backends.ClaudeExecutableConformanceTest do
   test "typed CLI failure and truncated stream reach GenAgent as errors", context do
     name = start_agent(context)
 
-    assert {:error,
-            %{provider: :claude, subtype: "error_max_turns", session_id: "fixture-session"}} =
-             GenAgent.ask(name, "fail")
+    assert {:error, reason} = GenAgent.ask(name, "fail")
 
-    assert {:error, "stream_truncated"} = GenAgent.ask(name, "truncated")
+    assert %{provider: :claude, subtype: "error_max_turns", session_id: "fixture-session"} =
+             GenAgent.ClaudeErrors.raw(reason)
+
+    assert {:error, reason} = GenAgent.ask(name, "truncated")
+    assert GenAgent.ClaudeErrors.raw(reason) == "stream_truncated"
     assert length(GenAgent.status(name).agent_state.errors) == 2
   end
 
@@ -231,10 +236,18 @@ defmodule GenAgent.Backends.ClaudeExecutableConformanceTest do
         assert response.session_id == recorded_result["session_id"]
         assert response.text == recorded_result["result"]
       else
-        # Issue #118: the recorded errors array currently yields message :unknown.
-        assert {:error, %{message: :unknown, subtype: "error_max_turns", session_id: session_id}} =
-                 GenAgent.ask(name, "replay")
+        assert {:error, reason} = GenAgent.ask(name, "replay")
 
+        assert %{
+                 message: message,
+                 errors: errors,
+                 subtype: "error_max_turns",
+                 session_id: session_id
+               } = GenAgent.ClaudeErrors.raw(reason)
+
+        assert errors == recorded_result["errors"]
+        assert message == Enum.join(recorded_result["errors"], "; ")
+        assert message == "Reached maximum number of turns (1)"
         assert session_id == recorded_result["session_id"]
       end
     end

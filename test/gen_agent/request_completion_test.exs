@@ -1,7 +1,10 @@
 defmodule GenAgent.RequestCompletionTest do
   use ExUnit.Case, async: false
 
+  @moduletag capture_log: true
+
   alias GenAgent.Event
+  import GenAgent.TestPollingAssertions
 
   defmodule Backend do
     @behaviour GenAgent.Backend
@@ -95,7 +98,7 @@ defmodule GenAgent.RequestCompletionTest do
     {name, _pid} = start_agent(max_tell_results: 1)
     assert {:ok, first} = GenAgent.tell_with_completion(name, "first")
     assert {:ok, second} = GenAgent.tell_with_completion(name, "second")
-    assert_eventually(fn -> match?({:ok, :completed, _}, GenAgent.poll(name, second)) end)
+    wait_until(fn -> match?({:ok, :completed, _}, GenAgent.poll(name, second)) end, timeout: 300)
     assert {:error, :not_found} = GenAgent.poll(name, first)
     assert_receive {:gen_agent, :completion, ^name, ^first, {:ok, %{text: "first"}}}, 1_000
     assert_receive {:gen_agent, :completion, ^name, ^second, {:ok, %{text: "second"}}}, 1_000
@@ -243,7 +246,7 @@ defmodule GenAgent.RequestCompletionTest do
     assert_receive {:DOWN, ^recipient_monitor, :process, ^recipient, _}, 1_000
 
     assert {:ok, ref} = GenAgent.tell_with_completion(name, "fast", recipient)
-    assert_eventually(fn -> match?({:ok, :completed, _}, GenAgent.poll(name, ref)) end)
+    wait_until(fn -> match?({:ok, :completed, _}, GenAgent.poll(name, ref)) end, timeout: 300)
     assert Process.alive?(pid)
   end
 
@@ -279,6 +282,51 @@ defmodule GenAgent.RequestCompletionTest do
     refute_receive {:gen_agent, :completion, ^name, ^queued_ref, _}, 50
   end
 
+  test "graceful stop replies to active and queued ask callers" do
+    {name, _pid} = start_agent()
+    parent = self()
+
+    spawn_ask = fn label, prompt ->
+      spawn(fn ->
+        result =
+          try do
+            GenAgent.ask(name, prompt)
+          catch
+            :exit, reason -> {:exit, reason}
+          end
+
+        send(parent, {:ask_result, label, result})
+      end)
+    end
+
+    spawn_ask.(:active, "held")
+    assert_receive {:started, "held", _task}, 1_000
+    spawn_ask.(:queued, "queued")
+    wait_until(fn -> GenAgent.runtime_snapshot(name).pending_prompts == 1 end, timeout: 300)
+
+    assert :ok = GenAgent.stop(name)
+    assert_receive {:ask_result, :active, {:error, {:agent_terminated, :shutdown}}}, 1_000
+    assert_receive {:ask_result, :queued, {:error, {:agent_terminated, :shutdown}}}, 1_000
+  end
+
+  test "callback crash still exits an ask caller" do
+    {name, _pid} = start_agent()
+    parent = self()
+
+    spawn(fn ->
+      result =
+        try do
+          GenAgent.ask(name, "crash")
+        catch
+          :exit, reason -> {:exit, reason}
+        end
+
+      send(parent, {:ask_result, result})
+    end)
+
+    assert_receive {:ask_result, {:exit, _reason}}, 1_000
+  end
+
   test "callback crash and agent death leave outcome uncertain; replacement uses a new ref" do
     {name, pid} = start_agent()
     monitor = Process.monitor(pid)
@@ -298,17 +346,5 @@ defmodule GenAgent.RequestCompletionTest do
     refute replacement_ref == crashed_ref
     assert_receive {:gen_agent, :completion, ^name, ^replacement_ref, {:ok, _}}, 1_000
     refute_receive {:gen_agent, :completion, ^name, ^crashed_ref, _}, 0
-  end
-
-  defp assert_eventually(fun, attempts \\ 30)
-  defp assert_eventually(fun, 0), do: assert(fun.())
-
-  defp assert_eventually(fun, attempts) do
-    if fun.() do
-      :ok
-    else
-      Process.sleep(10)
-      assert_eventually(fun, attempts - 1)
-    end
   end
 end

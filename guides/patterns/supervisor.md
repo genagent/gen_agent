@@ -108,7 +108,7 @@ defmodule Fanout.Coordinator do
     state = %State{
       topic: Keyword.fetch!(opts, :topic),
       max_workers: Keyword.get(opts, :max_workers, 3),
-      coordinator_name: Keyword.fetch!(opts, :coordinator_name),
+      coordinator_name: GenAgent.current_name(),
       worker_backend: Keyword.fetch!(opts, :worker_backend),
       worker_opts: Keyword.get(opts, :worker_opts, []),
       collect_timeout: Keyword.get(opts, :collect_timeout, 5_000),
@@ -271,6 +271,50 @@ defmodule Fanout.Coordinator do
     Synthesize these into a cohesive 2-paragraph answer.
     """
   end
+
+  # Bound both polling and each status call; halted processes retain final state.
+  def await_completion(name, timeout \\ 30_000) do
+    wait([name], System.monotonic_time(:millisecond) + timeout)
+  end
+
+  defp wait(names, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      {:error, :timeout}
+    else
+      try do
+        statuses =
+          Enum.map(names, fn name ->
+            call_timeout = deadline - System.monotonic_time(:millisecond)
+            if call_timeout > 0,
+              do: GenAgent.status(name, call_timeout),
+              else: {:error, :timeout}
+          end)
+
+        case Enum.find(statuses, &match?({:error, _}, &1)) do
+          {:error, reason} ->
+            {:error, reason}
+
+          nil ->
+            if Enum.all?(statuses, & &1.halted) do
+              states = Enum.map(statuses, & &1.agent_state)
+
+              case Enum.find(states, fn state -> state.phase == :failed end) do
+                nil -> {:ok, hd(states)}
+                state -> {:error, state.error}
+              end
+            else
+              Process.sleep(min(10, max(0, deadline - System.monotonic_time(:millisecond))))
+              wait(names, deadline)
+            end
+        end
+      catch
+        :exit, {:timeout, _} -> {:error, :timeout}
+        :exit, reason -> {:error, {:status_unavailable, reason}}
+      end
+    end
+  end
 end
 ```
 
@@ -287,7 +331,7 @@ defmodule Fanout.Worker do
   @impl true
   def init_agent(opts) do
     state = %State{
-      name: Keyword.fetch!(opts, :worker_name),
+      name: GenAgent.current_name(),
       coordinator: Keyword.fetch!(opts, :coordinator),
       run: Keyword.fetch!(opts, :run)
     }
@@ -352,7 +396,6 @@ defmodule Fanout.Watcher do
           Keyword.merge(c.worker_opts,
             name: name,
             backend: c.worker_backend,
-            worker_name: name,
             coordinator: c.coordinator_name,
             run: c.run
           )
@@ -455,8 +498,9 @@ stop or crash. Do not stop workers inside `terminate_agent/2`: the shared
 DynamicSupervisor can be waiting for that callback to return. Unique names
 per run permit immediate reuse of the coordinator name during cleanup.
 Stopping the coordinator during worker startup can stall for the shared
-DynamicSupervisor's 5-second shutdown timeout: the coordinator waits for
-the watcher, which may be waiting for that supervisor to start a worker.
+DynamicSupervisor's default 5-second shutdown timeout: the coordinator
+waits for the watcher, which may be waiting for that supervisor to start
+a worker.
 The watcher exits after cleanup. This small unlinked helper is not durable:
 a watcher crash or VM loss needs an application-owned supervision design.
 
@@ -488,8 +532,7 @@ name = "coord-#{System.unique_integer([:positive])}"
   worker_backend: MyBackend,
   collect_timeout: 5_000,
   topic: "why do octopuses have three hearts?",
-  max_workers: 3,
-  coordinator_name: name
+  max_workers: 3
 )
 
 # Kick off the planning turn.
@@ -498,16 +541,10 @@ name = "coord-#{System.unique_integer([:positive])}"
 
 # Bound the manager's wait too, including planning and synthesis.
 try do
-  status = Enum.reduce_while(1..300, nil, fn _, _ ->
-    status = GenAgent.status(name)
-    if status.agent_state.phase in [:done, :failed] do
-      {:halt, status}
-    else
-      Process.sleep(100)
-      {:cont, nil}
-    end
-  end)
-  IO.inspect(status && status.agent_state, label: "result (nil means manager timeout)")
+  case Fanout.Coordinator.await_completion(name, 30_000) do
+    {:ok, state} -> IO.puts(state.final_output)
+    {:error, reason} -> IO.inspect(reason, label: "supervisor failed or timed out")
+  end
 after
   GenAgent.stop(name)
 end

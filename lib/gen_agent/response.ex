@@ -2,9 +2,18 @@ defmodule GenAgent.Response do
   @moduledoc """
   The result of a completed prompt turn, delivered to `c:GenAgent.handle_response/3`.
 
-  A `Response` is built by the state machine after a terminal event
-  (`:result` or `:error`) arrives from the backend. It carries:
+  During an agent turn, a `Response` is built after the backend's terminal
+  `:result` event and delivered to `c:GenAgent.handle_response/3` when no
+  checkpoint error was recorded. A checkpoint error takes precedence over a
+  successful result, backend error, or task crash: its reason is dispatched
+  to `c:GenAgent.handle_error/3`, and any built `Response` is discarded.
+  A terminal `:error` event or a synchronous backend error also dispatches its
+  reason to `c:GenAgent.handle_error/3`; no `Response` is delivered on that path.
+  `from_events/2` can also build a response outside the agent lifecycle,
+  including from an event list containing an `:error` event. It carries:
 
+    * `:prompt` -- the prompt actually sent to the backend after `pre_turn/2`
+      rewriting. It is `nil` for responses built outside an agent turn.
     * `:text` -- the full assembled assistant text for the turn.
     * `:final_message` -- the terminal text when provided, otherwise the
       last boundary-marked assistant message (or all text if no boundary
@@ -20,11 +29,13 @@ defmodule GenAgent.Response do
     * `:duration_ms` -- wall-clock time from prompt dispatch to terminal event.
     * `:metadata` -- additive application or orchestration results, defaulting to `%{}`.
     * `:session_id` -- the backend's session identifier, if any.
+    * `:model` -- the model reported on the terminal event, if known.
   """
 
   alias GenAgent.Event
 
   @type t :: %__MODULE__{
+          prompt: String.t() | nil,
           text: String.t(),
           final_message: String.t() | nil,
           events: [Event.t()],
@@ -33,10 +44,12 @@ defmodule GenAgent.Response do
           usage: map() | nil,
           duration_ms: non_neg_integer(),
           metadata: map(),
-          session_id: String.t() | nil
+          session_id: String.t() | nil,
+          model: String.t() | nil
         }
 
-  defstruct text: "",
+  defstruct prompt: nil,
+            text: "",
             final_message: nil,
             events: [],
             terminal: nil,
@@ -44,7 +57,8 @@ defmodule GenAgent.Response do
             usage: nil,
             duration_ms: 0,
             metadata: %{},
-            session_id: nil
+            session_id: nil,
+            model: nil
 
   @doc """
   Build a `Response` from a completed turn's event list and wall-clock duration.
@@ -56,6 +70,16 @@ defmodule GenAgent.Response do
   assistant message after a blank line. `:final_message` selects the terminal
   text when present, otherwise the last boundary-marked message. Usage is
   taken from the most recent `:usage` event, if any.
+
+  ## Examples
+
+      iex> events = [
+      ...>   GenAgent.Event.new(:text, %{text: "hello"}),
+      ...>   GenAgent.Event.new(:result, %{text: "hello"})
+      ...> ]
+      iex> response = GenAgent.Response.from_events(events)
+      iex> {response.text, response.final_message, response.event_coverage.mode}
+      {"hello", "hello", :exact}
   """
   @spec from_events([Event.t()], keyword()) :: t()
   def from_events(events, opts \\ []) when is_list(events) do
@@ -93,7 +117,8 @@ defmodule GenAgent.Response do
       event_coverage: Keyword.fetch!(opts, :event_coverage),
       usage: usage,
       duration_ms: Keyword.get(opts, :duration_ms, 0),
-      session_id: Keyword.get(opts, :session_id)
+      session_id: Keyword.get(opts, :session_id),
+      model: if(terminal, do: Map.get(terminal.data, :model))
     }
   end
 

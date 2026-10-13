@@ -1,6 +1,6 @@
 # Design Note 004: Notify Deferral During `:processing`
 
-Status: Implemented (PR #1, merged into main before v0.1.1)
+Status: Implemented (PR #1, merged into main during initial development)
 Retroactive. Captures the bug and the design choice behind the fix.
 
 ## The bug
@@ -17,7 +17,8 @@ against the state **as it was at dispatch time**, not the current
 `data.agent_state`) and wrote it over everything the notify had
 just set.
 
-First surfaced in `Playground.Watcher`, where an event-driven agent
+First surfaced in `Playground.Watcher`, a private development example
+that is not part of the public package, where an event-driven agent
 would visibly lose counter mutations. Post-hoc analysis confirmed
 `Switchboard`'s summary-update and ack-inbox paths were also latently
 vulnerable; `Supervisor` had a narrow race on `worker_result`
@@ -90,9 +91,9 @@ and `finish_error`.
   CONTINUES -- subsequent events still get their callbacks called
   so their state mutations aren't lost. This matters for audit/log
   style callbacks that shouldn't be silenced by an unrelated halt.
-- `safely_handle_event/3` wraps user callback in try/rescue so a
-  buggy `handle_event/2` doesn't crash the drain loop and lose
-  subsequent events.
+- `safely_handle_event/4` catches exceptions and rejects malformed
+  callback returns, retaining the previous state so a buggy
+  `handle_event/2` does not crash the drain loop or lose subsequent events.
 
 ## Related
 
@@ -103,3 +104,7 @@ and `finish_error`.
   callback and BEFORE `drain_pending_events`, so a commit hook sees
   the turn's own state, not the state after buffered notifies are
   drained. This ordering is deliberate.
+- A clean halt drains all already-buffered notifications before `post_run`
+  and `[:gen_agent, :halted]` observe the state. If an event itself halts,
+  the remaining buffered events are applied before completion fires once.
+  Notifications received after completion can still update the halted agent.
