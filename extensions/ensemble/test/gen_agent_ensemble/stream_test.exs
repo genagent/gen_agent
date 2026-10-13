@@ -41,9 +41,13 @@ defmodule GenAgentEnsemble.StreamTest do
     {member, ControlledAgent, backend: StreamingBackend, observer: self(), tag: member}
   end
 
-  defp start(strategy \\ Solo, opts \\ nil) do
+  defp start(strategy \\ Solo, opts \\ nil, server_opts \\ []) do
     name = "stream-#{System.unique_integer([:positive])}"
-    {:ok, pid} = E.start_link(name: name, strategy: strategy, opts: opts || [agent: spec("w")])
+
+    {:ok, pid} =
+      E.start_link(
+        [name: name, strategy: strategy, opts: opts || [agent: spec("w")]] ++ server_opts
+      )
 
     on_exit(fn ->
       try do
@@ -155,6 +159,72 @@ defmodule GenAgentEnsemble.StreamTest do
     event(name, third, "w", 0, :text, "tail")
     event(name, third, "w", 0, :result, "done")
     assert {:ok, _} = completion(name, third)
+    assert_fenced(pid, name, %{})
+  end
+
+  test "stream delivery and cleanup survive waiter timeout and zero or bounded retention" do
+    for limit <- [0, 1] do
+      {name, pid} = start(Solo, nil, max_completed_results: limit)
+
+      tokens =
+        for prompt <- ["first", "second"] do
+          {:ok, token} = E.tell_with_completion(name, prompt, self(), stream_to: self())
+          assert_receive {:stream_gate, "w", task}
+          old_refs = refs(pid)
+          event(name, token, "w", 0, :text, prompt)
+
+          assert E.await(name, token, 1) == {:error, :timeout}
+          state = :sys.get_state(pid)
+          assert state.waiters == %{}
+          assert state.waiter_monitors == %{}
+          assert state.stream_recipients == %{token => self()}
+
+          send(task, :release)
+          event(name, token, "w", 0, :text, "tail")
+          event(name, token, "w", 0, :result, "done")
+          assert {:ok, %Response{text: "done"}} = completion(name, token)
+          assert_fenced(pid, name, old_refs)
+          token
+        end
+
+      [first, second] = tokens
+      assert E.poll(name, first) == {:error, :not_found}
+      state = :sys.get_state(pid)
+      retained = if limit == 0, do: [], else: [second]
+      assert Map.keys(state.completed) == retained
+      assert :queue.to_list(state.completed_order) == retained
+
+      if limit == 0 do
+        assert E.await(name, second, 0) == {:error, :not_found}
+      else
+        assert {:ok, :completed, %Response{text: "done"}} = E.poll(name, second)
+      end
+
+      assert E.inbox(name) == {:ok, []}
+      assert :queue.is_empty(:sys.get_state(pid).completed_order)
+      assert_fenced(pid, name, %{})
+    end
+  end
+
+  test "an expired ask does not consume the following tell's stream or completion" do
+    {name, pid} = start()
+    assert {:timeout, {GenServer, :call, _}} = catch_exit(E.ask(name, "ask", timeout: 0))
+    assert_receive {:stream_gate, "w", ask_task}
+    assert :sys.get_state(pid).stream_recipients == %{}
+
+    {:ok, token} = E.tell_with_completion(name, "tell", self(), stream_to: self())
+    send(ask_task, :release)
+    assert_receive {:stream_gate, "w", tell_task}
+    event(name, token, "w", 0, :text, "tell")
+    send(tell_task, :release)
+    event(name, token, "w", 0, :text, "tail")
+    event(name, token, "w", 0, :result, "done")
+    assert {:ok, %Response{text: "done"}} = completion(name, token)
+
+    state = :sys.get_state(pid)
+    assert state.pending == %{}
+    assert state.token_contexts == %{}
+    assert Map.keys(state.completed) == [token]
     assert_fenced(pid, name, %{})
   end
 

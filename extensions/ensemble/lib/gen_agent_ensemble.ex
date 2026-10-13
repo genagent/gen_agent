@@ -110,6 +110,8 @@ defmodule GenAgentEnsemble do
   This reserved option is removed before strategy callbacks. The dispatch
   ordinal starts at zero for each token and distinguishes repeated dispatches
   to the same member. Legacy unscoped strategy dispatches are not streamed.
+  Core retries within one child request keep the same dispatch ordinal; an
+  intermediate `:error` event does not necessarily mean the token has finished.
 
   Events preserve each child's stream order; events across members interleave
   in the order received by the ensemble. Events are sent before the token's
@@ -120,6 +122,10 @@ defmodule GenAgentEnsemble do
 
   Delivery is best effort with no backpressure. Stream recipients are not
   monitored; a dead recipient does not cancel the token.
+  Result retention and consumption do not control streaming. Stream
+  notifications are not replayed by `await/3`, `poll/2`, or `inbox/1`; a
+  retained response may still contain its own event history. An `await/3`
+  timeout removes only that waiter; streaming continues until the token finishes.
   """
   def tell_with_completion(name, prompt, recipient \\ self(), opts \\ []),
     do: GenAgentEnsemble.Server.tell_with_completion(name, prompt, recipient, opts)
