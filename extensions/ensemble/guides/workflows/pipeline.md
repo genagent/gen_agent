@@ -166,13 +166,18 @@ run. `total_duration_ms` sums stage durations; it excludes queue wait and
 orchestration overhead. Top-level `response.duration_ms` remains the final
 stage's duration.
 
-Repeated `await` calls return the same result. `poll` and `inbox` consume it.
+While a `tell` result is retained, repeated `await` calls return the same
+result. `poll` and `inbox` consume it. Retained results are bounded by the
+top-level `:max_completed_results` option (default 100); an evicted or consumed
+token returns `{:error, :not_found}`, and `ask` results are never cached. The
+bound counts results, not response bytes, so each retained pipeline result
+includes all of its stage responses.
+
 The strategy retains at most one run's configured stages, clears them on
 success, error, active cancellation or dispatch rejection, and starts queued
 runs fresh. Cancelling a queued token preserves the active run. Errors retain
-the existing error tuples and do not return partial results. Completed token
-storage has no automatic bound; consume results when finished with them.
-There is no additional history cache.
+the existing error tuples and do not return partial results. There is no
+additional history cache.
 
 For live capture (including turns before an aborted run), a custom agent's
 `handle_response/3` or `post_turn/3` callback can inspect each full response;

@@ -13,9 +13,10 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
   is reserved for this run's results.
 
   Only the active run's responses are accumulated. Completion, errors,
-  cancellation, and dispatch rejection clear them. Completed results use
-  the existing token storage; `await` is repeatable, while `poll` and `inbox`
-  consume results. No separate history is retained.
+  cancellation, and dispatch rejection clear them. Completed `tell` results use
+  the ensemble's bounded completed-result storage (`:max_completed_results`);
+  while retained, `await` is repeatable, while `poll` and `inbox` consume
+  results. No separate history is retained.
 
   ## Options
 
