@@ -209,6 +209,25 @@ and `tell_with_completion` recipients still receive terminal results when
 retention is zero or the cache is full. The limit bounds result count and
 cache bookkeeping, not response bytes, strategy state, or pending work.
 
+Outstanding requests are bounded separately. Top-level
+`max_pending_prompts: 1_000` and `max_pending_prompt_bytes: 1_048_576`
+(each a non-negative integer or `:infinity`, validated like
+`max_completed_results`) cap the public `ask`, `tell` and
+`tell_with_completion` calls that are active or waiting in the session, for
+every strategy. A call that does not fit returns
+`{:error, {:overloaded, info}}` before any token, callback, or child work
+exists; `info` has `queue: :ensemble_prompts`, `limit: :count | :bytes`, the
+pending and incoming numbers, and both maximums. Zero rejects every new call.
+Each accepted call is charged once with the `:erlang.external_size/1` of its
+original prompt and keeps that charge, through pipeline stages, rounds and
+fanout, until it reaches a terminal result (success, error, cancellation,
+rejection, or halt). A caller's `ask` timeout does not release it.
+`E.status(name)` reports the counters under `:admission`, and each rejection
+emits `[:gen_agent_ensemble, :admission, :rejected]`. This is a budget for the
+original serialized prompts, not a memory limit or a limit on physical work:
+the mailbox, strategy state and options, generated prompts, intermediate
+outputs, backend histories, and completed results are bounded separately.
+
 ### Helpers (iex-flavoured sugar)
 
 | Function                   | Purpose                                            |

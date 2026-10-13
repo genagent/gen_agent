@@ -9,6 +9,14 @@ defmodule GenAgentEnsemble.Telemetry do
   | `:session` | `:start`, `:stop`, `:halt` | `system_time` on start; `duration_ms` on stop/halt | `session`, `strategy`; `outcome` and `reason_kind` on stop/halt |
   | `:token` | `:start`, `:stop`, `:error` | `system_time` on start; `duration_ms` on stop/error | `session`, `strategy`, `token`, `kind`; `outcome` on stop/error, `reason_kind` on error |
   | `:dispatch` | `:start`, `:stop`, `:error`, `:rejected` | `system_time` on start; `duration_ms` on stop/error | `session`, `strategy`, `token`, `agent`, `ref`, `ordinal`, `outcome`; `reason_kind` on error/rejected |
+  | `:admission` | `:rejected` | `pending_count`, `pending_bytes`, `incoming_bytes` | `session`, `strategy`, `kind`, `outcome` (`:rejected`), `reason_kind` (`:overloaded`), `limit` (`:count` or `:bytes`), `max_pending_prompts`, `max_pending_prompt_bytes` |
+
+  An `[:gen_agent_ensemble, :admission, :rejected]` event is emitted once for
+  each `ask`/`tell` the session's admission limits refuse (see
+  `GenAgentEnsemble`). The request was never accepted, so no token exists and
+  no `:token` or `:dispatch` event accompanies it; the metadata carries no
+  token, ref, prompt, or options. The measurements are numbers, and the two
+  maximums are non-negative integers or `:infinity`.
 
   `:kind` is `:ask` or `:tell`. `:ordinal` starts at zero for each
   token. Combined with `:agent`, it identifies Pipeline stage order and

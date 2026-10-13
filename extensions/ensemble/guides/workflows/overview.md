@@ -56,6 +56,17 @@ iex> E.drain("name")
 iex> E.status("name")
 ```
 
+**Limits on outstanding requests.** Every strategy shares one admission gate.
+A session accepts at most `max_pending_prompts` (default 1_000) calls to
+`ask`/`tell` that have not yet reached a result, and at most
+`max_pending_prompt_bytes` (default 1_048_576) of their original serialized
+prompts, counting active and queued requests together. A call beyond either
+limit returns `{:error, {:overloaded, info}}` and does nothing else, so a
+batch submit larger than the limit must check each `tell` result or raise the
+limit. Capacity returns when each request finishes, fails, or is cancelled.
+The `:admission` key of `E.status("name")` shows the current counters. See
+`GenAgentEnsemble` for the full contract and what it does not bound.
+
 **Peek at all sessions:**
 
 ```elixir
