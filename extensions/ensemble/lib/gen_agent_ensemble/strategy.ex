@@ -50,8 +50,10 @@ defmodule GenAgentEnsemble.Strategy do
   ## Operations
 
     * `{:start, start_spec}` -- start a new sub-agent. `start_spec` is
-      `{name, module, opts}` where `module` is a `GenAgent` callback
-      module.
+      `{name, module, opts}` where `name` is a string, `module` is a
+      `GenAgent` callback module, and `opts` is a keyword list that includes
+      the `:backend` module. A spec that does not match is rejected as
+      described under "Rejected starts" rather than started.
     * `{:stop, agent_name}` -- terminate a sub-agent.
     * `{:dispatch, agent_name, prompt, token}` -- send a prompt to an existing
       sub-agent via `GenAgent.tell_with_completion/3`. The framework calls `handle_response/3`
@@ -85,6 +87,41 @@ defmodule GenAgentEnsemble.Strategy do
   completions cannot alter their results; unrelated tokens remain pending.
   Implement these callbacks when the strategy needs to recover, update its
   own state, or advance queued work. Unscoped dispatches have no token to close.
+
+  ## Malformed operations
+
+  An individual operation that matches none of the forms above, or whose
+  agent name, dispatch prompt, or scoped dispatch token is not a string, is
+  logged and skipped, and the rest of the batch still runs. The log names only the operation tag and, for string
+  names and tokens, the name or token. Skipping completes nothing on the
+  strategy's behalf: a token the strategy meant to close stays pending until a
+  later valid `:reply`, `:reply_error`, or rejected dispatch closes it. The
+  operation list must still be a list and callbacks must still return
+  `{:ok, ops, state}`; other shapes stop the session.
+
+  ## Rejected starts
+
+  A start is rejected with one of these reasons. The batch then ends if
+  `handle_start_rejected/3` is implemented and continues if it is not.
+
+    * `{:invalid_start_spec, field}` -- the spec failed validation and no child
+      was built. `field` is `:shape` (not a 3-tuple), `:name` (not a string),
+      `:module` (not a module atom), `:options` (not a proper keyword list),
+      `:backend` (no `:backend` module in the options), or `:child_spec`
+      (`GenAgent.child_spec/2` rejected the options, for example an invalid
+      `:shutdown`).
+    * `{:start_exception, kind}` -- starting the child raised, threw, or
+      exited. `kind` is `:error`, `:throw`, or `:exit`.
+    * `{:duplicate_sub_agent, name}`, or the child supervisor's own error
+      reason, as in earlier releases.
+
+  The first two reasons never contain the offending value, exception, or
+  stacktrace, because start options often hold credentials. When the name is
+  not identifiable, the start is logged and skipped even if the callback exists.
+  A nonempty tuple with a string first field identifies the name even if its
+  arity is invalid; other shapes and non-string names do not. A rejected spec returned
+  from `c:init/1` stops initialization with the same reason and stops any
+  children already started.
 
   ## Tokens
 

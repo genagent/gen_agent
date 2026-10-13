@@ -670,7 +670,8 @@ defmodule GenAgentEnsemble.Server do
 
       {:error, reason} ->
         Logger.warning(
-          "[gen_agent_ensemble] op #{inspect(op_summary(op))} failed: #{reason_kind(reason)}"
+          "[gen_agent_ensemble] op #{inspect(op_summary(op))} failed: " <>
+            "#{reason_kind(reason)}#{reason_detail(reason)}"
         )
 
         handle_op_failure(op, reason, state)
@@ -679,25 +680,38 @@ defmodule GenAgentEnsemble.Server do
 
   # The operation tag, agent name, and token identify a failed action without
   # rendering its prompt, start options, response, or backend error body.
-  defp op_summary(op) do
-    case op do
-      {:start, {name, _module, _opts}} -> {:start, name}
-      {:stop, name} -> {:stop, name}
-      {:dispatch, name, _prompt, token} -> {:dispatch, name, token}
-      {tag, name, _payload} when tag in [:dispatch, :forward] -> {tag, name}
-      {tag, token, _payload} when tag in [:reply, :reply_error] -> {tag, token}
-      {:halt, _reason} -> :halt
-      _ -> :unknown_op
-    end
-  end
+  # Names and tokens are only rendered when they are strings, so a malformed
+  # operation cannot smuggle an arbitrary term into the log.
+  defp op_summary({:start, {name, _module, _opts}}) when is_binary(name), do: {:start, name}
+  defp op_summary({:start, _spec}), do: {:start, :invalid_spec}
+
+  defp op_summary({:dispatch, name, _prompt, token}) when is_binary(name) and is_binary(token),
+    do: {:dispatch, name, token}
+
+  defp op_summary({tag, name, _payload}) when tag in [:dispatch, :forward] and is_binary(name),
+    do: {tag, name}
+
+  defp op_summary({tag, token, _payload}) when tag in [:reply, :reply_error] and is_binary(token),
+    do: {tag, token}
+
+  defp op_summary(_op), do: :unknown_op
 
   # Stop the rest of this op batch after a rejected scoped dispatch. In
-  # particular, a Supervisor fanout may contain starts after it.
+  # particular, a Supervisor fanout may contain starts after it. A malformed
+  # operation was never a dispatch attempt, so it is skipped like any other
+  # logged failure.
+  defp handle_op_failure(_op, :invalid_operation, state), do: {:cont, state}
+
   defp handle_op_failure({:dispatch, agent, _prompt, token}, reason, state) do
     {:halt, reject_dispatch(state, agent, token, reason)}
   end
 
-  defp handle_op_failure({:start, {agent, _module, _opts}}, reason, state) do
+  # Even a tuple with the wrong arity can identify the rejected child by its
+  # first field. Non-tuples, empty tuples and non-string names are skipped.
+  defp handle_op_failure({:start, spec}, reason, state)
+       when is_tuple(spec) and tuple_size(spec) > 0 and is_binary(elem(spec, 0)) do
+    agent = elem(spec, 0)
+
     if function_exported?(state.strategy_mod, :handle_start_rejected, 3) do
       {ops, strategy_state} =
         call_strategy(state.strategy_mod, :handle_start_rejected, [
@@ -740,16 +754,115 @@ defmodule GenAgentEnsemble.Server do
     end
   end
 
-  defp apply_op({:start, {name, module, opts}}, state) do
+  # Operations are strategy output, so their shape is checked here rather than
+  # trusted. Anything that does not match a documented operation is skipped
+  # through the ordinary op-failure path; see the final clause.
+  defp apply_op({:start, spec}, state) do
+    with {:ok, {name, module, opts}} <- validate_start_spec(spec),
+         {:ok, child_spec} <- build_child_spec(state, name, module, opts) do
+      start_agent(state, name, child_spec)
+    end
+  end
+
+  defp apply_op({:stop, name}, state) when is_binary(name) do
+    emit_dropped_dispatches(state, name, :agent_stopped)
+    _ = catch_exit(fn -> GenAgent.stop(namespaced(state, name), state.agent_supervisor) end)
+    monitors = drop_monitors_for(state.monitors, name)
+
+    {:ok,
+     %{
+       state
+       | agents: MapSet.delete(state.agents, name),
+         monitors: monitors,
+         in_flight: drop_in_flight_for(state.in_flight, name),
+         dispatch_contexts: drop_dispatch_contexts_for(state, name)
+     }}
+  end
+
+  defp apply_op({:dispatch, name, prompt, token}, state)
+       when is_binary(name) and is_binary(prompt) and is_binary(token) do
+    if Map.has_key?(state.pending, token) do
+      dispatch(state, name, prompt, token)
+    else
+      {:error, {:unknown_token, token}}
+    end
+  end
+
+  # Existing external strategies may still use the unscoped operation.
+  defp apply_op({:dispatch, name, prompt}, state) when is_binary(name) and is_binary(prompt),
+    do: dispatch(state, name, prompt, nil)
+
+  defp apply_op({:reply, token, response}, state) do
+    reply_to_token(state, token, {:ok, response})
+  end
+
+  defp apply_op({:reply_error, token, reason}, state) do
+    reply_to_token(state, token, {:error, reason})
+  end
+
+  defp apply_op({:forward, name, event}, state) when is_binary(name) do
+    _ = catch_exit(fn -> GenAgent.notify(namespaced(state, name), event) end)
+    {:ok, state}
+  end
+
+  defp apply_op({:halt, reason}, state) do
+    send(self(), {:halt_session, reason})
+    {:ok, state}
+  end
+
+  defp apply_op(_malformed, _state), do: {:error, :invalid_operation}
+
+  # Only the shape of the spec is checked: the reasons name the offending field
+  # and never carry the value, which may hold credentials. A backend module is
+  # not loaded here; the child start reports an unusable one.
+  defp validate_start_spec({name, module, opts} = spec) do
+    cond do
+      not is_binary(name) -> {:error, {:invalid_start_spec, :name}}
+      not module_name?(module) -> {:error, {:invalid_start_spec, :module}}
+      not Keyword.keyword?(opts) -> {:error, {:invalid_start_spec, :options}}
+      not valid_backend?(opts) -> {:error, {:invalid_start_spec, :backend}}
+      true -> {:ok, spec}
+    end
+  end
+
+  defp validate_start_spec(_), do: {:error, {:invalid_start_spec, :shape}}
+
+  defp module_name?(module), do: is_atom(module) and module not in [nil, true, false]
+
+  defp valid_backend?(opts) do
+    case Keyword.fetch(opts, :backend) do
+      {:ok, backend} -> module_name?(backend)
+      :error -> false
+    end
+  end
+
+  # GenAgent.child_spec/2 raises on options it rejects (for example a bad
+  # :shutdown). Only that call is contained, and the exception is reduced to a
+  # fixed reason because its message can quote the options.
+  defp build_child_spec(state, name, module, opts) do
     agent_opts =
       opts
       |> Keyword.put(:name, namespaced(state, name))
       |> Keyword.put(:task_supervisor, state.task_supervisor)
 
-    case DynamicSupervisor.start_child(
-           state.agent_supervisor,
-           GenAgent.child_spec(module, agent_opts)
-         ) do
+    try do
+      {:ok, GenAgent.child_spec(module, agent_opts)}
+    catch
+      _kind, _reason -> {:error, {:invalid_start_spec, :child_spec}}
+    end
+  end
+
+  # Starting runs the child's own init code. A raise, throw, or exit from the
+  # start invocation is reduced to its kind; returned errors pass through
+  # unchanged.
+  defp start_child(supervisor, child_spec) do
+    DynamicSupervisor.start_child(supervisor, child_spec)
+  catch
+    kind, _reason -> {:error, {:start_exception, kind}}
+  end
+
+  defp start_agent(state, name, child_spec) do
+    case start_child(state.agent_supervisor, child_spec) do
       {:ok, pid} ->
         mref = Process.monitor(pid)
 
@@ -768,50 +881,6 @@ defmodule GenAgentEnsemble.Server do
       {:error, reason} ->
         {:error, reason}
     end
-  end
-
-  defp apply_op({:stop, name}, state) do
-    emit_dropped_dispatches(state, name, :agent_stopped)
-    _ = catch_exit(fn -> GenAgent.stop(namespaced(state, name), state.agent_supervisor) end)
-    monitors = drop_monitors_for(state.monitors, name)
-
-    {:ok,
-     %{
-       state
-       | agents: MapSet.delete(state.agents, name),
-         monitors: monitors,
-         in_flight: drop_in_flight_for(state.in_flight, name),
-         dispatch_contexts: drop_dispatch_contexts_for(state, name)
-     }}
-  end
-
-  defp apply_op({:dispatch, name, prompt, token}, state) do
-    if Map.has_key?(state.pending, token) do
-      dispatch(state, name, prompt, token)
-    else
-      {:error, {:unknown_token, token}}
-    end
-  end
-
-  # Existing external strategies may still use the unscoped operation.
-  defp apply_op({:dispatch, name, prompt}, state), do: dispatch(state, name, prompt, nil)
-
-  defp apply_op({:reply, token, response}, state) do
-    reply_to_token(state, token, {:ok, response})
-  end
-
-  defp apply_op({:reply_error, token, reason}, state) do
-    reply_to_token(state, token, {:error, reason})
-  end
-
-  defp apply_op({:forward, name, event}, state) do
-    _ = catch_exit(fn -> GenAgent.notify(namespaced(state, name), event) end)
-    {:ok, state}
-  end
-
-  defp apply_op({:halt, reason}, state) do
-    send(self(), {:halt_session, reason})
-    {:ok, state}
   end
 
   defp dispatch(state, name, prompt, token) do
@@ -1130,7 +1199,24 @@ defmodule GenAgentEnsemble.Server do
   defp reason_kind({:agent_not_running, _}), do: :agent_not_running
   defp reason_kind({:dispatch_exit, _}), do: :dispatch_exit
   defp reason_kind(:no_agent_specified), do: :no_agent_specified
+  defp reason_kind(:invalid_operation), do: :invalid_operation
+  defp reason_kind({:invalid_start_spec, _}), do: :invalid_start_spec
+  defp reason_kind({:start_exception, _}), do: :start_exception
   defp reason_kind(_reason), do: :backend_or_strategy_error
+
+  # The offending field or exception kind of a contained start failure. Both
+  # come from fixed sets, so rendering them never exposes caller data.
+  @start_spec_fields [:shape, :name, :module, :options, :backend, :child_spec]
+
+  defp reason_detail({:invalid_start_spec, field}) when field in @start_spec_fields do
+    " (#{field})"
+  end
+
+  defp reason_detail({:start_exception, kind}) when kind in [:error, :throw, :exit] do
+    " (#{kind})"
+  end
+
+  defp reason_detail(_reason), do: ""
 
   # --- helpers ---
 
