@@ -6,6 +6,8 @@ defmodule GenAgentEnsemble.Server do
   use GenServer, shutdown: :infinity
   require Logger
 
+  # Distinguish our cleanup from a supervisor failure that races a strategy halt.
+  @halt_shutdown_reason {:shutdown, :ensemble_halted}
   @cancel_child_timeout 5_000
   @default_max_completed_results 100
   @default_max_pending_prompts 1_000
@@ -17,7 +19,11 @@ defmodule GenAgentEnsemble.Server do
     :strategy_state,
     :session_name,
     :session_started_at,
-    :halted,
+    # :running | :halted. A halted session stays alive as a read-only façade.
+    :lifecycle,
+    # Set once, by the first applied {:halt, reason}; nil and false are valid.
+    :halt_reason,
+    # Cleared once the shutdown the halt requested has been observed.
     :agent_tree,
     :task_supervisor,
     :agent_supervisor,
@@ -129,6 +135,7 @@ defmodule GenAgentEnsemble.Server do
     %__MODULE__{
       state
       | strategy_state: :redacted,
+        halt_reason: :redacted,
         completed: :redacted,
         completed_order: :redacted,
         waiters: :redacted,
@@ -218,7 +225,8 @@ defmodule GenAgentEnsemble.Server do
         strategy_state: strategy_state,
         session_name: session_name,
         session_started_at: nil,
-        halted: false,
+        lifecycle: :running,
+        halt_reason: nil,
         agent_tree: agent_tree,
         task_supervisor: task_supervisor,
         agent_supervisor: agent_supervisor,
@@ -314,6 +322,12 @@ defmodule GenAgentEnsemble.Server do
   defp handle_call_impl({:tell, prompt, opts, recipient}, from, state),
     do: handle_call_impl({:tell, prompt, opts, recipient, nil}, from, state)
 
+  # Terminal requests are refused after normalization and before admission:
+  # no token, callback, child work or event exists for them.
+  defp handle_call_impl({:tell, _prompt, _opts, _recipient, _stream_to}, _from, state)
+       when state.lifecycle == :halted,
+       do: {:reply, halted_error(state), state}
+
   defp handle_call_impl({:tell, prompt, opts, recipient, stream_to}, _from, state) do
     case admit(state, :tell, prompt) do
       {:ok, charge} ->
@@ -340,6 +354,9 @@ defmodule GenAgentEnsemble.Server do
         {:reply, {:error, reason}, state}
     end
   end
+
+  defp handle_call_impl({:ask, _prompt, _opts}, _from, state) when state.lifecycle == :halted,
+    do: {:reply, halted_error(state), state}
 
   defp handle_call_impl({:ask, prompt, opts}, from, state) do
     case admit(state, :ask, prompt) do
@@ -446,14 +463,17 @@ defmodule GenAgentEnsemble.Server do
       in_flight: map_size(state.in_flight)
     }
 
+    # A halted session never calls its strategy again, and the strategy's
+    # extras would describe state that no longer exists.
     extra =
-      if function_exported?(state.strategy_mod, :handle_status, 1) do
+      if state.lifecycle == :running and
+           function_exported?(state.strategy_mod, :handle_status, 1) do
         state.strategy_mod.handle_status(state.strategy_state)
       else
         %{}
       end
 
-    # Merged last so a strategy cannot replace the authoritative counters.
+    # Merged last so a strategy cannot replace the authoritative fields.
     admission = %{
       scope: :outstanding,
       pending_count: map_size(state.pending),
@@ -462,8 +482,17 @@ defmodule GenAgentEnsemble.Server do
       max_pending_prompt_bytes: state.max_pending_prompt_bytes
     }
 
-    {:reply, {:ok, base |> Map.merge(extra) |> Map.put(:admission, admission)}, state}
+    status =
+      base
+      |> Map.merge(extra)
+      |> Map.put(:admission, admission)
+      |> Map.put(:lifecycle, state.lifecycle)
+
+    {:reply, {:ok, status}, state}
   end
+
+  defp handle_cast_impl({:notify, _event}, state) when state.lifecycle == :halted,
+    do: {:noreply, state}
 
   defp handle_cast_impl({:notify, event}, state) do
     state =
@@ -514,16 +543,34 @@ defmodule GenAgentEnsemble.Server do
   end
 
   # GenServer.start/3 does not make the manually linked owner the OTP parent.
-  # Handle its exits explicitly, including :normal, and fail with our tree
-  # rather than continuing to route work to dead supervisors.
-  defp handle_info_impl({:EXIT, pid, reason}, state)
-       when pid == state.owner or pid == state.agent_tree do
+  # Handle its exits explicitly, including :normal, in every lifecycle.
+  defp handle_info_impl({:EXIT, pid, reason}, state) when pid == state.owner do
+    {:stop, reason, state}
+  end
+
+  # The one tree exit a halted session expects: the tagged shutdown halting
+  # requested. Dropping the PIDs tells terminate/2 there is nothing left to wait for.
+  defp handle_info_impl(
+         {:EXIT, tree, @halt_shutdown_reason},
+         %{lifecycle: :halted, agent_tree: tree} = state
+       ) do
+    {:noreply, %{state | agent_tree: nil, task_supervisor: nil, agent_supervisor: nil}}
+  end
+
+  # Any other tree exit, running or halted, still fails the session rather than
+  # continuing to route work to dead supervisors.
+  defp handle_info_impl({:EXIT, pid, reason}, state) when pid == state.agent_tree do
     {:stop, reason, state}
   end
 
   defp handle_info_impl({:EXIT, _pid, reason}, state) when reason != :normal do
     {:stop, reason, state}
   end
+
+  # A halted session runs no strategy code and routes no work. Completions,
+  # stream events, agent DOWNs and waiter timeouts that were already in the
+  # mailbox are stale by definition.
+  defp handle_info_impl(_message, %{lifecycle: :halted} = state), do: {:noreply, state}
 
   defp handle_info_impl({:DOWN, mref, :process, _pid, _reason}, state)
        when is_map_key(state.waiter_monitors, mref) do
@@ -565,32 +612,6 @@ defmodule GenAgentEnsemble.Server do
 
         {:noreply, state}
     end
-  end
-
-  defp handle_info_impl({:halt_session, reason}, state) do
-    state = %{state | halted: true}
-
-    emit(
-      :session,
-      :halt,
-      %{duration_ms: elapsed_ms(state.session_started_at)},
-      session_meta(state)
-      |> Map.put(:outcome, :halted)
-      |> Map.put(:reason_kind, :strategy_halt)
-    )
-
-    # Close any still-pending tokens with the halt reason so callers unblock.
-    pending_tokens = Map.keys(state.pending)
-
-    state =
-      Enum.reduce(pending_tokens, state, fn token, acc ->
-        case apply_op({:reply_error, token, {:halted, reason}}, acc) do
-          {:ok, acc2} -> acc2
-          _ -> acc
-        end
-      end)
-
-    {:stop, :normal, state}
   end
 
   defp handle_info_impl({:gen_agent, :event, _ns_agent, ref, event}, state) do
@@ -690,7 +711,11 @@ defmodule GenAgentEnsemble.Server do
     Registry.unregister(GenAgentEnsemble.Registry, state.session_name)
     Enum.each(state.waiter_monitors, fn {mref, _} -> remove_waiter(state, mref, nil) end)
     emit_unfinished_work(state)
-    outcome = if state.halted, do: :halted, else: if(reason == :normal, do: :ok, else: :error)
+
+    outcome =
+      if state.lifecycle == :halted,
+        do: :halted,
+        else: if(reason == :normal, do: :ok, else: :error)
 
     emit(
       :session,
@@ -701,11 +726,17 @@ defmodule GenAgentEnsemble.Server do
       |> Map.put(:reason_kind, reason_kind(reason))
     )
 
-    _ = catch_exit(fn -> Supervisor.stop(state.agent_tree) end)
+    # A tree still held, even one already shutting down after a halt, is
+    # waited for. A halted session whose tree exit was consumed holds none.
+    if state.agent_tree, do: catch_exit(fn -> Supervisor.stop(state.agent_tree) end)
     :ok
   end
 
   # --- op execution ---
+
+  # A halt ends every batch, including those a nested rejection callback
+  # returns, so nothing runs in a terminal session.
+  defp apply_ops(%{lifecycle: :halted} = state, _ops), do: state
 
   defp apply_ops(state, ops) do
     Enum.reduce_while(ops, state, &apply_op_safe/2)
@@ -713,6 +744,9 @@ defmodule GenAgentEnsemble.Server do
 
   defp apply_op_safe(op, state) do
     case apply_op(op, state) do
+      {:ok, %{lifecycle: :halted} = next} ->
+        {:halt, next}
+
       {:ok, next} ->
         {:cont, next}
 
@@ -858,12 +892,59 @@ defmodule GenAgentEnsemble.Server do
     {:ok, state}
   end
 
-  defp apply_op({:halt, reason}, state) do
-    send(self(), {:halt_session, reason})
-    {:ok, state}
-  end
+  defp apply_op({:halt, reason}, state), do: {:ok, halt_session(state, reason)}
 
   defp apply_op(_malformed, _state), do: {:error, :invalid_operation}
+
+  # The first applied halt is the logical end of the session. Everything that
+  # can still be observed from outside is settled here, once: open dispatches
+  # are retired, every pending token gets the halt error through the ordinary
+  # reply path (recipients, waiters, retention and capacity included), and the
+  # state that routed work to children is dropped. Results already stored stay
+  # as they are. The process stays up so those results can be read; only the
+  # owned tree is told to shut down.
+  defp halt_session(%{lifecycle: :halted} = state, _reason), do: state
+
+  defp halt_session(state, reason) do
+    emit(
+      :session,
+      :halt,
+      %{duration_ms: elapsed_ms(state.session_started_at)},
+      session_meta(state)
+      |> Map.put(:outcome, :halted)
+      |> Map.put(:reason_kind, :strategy_halt)
+    )
+
+    emit_open_dispatches(state, :halted)
+    Enum.each(state.monitors, fn {mref, _agent} -> Process.demonitor(mref, [:flush]) end)
+
+    state = %{
+      state
+      | lifecycle: :halted,
+        halt_reason: reason,
+        strategy_state: nil,
+        agents: MapSet.new(),
+        monitors: %{},
+        in_flight: %{},
+        dispatch_contexts: %{}
+    }
+
+    state =
+      Enum.reduce(Map.keys(state.pending), state, fn token, acc ->
+        {:ok, acc} = reply_to_token(acc, token, {:error, {:halted, reason}})
+        acc
+      end)
+
+    # Not Supervisor.stop/1: a child's shutdown budget may be long or infinite,
+    # and this process must keep serving the results it just produced. As the
+    # tree's OTP parent, an exit signal starts its normal termination. The link
+    # and PID stay until the expected EXIT arrives, so terminate/2 can still
+    # wait for a cleanup that is underway.
+    Process.exit(state.agent_tree, @halt_shutdown_reason)
+    state
+  end
+
+  defp halted_error(state), do: {:error, {:halted, state.halt_reason}}
 
   # Only the shape of the spec is checked: the reasons name the offending field
   # and never carry the value, which may hold credentials. A backend module is
@@ -1135,14 +1216,18 @@ defmodule GenAgentEnsemble.Server do
     end)
   end
 
-  defp emit_unfinished_work(state) do
+  defp emit_open_dispatches(state, reason_kind) do
     Enum.each(state.in_flight, fn {ref, {agent, token}} ->
       {started_at, ordinal} = Map.fetch!(state.dispatch_contexts, ref)
 
       emit_dispatch(state, :error, agent, token, ref, started_at, ordinal,
-        reason_kind: :session_stopped
+        reason_kind: reason_kind
       )
     end)
+  end
+
+  defp emit_unfinished_work(state) do
+    emit_open_dispatches(state, :session_stopped)
 
     Enum.each(state.token_contexts, fn {token, context} ->
       emit(

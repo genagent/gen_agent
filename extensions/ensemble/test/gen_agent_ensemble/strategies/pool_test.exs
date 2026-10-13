@@ -23,7 +23,7 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
 
   alias GenAgent.Backends.Mock
   alias GenAgent.Event
-  alias GenAgentEnsemble.{ControlledAgent, ControlledBackend}
+  alias GenAgentEnsemble.{ControlledAgent, ControlledBackend, HaltSupport}
   alias GenAgentEnsemble.Strategies.Pool
   alias GenAgentEnsemble.TestAgent
 
@@ -243,7 +243,7 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
         opts: [worker_count: 1, worker_template: worker]
       )
 
-    monitor = Process.monitor(pool)
+    watched = HaltSupport.watch(pool)
     first = Task.async(fn -> GenAgentEnsemble.ask(name, "first", timeout: 5_000) end)
     assert_receive {:controlled_prompt, "worker", "first", _task}, 2_000
     second = Task.async(fn -> GenAgentEnsemble.ask(name, "second", timeout: 5_000) end)
@@ -252,8 +252,11 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
     Process.exit(GenAgent.whereis("#{name}/#{name}-w-1"), :kill)
 
     assert {:error, {:worker_down, :killed}} = Task.await(first, 5_000)
+    # The specific errors issued before the halt are not rewritten by it.
     assert {:error, {:worker_start_failed, _}} = Task.await(second, 5_000)
-    assert_receive {:DOWN, ^monitor, :process, ^pool, :normal}, 2_000
+    HaltSupport.assert_tree_gone(watched)
+
+    assert {:pool_exhausted, {:worker_start_failed, _}} = HaltSupport.assert_halted(name)
   end
 
   test "status reports pool shape", %{name: name} do

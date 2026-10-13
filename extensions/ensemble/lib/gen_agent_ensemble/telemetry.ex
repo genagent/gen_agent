@@ -18,6 +18,17 @@ defmodule GenAgentEnsemble.Telemetry do
   token, ref, prompt, or options. The measurements are numbers, and the two
   maximums are non-negative integers or `:infinity`.
 
+  A strategy halt emits exactly one `[:gen_agent_ensemble, :session, :halt]`
+  (`outcome: :halted`, `reason_kind: :strategy_halt`), at the moment the halt
+  is applied. In that same step every open dispatch and every still-pending
+  token ends with one `:error` event whose `reason_kind` is `:halted`; work
+  that already finished keeps its original event. Because a halted session
+  stays alive, `[:gen_agent_ensemble, :session, :stop]` is not emitted until it
+  is actually stopped or its owner exits, and it then reports no further
+  `:session_stopped` errors. Calls refused after a halt were never accepted:
+  they emit no token, dispatch or admission event. The halt reason itself is
+  never part of the metadata.
+
   `:kind` is `:ask` or `:tell`. `:ordinal` starts at zero for each
   token. Combined with `:agent`, it identifies Pipeline stage order and
   Supervisor branches. External strategies using unscoped dispatches have

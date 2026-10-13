@@ -159,7 +159,7 @@ defmodule GenAgentEnsemble.ConfiguredLifecycleTest do
     for name <- stopped, do: assert(lookup(name) == nil)
   end
 
-  test "strategy halt stays stopped", %{prefix: prefix} do
+  test "strategy halt keeps the live session until it is stopped", %{prefix: prefix} do
     halted = for i <- 1..4, do: "#{prefix}-halt-#{i}"
     keep = "#{prefix}-keep"
     boot(halted ++ [keep])
@@ -167,17 +167,34 @@ defmodule GenAgentEnsemble.ConfiguredLifecycleTest do
     supervisor = Process.whereis(GenAgentEnsemble.Supervisor)
     keep_pid = lookup(keep)
 
+    pids =
+      for name <- halted do
+        pid = lookup(name)
+        worker = GenAgent.whereis("#{name}/worker")
+        worker_ref = Process.monitor(worker)
+        {:ok, token} = Ensemble.tell(name, "go")
+        assert_receive {:DOWN, ^worker_ref, :process, ^worker, _reason}, 2_000
+
+        # A halt neither exits nor restarts the session: same PID and name.
+        assert Ensemble.await(name, token, 0) == {:error, {:halted, :done}}
+        assert lookup(name) == pid
+        pid
+      end
+
+    # Ordered call: any restart would have been issued by now.
+    assert %{active: 5} = DynamicSupervisor.count_children(GenAgentEnsemble.Supervisor)
+    assert Process.whereis(GenAgentEnsemble.Supervisor) == supervisor
+
     for name <- halted do
-      pid = lookup(name)
-      ref = Process.monitor(pid)
-      {:ok, _token} = Ensemble.tell(name, "go")
-      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 2_000
+      assert :ok = Ensemble.stop(name)
       await_gone(name)
     end
 
     assert %{active: 1} = DynamicSupervisor.count_children(GenAgentEnsemble.Supervisor)
     assert Process.whereis(GenAgentEnsemble.Supervisor) == supervisor
     assert lookup(keep) == keep_pid
+    for name <- halted, do: assert(lookup(name) == nil)
+    assert length(Enum.uniq(pids)) == 4
   end
 
   test "abnormal exit of a configured session is still restarted", %{prefix: prefix} do

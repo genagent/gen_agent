@@ -415,12 +415,19 @@ defmodule GenAgentEnsemble.StreamTest do
     event(name, token, "w", 0, :text, "first")
     old_refs = refs(pid)
     monitor = Process.monitor(pid)
-    # Queue halt then late events from one sender for deterministic ordering.
-    send(pid, {:halt_session, :test})
+    # A real strategy halt, then late events from one sender for deterministic ordering.
+    E.notify(name, {:halt, :test})
     for {ref, _} <- old_refs, do: send(pid, {:gen_agent, :event, "w", ref, Event.new(:text)})
     assert completion(name, token) == {:error, {:halted, :test}}
-    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}
-    refute_received {:gen_agent_ensemble, :event, _, _, _}
+    assert_fenced(pid, name, old_refs)
+    assert refs(pid) == %{}
+    assert Process.alive?(pid)
+    refute_received {:DOWN, ^monitor, :process, ^pid, _}
+
+    assert E.tell_with_completion(name, "late", self(), stream_to: self()) ==
+             {:error, {:halted, :test}}
+
+    refute_received {:gen_agent_ensemble, _, _, _, _}
   end
 
   test "separate and dead stream recipients do not change completion delivery" do

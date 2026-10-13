@@ -3,6 +3,7 @@ defmodule GenAgentEnsemble.Strategies.DebateTest do
 
   alias GenAgent.Backends.Mock
   alias GenAgent.Event
+  alias GenAgentEnsemble.HaltSupport
   alias GenAgentEnsemble.Strategies.Debate
   alias GenAgentEnsemble.TestAgent
 
@@ -265,10 +266,11 @@ defmodule GenAgentEnsemble.Strategies.DebateTest do
         {"bob", [reply("b1")]}
       ])
 
-    ref = Process.monitor(pid)
+    watched = HaltSupport.watch(pid)
     Process.exit(GenAgent.whereis("#{name}/alice"), :kill)
 
-    assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
+    HaltSupport.assert_tree_gone(watched)
+    assert {:agent_down, _} = HaltSupport.assert_halted(name)
   end
 
   test "status reports debate shape", %{name: name} do

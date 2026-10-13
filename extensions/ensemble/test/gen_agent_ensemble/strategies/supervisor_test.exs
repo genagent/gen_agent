@@ -3,6 +3,7 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
 
   alias GenAgent.Backends.Mock
   alias GenAgent.Event
+  alias GenAgentEnsemble.HaltSupport
   alias GenAgentEnsemble.Queue
   alias GenAgentEnsemble.Strategies.Supervisor, as: SupStrat
   alias GenAgentEnsemble.TestAgent
@@ -374,12 +375,13 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
     worker_script = fn _ -> [Event.new(:result, %{text: "ok"})] end
 
     {:ok, pid} = start_session(name, [coord_script], [worker_script, worker_script])
-    ref = Process.monitor(pid)
+    watched = HaltSupport.watch(pid)
 
     # Kill the coordinator; handle_agent_down should halt the session.
     Process.exit(GenAgent.whereis("#{name}/#{name}-coord"), :kill)
 
-    assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
+    HaltSupport.assert_tree_gone(watched)
+    assert {:coordinator_down, _} = HaltSupport.assert_halted(name)
   end
 
   defp await_completion(name, token, retries \\ 100) do

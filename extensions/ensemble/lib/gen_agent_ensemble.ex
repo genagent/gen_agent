@@ -69,6 +69,44 @@ defmodule GenAgentEnsemble do
   `status/1` reports the live counters under `:admission`, and each rejection
   emits `[:gen_agent_ensemble, :admission, :rejected]`; see
   `GenAgentEnsemble.Telemetry`.
+
+  ## Halt
+
+  A strategy ends its session logically with the `{:halt, reason}` operation.
+  The first applied halt wins and takes effect immediately: the rest of the
+  operation batch is skipped, every request still pending finishes with
+  `{:error, {:halted, reason}}` (asks, tell completion messages and registered
+  `await/3` callers included), open child dispatches are retired, and the
+  strategy is never called again. Results stored before the halt, including
+  earlier successes, are kept. A `tell/3` whose own callback halts was already
+  accepted, so it still returns `{:ok, token}` and its result is
+  `{:error, {:halted, reason}}`.
+
+  The ensemble process does **not** exit on halt. It keeps its PID and name
+  as a read-only facade, so the final results can be collected:
+
+    * `await/3` (repeatable), `poll/2`, `inbox/1`, `cancel/2` and `status/1`
+      keep working. `status/1` reports `lifecycle: :halted`, no agents, and
+      no strategy-specific fields.
+    * `ask/3`, `tell/3` and `tell_with_completion/4` return
+      `{:error, {:halted, reason}}` without minting a token, calling the
+      strategy, starting work or emitting admission events. `notify/2` is
+      ignored.
+    * The owned agent tree is told to shut down at the moment of the halt.
+      That shutdown is asynchronous and each child's configured `:shutdown`
+      budget still applies, so a result can become available before child
+      processes are gone. There is no latency guarantee, and no guarantee that
+      an external provider has settled.
+
+  There is no way to resume a halted ensemble. Dispose of it with `stop/1`;
+  owner exit or a fatal process/tree failure also ends the session. Each
+  discards the stored results. Until disposal it holds its registered name, and a supervisor still
+  counts it as an active child. Results stay in memory with no expiry, bounded
+  only by `:max_completed_results` (a count of results, not bytes, and `0`
+  keeps none). Halt results count against that bound like any other, so a
+  small bound can evict earlier results. Callers that wait, such as a
+  `tell_with_completion/4` recipient or a registered `await/3`, still receive
+  every result regardless of retention.
   """
 
   @doc """
@@ -95,7 +133,9 @@ defmodule GenAgentEnsemble do
   initialization or owned tree startup. See "Admission limits" below.
 
   The session is linked to its caller and stops when that caller exits,
-  including normally. Runtime shutdown waits for the owned agent tree;
+  including normally; this applies to a halted session as well, which
+  otherwise stays alive (see "Halt" in the module documentation).
+  Runtime shutdown waits for the owned agent tree;
   each sub-agent's configured `:shutdown` budget still applies. The session's
   supervisor child spec uses `shutdown: :infinity` so it does not cut those
   budgets short. Termination observers should return promptly; a blocking
@@ -111,9 +151,13 @@ defmodule GenAgentEnsemble do
 
   The child ID is `{GenAgentEnsemble, name}`, allowing distinct named
   ensembles under one supervisor without creating atoms. Restart is
-  `:transient`: explicit stops and strategy halts stay stopped, while
-  abnormal exits restart the ensemble. Shutdown is `:infinity` so the
-  owned agent tree can finish within its configured shutdown budgets.
+  `:transient`: explicit stops stay stopped, while abnormal exits restart the
+  ensemble. A strategy halt does not exit the process: the halted child stays
+  registered and counted as active, with the same PID and name, until it is
+  stopped explicitly (for example with `stop/1` or
+  `Supervisor.terminate_child/2`), which then stays stopped. Shutdown is
+  `:infinity` so the owned agent tree can finish within its configured
+  shutdown budgets.
 
   Use `Supervisor.child_spec/2` to override these defaults when needed.
   """
@@ -132,7 +176,9 @@ defmodule GenAgentEnsemble do
   Fire-and-forget prompt. Returns `{:ok, token}` immediately; use
   `poll/2` or `inbox/1` to retrieve the response later. Returns
   `{:error, {:overloaded, info}}` without a token when the session's admission
-  limits are full (see "Admission limits" in the module documentation).
+  limits are full (see "Admission limits" in the module documentation), and
+  `{:error, {:halted, reason}}` without a token once the ensemble has halted
+  (see "Halt").
   """
   defdelegate tell(name, prompt), to: GenAgentEnsemble.Server
 
@@ -154,8 +200,9 @@ defmodule GenAgentEnsemble do
   for a rejected call.
   Notification does not consume the result stored for `poll/2` or `inbox/1`.
   It is delivered even when retention is disabled or the cache is full.
-  Halt delivers `{:error, {:halted, reason}}` before stopping the session;
-  stored results are unavailable after the session terminates.
+  Halt delivers `{:error, {:halted, reason}}` to the recipient of each token
+  still pending. After the halt, a new call returns
+  `{:error, {:halted, reason}}` and sends nothing.
 
   Set `stream_to: pid` to also receive normalized child stream events:
 
@@ -174,7 +221,8 @@ defmodule GenAgentEnsemble do
   completion and arrive before it when both recipients are the same PID.
   Separate recipients have no shared arrival order. Late events are dropped
   after token completion (including error, cancellation, rejection or session
-  halt), or after the corresponding child completes or goes down.
+  halt), or after the corresponding child completes or goes down. Streaming
+  stops at the halt even though the ensemble process remains.
 
   Delivery is best effort with no backpressure. Stream recipients are not
   monitored; a dead recipient does not cancel the token.
@@ -201,7 +249,10 @@ defmodule GenAgentEnsemble do
   `{:error, :timeout}` and removes only this waiter; a late result can still
   be retrieved. Invalid timeouts raise `FunctionClauseError`.
   Unavailable or terminated sessions retain normal `GenServer.call/3` exit
-  semantics. Halt replies to registered waiters before stopping the session.
+  semantics. Halt replies to registered waiters with
+  `{:error, {:halted, reason}}`. A halted session stays alive, so a retained
+  halt result can be awaited repeatedly until `poll/2` or `inbox/1` consumes
+  it or `stop/1` discards the session.
   """
   defdelegate await(name, token, timeout \\ 30_000), to: GenAgentEnsemble.Server
 
@@ -265,6 +316,9 @@ defmodule GenAgentEnsemble do
   `{:error, {:overloaded, info}}` immediately and starts no work. An accepted
   ask stays charged until its logical terminal result, even if the caller's
   timeout expires first.
+
+  After a strategy halt, `ask/3` returns `{:error, {:halted, reason}}`
+  immediately without starting work (see "Halt" in the module documentation).
   """
   defdelegate ask(name, prompt, opts), to: GenAgentEnsemble.Server
 
@@ -272,19 +326,22 @@ defmodule GenAgentEnsemble do
   Non-blocking check on a `tell`-minted token. Returns
   `{:ok, :pending}`, `{:ok, :completed, response}`, or
   `{:error, reason}`. Completed results are consumed; evicted or consumed
-  tokens return `{:error, :not_found}`.
+  tokens return `{:error, :not_found}`. Works on a halted ensemble.
   """
   defdelegate poll(name, token), to: GenAgentEnsemble.Server
 
   @doc """
   Drain all currently retained completed `tell` tokens, clearing their
   completion order bookkeeping too. Entry order is unspecified. Returns
-  `{:ok, [{token, {:ok, response} | {:error, reason}}, ...]}`.
+  `{:ok, [{token, {:ok, response} | {:error, reason}}, ...]}`. Works on a
+  halted ensemble, where it returns the retained results, halt errors
+  included. Draining does not dispose of the ensemble.
   """
   defdelegate inbox(name), to: GenAgentEnsemble.Server
 
   @doc """
-  Send an asynchronous event to the strategy (`handle_notify/2`).
+  Send an asynchronous event to the strategy (`handle_notify/2`). Ignored once
+  the ensemble has halted.
   """
   defdelegate notify(name, event), to: GenAgentEnsemble.Server
 
@@ -304,11 +361,19 @@ defmodule GenAgentEnsemble do
 
   The counters cover outstanding public requests, active plus waiting. The two
   maximums are non-negative integers or `:infinity`.
+
+  `:lifecycle` is `:running` or `:halted`. Like `:admission`, it is added
+  after the strategy's own fields. Once halted, the strategy is not called, so
+  its fields are omitted: `:agents` and `:pending_tokens` are empty,
+  `:in_flight` is `0` and the admission counters are zero. The halt reason is
+  not part of the status; it is the one returned to callers.
   """
   defdelegate status(name), to: GenAgentEnsemble.Server
 
   @doc """
-  Stop the ensemble and its owned sub-agents and prompt tasks.
+  Stop the ensemble and its owned sub-agents and prompt tasks, discarding any
+  retained results. This is also how a halted ensemble is disposed of: it
+  waits for an owned-tree shutdown that the halt already started.
   """
   defdelegate stop(name), to: GenAgentEnsemble.Server
 

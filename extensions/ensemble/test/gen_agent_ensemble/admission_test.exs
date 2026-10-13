@@ -582,9 +582,10 @@ defmodule GenAgentEnsemble.AdmissionTest do
 
   test "a halt closes every outstanding token exactly once" do
     {name, pid} = hold()
-    watch([[:gen_agent_ensemble, :token, :error]])
+    watch([[:gen_agent_ensemble, :token, :error], [:gen_agent_ensemble, :admission, :rejected]])
     monitor = Process.monitor(pid)
     [t1, t2] = tell_all(name, ["held-1", "held-2"], [])
+    assert counters(name) == %{pending_count: 2, pending_bytes: total(["held-1", "held-2"])}
 
     assert E.ask(name, "halting", ops: [{:halt, :planned}]) == {:error, {:halted, :planned}}
 
@@ -593,16 +594,32 @@ defmodule GenAgentEnsemble.AdmissionTest do
                       {:error, {:halted, :planned}}}
     end
 
-    assert_receive {:DOWN, ^monitor, :process, ^pid, _}
-
     for _ <- 1..3 do
       assert_receive {:telemetry, [:gen_agent_ensemble, :token, :error], _,
                       %{session: ^name, reason_kind: :halted}}
     end
 
-    # Nothing was left open for the shutdown path to report.
-    refute_receive {:telemetry, [:gen_agent_ensemble, :token, :error], _, %{session: ^name}}, 0
+    # Every outstanding token returned its charge. The session stays up and
+    # refuses new work without the strategy, a token, or an admission event.
+    assert counters(name) == zero()
+    assert_receive :strategy_init
+    flush_strategy_calls()
+    assert E.tell(name, "refused") == {:error, {:halted, :planned}}
+    assert E.tell_with_completion(name, "refused") == {:error, {:halted, :planned}}
+    assert E.ask(name, "refused") == {:error, {:halted, :planned}}
+    refute_receive {:strategy_called, _, _, _}, 0
     refute_receive {:gen_agent_ensemble, :completion, ^name, _, _}, 0
+    refute_receive {:telemetry, [:gen_agent_ensemble, :admission, :rejected], _, _}, 0
+    refute_receive {:telemetry, [:gen_agent_ensemble, :token, :error], _, %{session: ^name}}, 0
+    refute_received {:DOWN, ^monitor, :process, ^pid, _}
+  end
+
+  defp flush_strategy_calls do
+    receive do
+      {:strategy_called, _, _, _} -> flush_strategy_calls()
+    after
+      0 -> :ok
+    end
   end
 
   test "an expired ask timeout leaves its request charged until the work finishes" do

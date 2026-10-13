@@ -3,6 +3,7 @@ defmodule GenAgentEnsemble.Strategies.SoloTest do
 
   alias GenAgent.Backends.Mock
   alias GenAgent.Event
+  alias GenAgentEnsemble.HaltSupport
   alias GenAgentEnsemble.Strategies.Solo
   alias GenAgentEnsemble.TestAgent
 
@@ -87,8 +88,8 @@ defmodule GenAgentEnsemble.Strategies.SoloTest do
     assert {:error, :nope} = GenAgentEnsemble.ask(name, "fail me", timeout: 5_000)
   end
 
-  test "halt op terminates the session and fails pending tokens",
-       %{name: name, agent_name: agent_name} do
+  test "halt op fails pending tokens and leaves a halted session",
+       %{name: name, agent_name: _agent_name} do
     defmodule HaltOnTell do
       @behaviour GenAgentEnsemble.Strategy
 
@@ -106,27 +107,31 @@ defmodule GenAgentEnsemble.Strategies.SoloTest do
       def handle_response(_a, _r, state), do: {:ok, [], state}
     end
 
-    {:ok, _} =
+    halted = "#{name}-halt"
+
+    {:ok, pid} =
       GenAgentEnsemble.start_link(
-        name: "#{name}-halt",
+        name: halted,
         strategy: HaltOnTell,
         opts: []
       )
 
-    on_exit(fn -> safe_stop("#{name}-halt") end)
+    on_exit(fn -> safe_stop(halted) end)
+    watched = HaltSupport.watch(pid)
 
-    {:ok, token} = GenAgentEnsemble.tell("#{name}-halt", "bye")
-    # Allow the halt to process.
-    Process.sleep(30)
-    refute Process.whereis(GenAgentEnsemble.Registry) |> is_nil()
-    assert Registry.lookup(GenAgentEnsemble.Registry, "#{name}-halt") == []
+    # The tell that triggers the halt was accepted; its result is the halt error.
+    {:ok, token} = GenAgentEnsemble.tell(halted, "bye")
+    HaltSupport.assert_tree_gone(watched)
 
-    # Token closed via the halt path; the session is gone, so poll would fail —
-    # we just assert the session terminated. The token was replied to via
-    # GenServer.reply before the stop. Since it was a tell, it was completed
-    # locally but the process is gone — so we can't poll. Enough to assert
-    # the session process terminated cleanly.
-    assert token != nil
+    assert Registry.lookup(GenAgentEnsemble.Registry, halted) == [{pid, nil}]
+    assert GenAgentEnsemble.await(halted, token, 0) == {:error, {:halted, :test_halt}}
+    assert GenAgentEnsemble.await(halted, token, 0) == {:error, {:halted, :test_halt}}
+    assert GenAgentEnsemble.poll(halted, token) == {:error, {:halted, :test_halt}}
+    assert GenAgentEnsemble.poll(halted, token) == {:error, :not_found}
+    HaltSupport.assert_halted(halted, :test_halt)
+
+    assert :ok = GenAgentEnsemble.stop(halted)
+    assert Registry.lookup(GenAgentEnsemble.Registry, halted) == []
   end
 
   test "status surfaces strategy-specific info", %{name: name, agent_name: agent_name} do
