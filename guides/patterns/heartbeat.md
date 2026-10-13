@@ -32,26 +32,35 @@ event sources.
 ## What it exercises in gen_agent
 
 - **`handle_event/2` with a synthetic `:tick` event** delivered via
-  `notify/2` from a separate timer process. Same primitive as
-  Watcher; different sender.
+  the notification protocol from a separate timer process. Same primitive
+  as Watcher; different sender.
 - **Per-tick state inspection.** The interesting logic is not
   "what does this event say" but "given where we are now, is it
   worth dispatching a turn?" Filtering happens against agent state,
   not event content.
 - **Idle-until-triggered with no initial turn.** The agent does
   nothing until the first tick lands.
-- **Notify deferral guarantee (v0.1.1+).** Ticks that arrive while
-  the agent is in `:processing` are buffered and drained against
-  post-decision state, so a long-running turn doesn't drop or
-  duplicate pulses.
+- **Bounded notification admission.** Events received during a turn are
+  deferred and handled against post-turn state. Pending notifications and
+  prompts have count and byte limits. `notify/2` returns `:ok` even on
+  overflow; rejection emits `[:gen_agent, :input, :rejected]` telemetry.
+  `notify_ack/3` reports admission, not turn completion. A deferred event's
+  generated prompt can still be rejected later through `handle_error/3`.
 
 ## The pattern
 
 Two pieces: the agent, and a small ticker that pulses it. The
-ticker is deliberately tiny -- it's just a process that calls
-`GenAgent.notify/2` on an interval -- so you can swap it for
+ticker monitors one agent process and sends pulses on an interval. You can swap it for
 `:timer.send_interval`, `Process.send_after`, a Quantum job, or any
 other timing source without touching the agent.
+
+`GenAgent.notify/2` resolves a registered name. Before each pulse, the ticker
+checks that the name still resolves to the process it monitors; it stops when
+that process exits or the name changes. The ticker includes the monitored PID
+in its event, and the agent ignores a targeted tick for another PID. Even if
+a replacement registers between the check and the notify call, it cannot
+turn the old ticker's pulse into work. Pulses can be dropped on overload;
+the next pulse rechecks the retained observations.
 
 ```elixir
 defmodule Heartbeat.Agent do
@@ -60,14 +69,15 @@ defmodule Heartbeat.Agent do
   decides per-tick whether to dispatch a turn.
 
   Events:
-    * :tick                    -- pulse from the ticker
+    * :tick                    -- pulse from another timing source
+    * {:tick, target_pid}      -- incarnation-bound pulse from this ticker
     * {:observation, payload}  -- enqueue an observation between ticks
   """
 
   use GenAgent
 
   defmodule State do
-    defstruct observations: [], summaries: [], min_batch: 3
+    defstruct observations: [], in_flight: nil, summaries: [], failures: [], min_batch: 3
   end
 
   @impl true
@@ -89,6 +99,14 @@ defmodule Heartbeat.Agent do
     {:noreply, %{state | observations: state.observations ++ [payload]}}
   end
 
+  def handle_event({:tick, target_pid}, %State{} = state) do
+    if target_pid == self(), do: handle_event(:tick, state), else: {:noreply, state}
+  end
+
+  # Keep at most one summary outstanding, including while halted.
+  def handle_event(:tick, %State{in_flight: batch} = state) when not is_nil(batch),
+    do: {:noreply, state}
+
   def handle_event(:tick, %State{observations: obs, min_batch: min} = state)
       when length(obs) < min do
     # Not enough new observations -- skip this pulse.
@@ -104,7 +122,7 @@ defmodule Heartbeat.Agent do
     Summarize anomalies in 2 sentences.
     """
 
-    {:prompt, prompt, %{state | observations: []}}
+    {:prompt, prompt, %{state | observations: [], in_flight: obs}}
   end
 
   def handle_event(_other, state), do: {:noreply, state}
@@ -114,27 +132,71 @@ defmodule Heartbeat.Agent do
   @impl true
   def handle_response(_ref, response, %State{} = state) do
     summary = %{text: String.trim(response.text), at: System.system_time(:millisecond)}
-    {:noreply, %{state | summaries: state.summaries ++ [summary]}}
+    {:noreply, %{state | in_flight: nil, summaries: state.summaries ++ [summary]}}
+  end
+
+  @impl true
+  def handle_error(_ref, reason, %State{} = state) do
+    batch = state.in_flight || []
+    failure = %{observations: batch, reason: reason}
+
+    # Retry on a later tick, never in an immediate error loop.
+    {:noreply,
+     %{
+       state
+       | in_flight: nil,
+         observations: batch ++ state.observations,
+         failures: state.failures ++ [failure]
+     }}
   end
 end
 
 defmodule Heartbeat.Ticker do
   @moduledoc """
-  Minimal ticker. Pulses a named GenAgent on a fixed interval via
-  `GenAgent.notify/2`. Linked to its caller, so it dies when the
-  caller dies. Swap for `:timer.send_interval`, Quantum, or any
-  scheduler that can deliver a message.
+  Pulses one agent incarnation. Stops when that process exits.
+  Start a new ticker explicitly for a replacement agent.
   """
+  use GenServer, restart: :temporary
 
-  def start_link(agent_name, interval_ms) do
-    Task.start_link(fn -> loop(agent_name, interval_ms) end)
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+  @impl true
+  def init(opts) do
+    case GenAgent.whereis(Keyword.fetch!(opts, :agent)) do
+      nil ->
+        {:stop, :agent_not_found}
+
+      pid ->
+        monitor = Process.monitor(pid)
+        interval = Keyword.fetch!(opts, :interval_ms)
+        Process.send_after(self(), :tick, interval)
+        {:ok,
+         %{
+           agent: Keyword.fetch!(opts, :agent),
+           pid: pid,
+           monitor: monitor,
+           interval: interval
+         }}
+    end
   end
 
-  defp loop(agent_name, interval_ms) do
-    Process.sleep(interval_ms)
-    GenAgent.notify(agent_name, :tick)
-    loop(agent_name, interval_ms)
+  @impl true
+  def handle_info(:tick, state) do
+    # Stop once the name no longer identifies the monitored process.
+    if GenAgent.whereis(state.agent) == state.pid do
+      # Pulses are expendable: notify/2 reports overflow only through telemetry.
+      GenAgent.notify(state.agent, {:tick, state.pid})
+      Process.send_after(self(), :tick, state.interval)
+      {:noreply, state}
+    else
+      {:stop, :normal, state}
+    end
   end
+
+  def handle_info({:DOWN, ref, :process, pid, _reason}, %{monitor: ref, pid: pid} = state),
+    do: {:stop, :normal, state}
+
+  def handle_info(_other, state), do: {:noreply, state}
 end
 ```
 
@@ -147,29 +209,47 @@ end
   min_batch: 3
 )
 
-{:ok, _ticker} = Heartbeat.Ticker.start_link("ops-digest", 30_000)
+# The temporary child is removed when the monitored agent stops.
+{:ok, ticker_supervisor} = Supervisor.start_link(
+  [{Heartbeat.Ticker, agent: "ops-digest", interval_ms: 30_000}],
+  strategy: :one_for_one
+)
 
 # No initial turn. Agent is idle, ticker is counting down.
 GenAgent.status("ops-digest")
 # => %{state: :idle, queued: 0, ...}
 
 # Feed observations between ticks.
-GenAgent.notify("ops-digest", {:observation, %{cpu: 78}})
-GenAgent.notify("ops-digest", {:observation, %{cpu: 92, alert: true}})
+:ok = GenAgent.notify_ack("ops-digest", {:observation, %{cpu: 78}})
+:ok = GenAgent.notify_ack("ops-digest", {:observation, %{cpu: 92, alert: true}})
 
 # ~30s later: tick fires. 2 observations < min_batch=3 -- skipped.
 
-GenAgent.notify("ops-digest", {:observation, %{cpu: 88}})
+:ok = GenAgent.notify_ack("ops-digest", {:observation, %{cpu: 88}})
 
 # ~30s later: tick fires. 3 observations >= min_batch -- dispatches a
-# summary turn. observations is reset to [] and the summary lands in
-# state.summaries.
+# summary turn. The batch stays in in_flight until success; a failure
+# restores it to observations for a later tick and records the reason.
 
 %{agent_state: %{summaries: summaries}} = GenAgent.status("ops-digest")
 Enum.each(summaries, fn s -> IO.puts(s.text) end)
 
 GenAgent.stop("ops-digest")
+Supervisor.stop(ticker_supervisor)
 ```
+
+The ticker is a temporary child: if the agent process is restarted, its owner
+must start a new ticker for that new incarnation. The batch and failure
+history are in-memory only. Repeated failures can grow both lists until a
+prompt exceeds the configured byte limit; cap or persist them in production.
+This example is driven only by events; do not mix unrelated `tell`/`ask`
+turns into its callbacks.
+Use `runtime_snapshot/2` (timeout optional) for queue counts and lifecycle
+inspection without copying the observation history. Its current request ref
+can be passed to `interrupt_request/3` to interrupt the active turn.
+`tell_with_completion/4` and `cancel_request/3` apply to caller-owned prompts
+on a separate agent, not to this event-driven recipe. Notification admission
+is not completion.
 
 ## Variations
 
@@ -197,8 +277,13 @@ GenAgent.stop("ops-digest")
   in every N minutes anyway."
 - **Self-halting heartbeat.** Agent halts after N ticks or after a
   deadline (`{:halt, state}` from `handle_event(:tick, ...)`).
-  Useful for time-boxed monitoring windows. Stop the ticker too,
-  or it'll keep notifying a halted agent (harmless, but noisy).
+  Useful for time-boxed monitoring windows. Halting is not stopping:
+  notifications still run `handle_event/2`, applying state changes and
+  queueing generated prompts until `resume/1`. This example keeps at most
+  one batch outstanding; ticks without enough observations also queue
+  nothing. The ticker's owner should stop it with `GenServer.stop/1` after
+  observing the halt (for example, through status or halt telemetry); its
+  monitor only stops it when the agent process exits.
 - **Polling external state.** The most common shape: each tick
   pulls fresh data from a queue, API, or database, stuffs it into
   state, and decides whether the new data warrants a turn. The

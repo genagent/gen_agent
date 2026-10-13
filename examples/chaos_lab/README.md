@@ -21,7 +21,7 @@ status and final success line, not compare the whole output.
 
 | Scenario | Fault and asserted observation |
 | --- | --- |
-| A | Kill the prompt task discovered through `handle_stream_event/2`. The callback receives `{:task_crashed, :killed}`, the original request receives that error in its completion message, a self-chained retry completes, and the agent pid stays the same. |
+| A | Kill the prompt task discovered through `handle_stream_event/2`. The callback receives `{:task_crashed, :killed}`; a caller-owned retry succeeds under the original ref, which receives one final success completion, and the agent pid stays the same. |
 | B | Raise while enumerating a backend stream. `ask/3` returns `{:error, {:task_crashed, _}}`, `handle_error/3` observes the crash, and the same agent serves another request. Retry is disabled for this scenario to isolate the caller result. The exception and stacktrace are intentionally not matched exactly. |
 | C | Kill an agent during a held turn. Both agent and task monitors report `:killed`; no completion or termination callback arrives. After registry cleanup, `whereis/1` is nil and a new agent starts under the same name. The absence check runs after both possible producers are dead. |
 | D | Use `watchdog_ms: 100` with a held turn. `ask/3` and `handle_error/3` observe `:timeout`; the same agent serves another request. |
@@ -54,24 +54,16 @@ Current overload errors contain an information map, including byte accounting;
 the script asserts the count-limit fields and prints the full map. It makes no
 assumptions about retained-event metadata or cancellation return shapes.
 
-## Prototype gap checks on current core
+## Follow-up contract checks on current core
 
-1. **Unavailable task supervisor still stops a retrying agent**
-   (tracked in genagent/gen_agent#305). The probe accepts the fixed outcome
-   too, a typed retry error with the agent still running, so it keeps passing
-   after the core fix.
-   The dispatch path in `GenAgent.Server` calls `Task.Supervisor.async/2` without a
-   local exit guard. The catch in `handle_event/4` converts
-   the exit to `{:callback_failed, :exit, :other}`. The extra gap probe holds a
-   turn, suspends the agent, explicitly terminates the caller-owned task
-   supervisor, and resumes the agent. Suspending delivery makes the missing
-   supervisor deterministic without racing `:rest_for_one` restarts. The
-   original request **does** get its `{:task_crashed, :shutdown}` completion;
-   dispatch of the self-chained retry then kills the agent instead of producing
-   a typed request error for that retry. This is more precise than saying that
-   no caller gets an error. The older prototype's `{:noproc, _}` exit is now
-   hidden by the callback failure wrapper. Scenario F tests the normal tree
-   restart independently; it does not claim that a retry succeeds.
+1. **Unavailable task supervisor returns a typed final retry error**
+   (fixed in genagent/gen_agent#305). The probe holds a turn, suspends the
+   agent, explicitly terminates the caller-owned task supervisor, and resumes
+   the agent. Suspending delivery makes the missing supervisor deterministic
+   without racing `:rest_for_one` restarts. The original request remains
+   pending after its task crashes; retry dispatch then delivers one
+   `:task_supervisor_unavailable` completion under that ref, and the agent
+   stays alive. Scenario F tests the normal tree restart independently.
 2. **Backend-session exposure in the server crash status is resolved.**
    `GenAgent.Server.format_status/1` redacts the
    backend session, agent state, current request, and queues. The catch in

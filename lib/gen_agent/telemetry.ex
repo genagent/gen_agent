@@ -8,15 +8,17 @@ defmodule GenAgent.Telemetry do
 
   | Event | Measurements | Metadata |
   | --- | --- | --- |
-  | `[:gen_agent, :turn, :start]` | `system_time` (native unit) | `agent`, `ref`, `origin` |
-  | `[:gen_agent, :turn, :stop]` | `duration_ms` (non-negative milliseconds) | `agent`, `ref`, `origin` |
-  | `[:gen_agent, :turn, :error]` | `duration_ms` (non-negative milliseconds) | `agent`, `ref`, `origin`, `reason_kind` |
-  | `[:gen_agent, :turn, :rejected]` | `system_time` (native unit) | `agent`, `ref`, `origin`, `reason_kind` |
-  | `[:gen_agent, :turn, :cancelled]` | `system_time` (native unit) | `agent`, `ref`, `origin`, `reason_kind` |
+  | `[:gen_agent, :turn, :start]` | `system_time` (native unit) | `agent`, `ref`, `attempt`, `origin` |
+  | `[:gen_agent, :turn, :stop]` | `duration_ms` (non-negative milliseconds) | `agent`, `ref`, `attempt`, `origin` |
+  | `[:gen_agent, :turn, :error]` | `duration_ms` (non-negative milliseconds) | `agent`, `ref`, `attempt`, `origin`, `reason_kind` |
+  | `[:gen_agent, :turn, :rejected]` | `system_time` (native unit) | `agent`, `ref`, `attempt`, `origin`, `reason_kind` |
+  | `[:gen_agent, :turn, :cancelled]` | `system_time` (native unit) | `agent`, `ref`, `attempt`, `origin`, `reason_kind` |
 
   `ref` is the request reference. For dispatched turns, it correlates
-  the start with one terminal event. `origin` is one of `:ask`, `:tell`, `:event`, or
-  `:self_chain`. A dispatched turn emits `:start` and then `:stop` or
+  each start with one terminal event per `(ref, attempt)` pair. `attempt` is
+  1-based; caller-owned retries reuse the ref and retain the ask or tell
+  origin. `origin` is one of `:ask`, `:tell`, `:event`, or `:self_chain`.
+  A dispatched turn emits `:start` and then `:stop` or
   `:error` when it settles. Duration uses the agent process's
   monotonic clock from dispatch to backend outcome, watchdog,
   interruption, or task crash. An agent or VM crash can prevent a
@@ -37,7 +39,8 @@ defmodule GenAgent.Telemetry do
   `:timeout`, `:interrupted`, `:task_crashed`, or
   `:backend_or_callback_error`. Pre-dispatch rejections use
   `:overloaded`, `:pre_turn_skipped`, `:pre_turn_halted`,
-  `:pre_turn_invalid`, or `:task_supervisor_unavailable`. Queue cancellations use `:caller_cancelled` or
+  `:pre_turn_invalid`, `{:pre_turn_crashed, exception_kind}`, or
+  `:task_supervisor_unavailable`. Queue cancellations use `:caller_cancelled` or
   `:caller_down`. The raw reason, prompt, response, backend
   session, and agent state are never included in these turn events.
   `agent` and especially `ref` can still have high cardinality: use
@@ -50,21 +53,28 @@ defmodule GenAgent.Telemetry do
 
   | Event | Measurements | Metadata that may contain application data |
   | --- | --- | --- |
-  | `[:gen_agent, :prompt, :start]` | `system_time` (native unit) | `agent`, `ref`, `prompt`, `original_prompt`, `rewritten`, `agent_state` |
-  | `[:gen_agent, :prompt, :stop]` | `duration` (backend-reported milliseconds) | `agent`, `ref`, `agent_state` |
-  | `[:gen_agent, :prompt, :error]` | `system_time` (native unit); `duration` (milliseconds) for dispatched turns | `agent`, `ref`, raw `reason`, `agent_state` |
+  | `[:gen_agent, :prompt, :start]` | `system_time` (native unit) | `agent`, `ref`, `attempt`, `prompt`, `original_prompt`, `rewritten`, `agent_state` |
+  | `[:gen_agent, :prompt, :stop]` | `duration` (core-measured prompt-task elapsed milliseconds) | `agent`, `ref`, `attempt`, `agent_state` |
+  | `[:gen_agent, :prompt, :error]` | `system_time` (native unit); `duration` (milliseconds) for dispatched turns | `agent`, `ref`, `attempt`, raw `reason`, `agent_state` |
   | `[:gen_agent, :event, :received]` | `system_time` (native unit) | `agent`, raw `event` |
   | `[:gen_agent, :state, :changed]` | `system_time` (native unit) | `agent`, `from`, `to` |
   | `[:gen_agent, :mailbox, :queued]` | `depth` (count) | `agent` |
   | `[:gen_agent, :input, :rejected]` | `system_time` (native unit) | `agent`, raw `reason` |
   | `[:gen_agent, :halted]` | `system_time` (native unit) | `agent`, `agent_state` |
+  | `[:gen_agent, :terminated]` | `system_time` (native unit) | `agent`, raw `reason` |
 
   Rich `:prompt, :error` may describe a generated prompt rejected
   before dispatch, in which case it has no matching prompt start or
   duration. It also fires on interruption. These events can contain
   sensitive application data and should not be exported or turned
-  into metrics without filtering. Their metadata shape is preserved
-  for existing local observers.
+  into metrics without filtering. The `attempt` field is additive for
+  existing local observers; errors before dispatch default to attempt 1
+  for independent generated prompts.
+
+  `:terminated` fires after agent and backend cleanup callbacks when the
+  agent process's termination callback runs. Its raw reason may contain
+  application data. Abrupt `:kill` exits and VM termination bypass this
+  callback; use a process monitor when observing every exit is required.
 
   Normalized token usage is on `GenAgent.Response.usage`; inspect it
   in `handle_response/3` or `post_turn/3`. Backend-specific usage or

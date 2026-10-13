@@ -12,6 +12,10 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
   """
 
   use ExUnit.Case, async: true
+  @compile {:no_warn_undefined, GenAgent}
+
+  alias GenAgent.Backends.OpenAI
+  alias GenAgent.Test.BackendErrorAssertions, as: Errors
 
   @moduletag capture_log: true
 
@@ -28,8 +32,10 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
         Keyword.take(opts, [
           :api_key,
           :model,
+          :store,
           :instructions,
           :max_output_tokens,
+          :truncation,
           :reasoning_effort,
           :http_fn
         ])
@@ -95,6 +101,35 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
   end
 
   describe "round trip through GenAgent.ask/2" do
+    test "explicit reset drops the response chain without restarting the agent" do
+      if function_exported?(GenAgent, :reset_session, 1) do
+        observer = self()
+
+        http_fn = fn request ->
+          send(observer, {:request_body, request.body})
+          {:ok, api_response("ok", id: "resp_current")}
+        end
+
+        name = start_openai_agent(http_fn)
+        assert {:ok, _} = GenAgent.ask(name, "one")
+        assert {:ok, _} = GenAgent.ask(name, "two")
+        assert :ok = GenAgent.reset_session(name)
+        assert {:ok, _} = GenAgent.ask(name, "three")
+
+        assert_receive {:request_body, %{input: [%{content: "one"}]} = first}
+        refute Map.has_key?(first, :previous_response_id)
+        assert_receive {:request_body, %{previous_response_id: "resp_current"}}
+        assert_receive {:request_body, %{input: [%{content: "three"}]} = fresh}
+        refute Map.has_key?(fresh, :previous_response_id)
+        assert length(GenAgent.status(name).agent_state.responses) == 3
+      else
+        {:ok, session} = OpenAI.start_session(http_fn: fn _ -> {:ok, api_response("ok")} end)
+        resumed = OpenAI.update_session(session, %{response_id: "resp_current"})
+        assert {:ok, reset} = OpenAI.reset_session(resumed)
+        assert reset.previous_response_id == nil
+      end
+    end
+
     test "assembles a Response from the faked API call" do
       http_fn = fn _req -> {:ok, api_response("hello from the API")} end
       name = start_openai_agent(http_fn)
@@ -156,6 +191,34 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
       assert_receive {^ref, %{input: [%{content: "three"}], previous_response_id: "resp_002"}}
     end
 
+    test "the state machine replays local history when store is false" do
+      observer = self()
+
+      http_fn = fn request ->
+        send(observer, {:request_body, request.body})
+        {:ok, api_response("answer")}
+      end
+
+      name = start_openai_agent(http_fn, store: false)
+      assert {:ok, %{text: "answer"}} = GenAgent.ask(name, "one")
+      assert {:ok, %{text: "answer"}} = GenAgent.ask(name, "two")
+
+      assert_receive {:request_body, first}
+      assert first.store == false
+      assert first.input == [%{role: "user", content: "one"}]
+      refute Map.has_key?(first, :previous_response_id)
+
+      assert_receive {:request_body, second}
+      assert second.store == false
+
+      assert second.input ==
+               first.input ++
+                 api_response("answer")["output"] ++
+                 [%{role: "user", content: "two"}]
+
+      refute Map.has_key?(second, :previous_response_id)
+    end
+
     test "session_ids (client-generated) are stable across turns" do
       http_fn = fn _req -> {:ok, api_response("ok")} end
       name = start_openai_agent(http_fn)
@@ -170,7 +233,57 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
       http_fn = fn _req -> {:error, {:http_error, 401, %{"error" => "invalid api key"}}} end
       name = start_openai_agent(http_fn)
 
-      assert {:error, {:http_error, 401, _}} = GenAgent.ask(name, "hi")
+      assert {:error, reason} = GenAgent.ask(name, "hi")
+      Errors.assert_error(reason, :openai, {:http_error, 401, %{"error" => "invalid api key"}})
+    end
+
+    test "a lost response chain clears the backend ID but retains agent state" do
+      test_pid = self()
+
+      http_fn = fn request ->
+        send(test_pid, {:request_body, request.body})
+
+        case request.body do
+          %{previous_response_id: "resp_001"} ->
+            {:error, {:http_error, 400, %{"error" => %{"code" => "previous_response_not_found"}}}}
+
+          %{previous_response_id: "resp_002"} ->
+            {:ok, api_response("continued", id: "resp_003")}
+
+          %{input: [%{content: "one"}]} ->
+            {:ok, api_response("first", id: "resp_001")}
+
+          _ ->
+            {:ok, api_response("fresh", id: "resp_002")}
+        end
+      end
+
+      name = start_openai_agent(http_fn, truncation: "auto")
+
+      assert {:ok, first} = GenAgent.ask(name, "one")
+      assert first.text == "first"
+
+      assert {:error, reason} = GenAgent.ask(name, "two")
+      raw = if Code.ensure_loaded?(GenAgent.Backend.Error), do: reason.raw, else: reason
+      assert {:conversation_lost, body} = raw
+      Errors.assert_error(reason, :openai, raw)
+
+      assert body["error"]["code"] == "previous_response_not_found"
+
+      assert {:ok, fresh} = GenAgent.ask(name, "three")
+      assert fresh.text == "fresh"
+      assert {:ok, continued} = GenAgent.ask(name, "four")
+      assert continued.text == "continued"
+
+      assert_receive {:request_body, %{input: [%{content: "one"}], truncation: "auto"} = one}
+      refute Map.has_key?(one, :previous_response_id)
+      assert_receive {:request_body, %{previous_response_id: "resp_001"}}
+      assert_receive {:request_body, %{input: [%{content: "three"}]} = three}
+      refute Map.has_key?(three, :previous_response_id)
+      assert_receive {:request_body, %{previous_response_id: "resp_002"}}
+
+      assert Enum.map(GenAgent.status(name).agent_state.responses, & &1.text) ==
+               ["first", "fresh", "continued"]
     end
 
     test "failed responses leave the previous successful response id intact" do
@@ -252,7 +365,10 @@ defmodule GenAgent.Backends.OpenAIIntegrationTest do
     name = start_openai_agent(http_fn)
 
     assert {:ok, %{text: "first"}} = GenAgent.ask(name, "first")
-    assert {:error, ^expected_reason} = GenAgent.ask(name, "rejected")
+
+    assert {:error, reason} = GenAgent.ask(name, "rejected")
+    Errors.assert_error(reason, :openai, expected_reason)
+
     assert {:ok, %{text: "third"}} = GenAgent.ask(name, "third")
 
     assert_receive {^ref, first_request}

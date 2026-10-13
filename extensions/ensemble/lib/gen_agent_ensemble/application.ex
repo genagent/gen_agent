@@ -32,10 +32,18 @@ defmodule GenAgentEnsemble.Application do
   defp start_one(config) do
     name = Keyword.get(config, :name, "<unnamed>")
 
-    case DynamicSupervisor.start_child(
-           GenAgentEnsemble.Supervisor,
-           {GenAgentEnsemble.Server, config}
-         ) do
+    # child_spec/1 validates the required name in this caller. Preserve the
+    # configured startup path's warn-and-continue behavior for a missing name.
+    result =
+      case Keyword.fetch(config, :name) do
+        {:ok, _name} ->
+          DynamicSupervisor.start_child(GenAgentEnsemble.Supervisor, {GenAgentEnsemble, config})
+
+        :error ->
+          {:error, :missing_name}
+      end
+
+    case result do
       {:ok, _pid} ->
         Logger.info("[gen_agent_ensemble] started configured ensemble: #{inspect(name)}")
 

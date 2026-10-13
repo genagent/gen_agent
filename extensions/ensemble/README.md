@@ -36,43 +36,46 @@ per-strategy gotchas.
 
 ## Install
 
+Add a backend from its own installation guide when using Ensemble:
+[Claude](https://github.com/genagent/gen_agent/tree/main/integrations/claude),
+[Codex](https://github.com/genagent/gen_agent/tree/main/integrations/codex),
+[Anthropic](https://github.com/genagent/gen_agent/tree/main/integrations/anthropic),
+or [OpenAI](https://github.com/genagent/gen_agent/tree/main/integrations/openai).
+
+The package resolves a compatible GenAgent core version through its dependency.
+
 ```elixir
 def deps do
-  [
-    {:gen_agent, "~> 0.3.0"},
-    {:gen_agent_ensemble, "~> 0.1"},
-    # Plus at least one backend:
-    {:gen_agent_anthropic, "~> 0.2"},
-    # and/or:
-    {:gen_agent_claude, "~> 0.1"},
-    {:gen_agent_openai, "~> 0.2"},
-    {:gen_agent_codex, "~> 0.2"}
-  ]
+  [{:gen_agent_ensemble, "~> 0.6.1"}] # x-release-please-version
 end
 ```
 
-Ensemble 0.1.2 accepts both GenAgent 0.2 and 0.3. Current source requires
-GenAgent 0.3 for caller-owned agent supervision and request-scoped completion
-delivery. These keep agents and prompt tasks tied to the ensemble's lifetime,
-including abrupt server loss. Provider subprocess settlement remains the
-backend's responsibility.
-
 ## Quickstart (zero-setup demo)
 
-A fresh clone ships with one ensemble pre-enabled: `"echo"`. It
-uses `GenAgentEnsemble.Backends.Echo` -- no API keys, no external
+The GenAgent checkout ships the `"echo"` ensemble pre-enabled in
+`extensions/ensemble/config/config.exs`. It uses
+`GenAgentEnsemble.Backends.Echo` -- no API keys, no external
 services, every prompt echoed back with an `"echo: "` prefix.
-Every other ensemble in `config/config.exs` is commented out as
-a template you can enable after wiring up real credentials.
+Every other ensemble in that file is commented out as a template you
+can enable after wiring up real credentials.
 
-Start iex. The repo ships a `.iex.exs` that aliases
-`GenAgentEnsemble.IEx` to `E` -- a module that delegates the core
-API (`list/0`, `ask/2`, `tell/2`, ...) and adds REPL-flavoured
-helpers on top:
+The `echo` config and the `E` alias come from `extensions/ensemble`
+only; the checkout root has neither. Start iex from that directory.
+Its `.iex.exs` aliases `GenAgentEnsemble.IEx` to `E` -- a module that
+delegates the core API (`list/0`, `ask/2`, `tell/2`, ...) and adds
+REPL-flavoured helpers on top:
 
 ```sh
+cd extensions/ensemble
+mix deps.get
 iex -S mix
 ```
+
+In your own application, add the dependency from [Install](#install),
+declare ensembles under `config :gen_agent_ensemble` (see below), and
+add `alias GenAgentEnsemble.IEx, as: E` to your own `.iex.exs` (or
+call `GenAgentEnsemble` directly). The `"echo"` ensemble is not
+defined for you.
 
 ```elixir
 iex> E.list()
@@ -105,6 +108,43 @@ config :gen_agent_ensemble,
   ]
 ```
 
+Config-declared ensembles are started under `GenAgentEnsemble.Supervisor`
+with a `:transient` restart policy. An explicit `GenAgentEnsemble.stop/1`
+or a strategy halt exits normally and the ensemble stays stopped until the
+application is restarted; an abnormal crash of the session is restarted.
+Caller supervisors can use the same public child spec described below.
+Recovery after a crash of the
+`GenAgentEnsemble.Supervisor` itself is not provided.
+
+### Supervise ensembles in your application
+
+Use `{GenAgentEnsemble, opts}` in your supervisor's children:
+
+```elixir
+children =
+  for name <- ["research", "review"] do
+    {GenAgentEnsemble,
+     name: name,
+     strategy: GenAgentEnsemble.Strategies.Solo,
+     opts: [
+       agent: {"worker", GenAgentEnsemble.Agents.Simple,
+               backend: GenAgentEnsemble.Backends.Echo}
+     ]}
+  end
+
+Supervisor.start_link(children, strategy: :one_for_one)
+```
+
+`GenAgentEnsemble.child_spec/1` requires `:name`, just like `start_link/1`.
+Its ID is `{GenAgentEnsemble, name}`, so multiple distinct named ensembles
+can share a supervisor without generating atoms. The `:transient` restart
+policy keeps explicit stops and strategy halts stopped and restarts abnormal
+exits. `shutdown: :infinity` lets the owned agent tree finish using each
+sub-agent's configured shutdown budget; blocking callbacks or infinite
+budgets can prolong shutdown indefinitely. Override defaults with
+`Supervisor.child_spec/2` if needed. Direct `start_link/1` calls retain their
+caller-linked behavior.
+
 Programmatic use:
 
 ```elixir
@@ -118,7 +158,9 @@ Async fan-out with a Pool (declare it in config too):
 iex> {:ok, t1} = E.tell("qa-pool", "question one")
 iex> {:ok, t2} = E.tell("qa-pool", "question two")
 iex> E.status("qa-pool")
-iex> E.drain("qa-pool")   # [{token, text}, ...]
+iex> E.await("qa-pool", t1, 60_000)
+iex> E.await("qa-pool", t2, 60_000)
+iex> E.drain("qa-pool")   # [{token, text}, ...] of completed tokens
 ```
 
 See the [Pool workflow guide](guides/workflows/pool.md) for the
@@ -141,14 +183,31 @@ set up by the repo's `.iex.exs`.
 |----------------------------|----------------------------------------------------|
 | `E.ask(name, prompt)`      | Synchronous single-turn. Blocks until reply.       |
 | `E.tell(name, prompt)`     | Async. Returns a `token` you poll or drain later.  |
-| `E.poll(name, token)`      | Non-blocking check on a single token.              |
-| `E.inbox(name)`            | Drain all completed tokens since last call.        |
+| `E.poll(name, token)`      | Non-blocking check; consumes a completed token.    |
+| `E.inbox(name)`            | Drain all retained completed tokens.              |
 | `E.notify(name, event)`    | Send an event to the strategy (cast).              |
 | `E.status(name)`           | Inspect strategy phase, queue depth, etc.          |
 | `E.stop(name)`             | Stop an ensemble cleanly.                          |
 | `E.list()`                 | Names of all running ensembles.                    |
 | `E.start_link(opts)`       | Start an ad-hoc ensemble imperatively (same shape  |
 |                            | as a config entry).                                |
+
+Completed tell results are retained per ensemble with a top-level
+`max_completed_results: 100` default, matching core's default tell result
+limit. Set a non-negative integer (including `0` to disable retention), or
+`:infinity` to explicitly allow unbounded retention. This option belongs
+beside `:name` and `:strategy`, outside strategy `:opts`. Invalid values
+return `{:error, {:invalid_option, :max_completed_results, value}}` before
+strategy initialization or owned tree startup.
+
+Successes, errors, and cancellations all count; the oldest by completion
+order is evicted first. Asks are never cached. `poll/2` consumes one retained
+result and `inbox/1` drains the cache; inbox entry order is unspecified.
+`await/3` does not consume results. Later poll/await calls for evicted or
+consumed tokens return `{:error, :not_found}`. Already registered waiters
+and `tell_with_completion` recipients still receive terminal results when
+retention is zero or the cache is full. The limit bounds result count and
+cache bookkeeping, not response bytes, strategy state, or pending work.
 
 ### Helpers (iex-flavoured sugar)
 
@@ -161,7 +220,20 @@ set up by the repo's `.iex.exs`.
 | `E.drain(name)`            | `inbox` unwrapped to `[{token, text}, ...]`.       |
 
 For library code (not iex), call `GenAgentEnsemble` directly -- the
-`IEx` module is a humans-at-the-prompt convenience.
+`GenAgentEnsemble.IEx` module is a humans-at-the-prompt convenience.
+
+**Ask timeouts.** `ask` defaults to 30_000 ms. Override per call with
+`timeout:` (non-negative integer or `:infinity`) or globally with
+`config :gen_agent_ensemble, ask_timeout: 120_000`; the per-call option
+wins. Expiry exits the *calling* process; the timeout itself does **not**
+cancel the work, which keeps running only if the ensemble survives (the
+caller catches the exit, or a separate supervised owner started the
+ensemble). If the uncaught exit kills the process that called `start_link`,
+the ensemble stops with it. For long or recoverable waits call
+`GenAgentEnsemble.tell/2` and `GenAgentEnsemble.await/3`, where a timeout
+returns `{:error, :timeout}` and the result can be fetched later while the
+ensemble is alive. (`E.await` is the iex helper and raises on timeout
+instead.) Invalid values raise `ArgumentError` before any work is submitted.
 
 `GenAgentEnsemble.cancel(name, token)` closes a pending token with
 `{:error, :cancelled}` through the existing completion, await, ask, and
@@ -256,5 +328,5 @@ mix test
 Pre-1.0. The strategy op vocabulary
 (`:start | :stop | :dispatch | :reply | :reply_error | :forward | :halt`)
 and public API are stable and unlikely to change further before 1.0.
-Breaking changes bump the minor version; see `CHANGELOG.md` for
+Breaking changes bump the minor version; see [CHANGELOG.md](CHANGELOG.md) for
 what's changed.

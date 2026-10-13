@@ -78,6 +78,15 @@ defmodule GenAgentEnsemble.IEx do
   The iex equivalent of "just give me the answer." Raises on error
   so mistakes don't silently become empty strings. Accepts the same
   `opts` as `ask/3` (e.g. `timeout: 60_000`, `agent: "alice"`).
+
+  Timeout expiry exits the calling process (the iex shell session restarts).
+  The timeout itself does not cancel the work, but an ensemble started from
+  that shell with `start_link/1` stops with it; work keeps running only for
+  an ensemble with a separate supervised owner. The default is 30_000 ms
+  unless `config :gen_agent_ensemble, ask_timeout: ...` is set. For long or
+  recoverable waits use `GenAgentEnsemble.tell/2` and
+  `GenAgentEnsemble.await/3`, which returns `{:error, :timeout}`; this
+  module's `await/3` raises on timeout.
   """
   @spec ask!(String.t(), String.t(), keyword()) :: String.t()
   def ask!(name, prompt, opts \\ []) do

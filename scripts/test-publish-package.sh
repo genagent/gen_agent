@@ -14,14 +14,27 @@ cat > "${fixture}/bin/mix" <<'SH'
 #!/usr/bin/env bash
 printf '%s|%s\n' "$*" "${HEX_API_KEY-unset}" >> "${TEST_LOG}"
 if [[ "$*" == "${FAIL_MIX_COMMAND:-never}" ]]; then exit 17; fi
+if [[ "$*" == "hex.build" && "${BUILD_ARCHIVE:-1}" == 1 ]]; then
+  if [[ "$(pwd)" == */integrations/claude ]]; then
+    touch gen_agent_claude-0.0.1.tar
+  else
+    touch gen_agent-0.0.1.tar
+  fi
+fi
 SH
 cat > "${fixture}/bin/curl" <<'SH'
 #!/usr/bin/env bash
-if [[ "${CURL_RELEASE_EXISTS:-0}" == 1 ]]; then exit 0; else exit 22; fi
+if [[ "${CURL_STATUS:-404}" == fail ]]; then exit 7; fi
+printf '%s' "${CURL_STATUS:-404}"
 SH
 cat > "${fixture}/bin/tar" <<'SH'
 #!/usr/bin/env bash
-exit 0
+if [[ "${TAR_FAILURE:-0}" == 1 ]]; then exit 42; fi
+if [[ "${TAR_PATH:-0}" == 1 ]]; then
+  printf '%s\n' '<<"path">>'
+else
+  printf '%s\n' '<<"repository">>,<<"hexpm">>'
+fi
 SH
 chmod +x "${fixture}/bin/"*
 
@@ -48,7 +61,7 @@ grep -Eq '^hex\.publish --yes\|fixture-publish-key$' "${TEST_LOG}"
 
 # The early "already published" exit marks the publish step to be skipped.
 : > "${TEST_LOG}"
-CURL_RELEASE_EXISTS=1 env -u HEX_API_KEY bash "${fixture}/scripts/publish-package.sh" . prepare
+CURL_STATUS=200 env -u HEX_API_KEY bash "${fixture}/scripts/publish-package.sh" . prepare
 if [[ -s "${TEST_LOG}" ]]; then
   echo 'Already-published package ran a Mix command' >&2
   exit 1
@@ -71,5 +84,34 @@ fi
 [[ ! -s "${TEST_LOG}" ]]
 if grep -E 'fixture-publish-key|^hex\.publish' "${TEST_LOG}"; then
   echo 'Publishing key or command reached the failed preparation path' >&2
+  exit 1
+fi
+
+# Hex outages and transport failures must not be mistaken for a missing release.
+for status in 500 fail; do
+  : > "${TEST_LOG}"
+  if CURL_STATUS="${status}" env -u HEX_API_KEY bash "${fixture}/scripts/publish-package.sh" . prepare; then
+    echo "Hex lookup ${status} unexpectedly allowed preparation" >&2
+    exit 1
+  fi
+  [[ ! -s "${TEST_LOG}" ]]
+done
+
+# A missing archive or failed metadata extraction must stop preparation.
+: > "${TEST_LOG}"
+if BUILD_ARCHIVE=0 env -u HEX_API_KEY bash "${fixture}/scripts/publish-package.sh" . prepare; then
+  echo 'Missing archive unexpectedly allowed preparation' >&2
+  exit 1
+fi
+
+: > "${TEST_LOG}"
+if TAR_FAILURE=1 env -u HEX_API_KEY bash "${fixture}/scripts/publish-package.sh" . prepare; then
+  echo 'Failed metadata extraction unexpectedly allowed preparation' >&2
+  exit 1
+fi
+
+: > "${TEST_LOG}"
+if TAR_PATH=1 env -u HEX_API_KEY bash "${fixture}/scripts/publish-package.sh" . prepare; then
+  echo 'Path dependency unexpectedly allowed preparation' >&2
   exit 1
 fi

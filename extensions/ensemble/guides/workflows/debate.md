@@ -2,10 +2,11 @@
 
 ## Topology
 
-Two agents take turns arguing about a topic. The prompt hits the
-first agent; that agent's response becomes the second agent's
-prompt; the second agent's response becomes the first agent's next
-prompt; and so on until they converge or a round cap is reached.
+Two agents take turns arguing about a topic. The first agent receives
+the original prompt. On turn 2 and beyond, each agent receives the
+original prompt, the previous speaker's name, and that speaker's
+response text. The debate continues until convergence or a round cap
+is reached.
 
 ```
 +-------+    +--------+        +-------+        +-------+
@@ -14,19 +15,26 @@ prompt; and so on until they converge or a round cap is reached.
                                    ^        \_____|
                                    |______________|
 
-turn 1:  "Topic X"          -> alice -> "opener"
-turn 2:   "opener"           -> bob   -> "rebuttal"
-turn 3:   "rebuttal"         -> alice -> "counter"
-turn 4:   "counter"          -> bob   -> "AGREED on Y"  (converged)
+turn 1:  "Topic X"
+         -> alice -> "opener"
+
+turn 2:  "Topic X" + "alice: opener"
+         -> bob   -> "rebuttal"
+
+turn 3:  "Topic X" + "bob: rebuttal"
+         -> alice -> "counter"
+
+turn 4:  "Topic X" + "alice: counter"
+         -> bob   -> "AGREED on Y"  (converged)
 
 final reply: transcript of all 4 turns, or last, or synthesized.
 ```
 
 Each agent's backend session retains the full back-and-forth in its
 own conversation memory, so turn N sees turns 1..N-1 in context.
-The prompt wire format is just the previous agent's response text
-(same convention as Pipeline), so the first turn's prompt is what
-establishes the topic.
+The first turn receives the original question unchanged. Later turns
+include the original question plus the previous agent's name and response,
+so each agent knows who they are responding to and what the original topic was.
 
 ## When to reach for it
 
@@ -38,7 +46,7 @@ establishes the topic.
   single model is overconfidence.
 
 For more than two agents or a moderator/synthesizer, Consensus
-(planned) is the better fit. For parallel fan-out, use Supervisor.
+is the better fit. For parallel fan-out, use Supervisor.
 
 ## Config
 
@@ -53,7 +61,7 @@ config :gen_agent_ensemble,
           {"pro-redis", GenAgentEnsemble.Agents.Simple,
             backend: GenAgent.Backends.Anthropic,
             system: "You argue for Redis as the primary store. Be concrete, cite tradeoffs, respond directly to the other side's points."},
-          {"pro-postgres", GenAgentEnsemble.Agents.Anthropic,
+          {"pro-postgres", GenAgentEnsemble.Agents.Simple,
             backend: GenAgent.Backends.Anthropic,
             system: "You argue for Postgres as the primary store. Same rules."}
         ],
@@ -88,8 +96,16 @@ config :gen_agent_ensemble,
 
 ### Sync run
 
+A debate spans many backend turns, so budget it with `timeout:` (default
+30_000 ms). Expiry exits the caller; the timeout itself does not cancel the
+debate, which keeps running only if the ensemble survives (the caller catches
+the exit, or a separate supervised owner started it). An uncaught exit that
+kills the `start_link` owner stops the ensemble. For recoverable waits use
+`GenAgentEnsemble.tell/2` + `GenAgentEnsemble.await/3` (`E.await` raises on
+timeout).
+
 ```elixir
-iex> E.ask!("redis-vs-postgres", "Should a new event-sourced audit log land in Redis Streams or a Postgres partitioned table?")
+iex> E.ask!("redis-vs-postgres", "Should a new event-sourced audit log land in Redis Streams or a Postgres partitioned table?", timeout: 600_000)
 "pro-redis:
 ...
 
@@ -205,3 +221,46 @@ when no turn reports usage. Nonnumeric fields are dropped, and each invocation
 starts fresh. Failed turns cannot be counted; session-cumulative backend usage
 would overcount. See [usage accounting](overview.md#usage-accounting) for the
 complete shape and per-turn reporting assumption.
+
+## Opt-in structured runtime failures
+
+Set `failure_reply: :structured` in the strategy's `opts` to receive:
+
+```elixir
+{:error, %GenAgentEnsemble.Strategies.Failure{
+  strategy: strategy_module,
+  phase: phase,
+  agent: agent_name_or_nil,
+  reason: original_reason,
+  partial: [%{agent: name, phase: output_phase, index: index, text: text}]
+}}
+```
+
+`failure_reply: :legacy` is the default and preserves existing error reasons
+and operation ordering. Other option values raise `ArgumentError` at init.
+Migrate caller error matches before opting in, for example:
+
+```elixir
+{:error, %GenAgentEnsemble.Strategies.Failure{agent: agent, reason: reason, partial: partial}}
+```
+
+This contract covers handled backend turn errors that abort the token, guarded
+callback failures or malformed outputs, and scoped dispatch rejection. `reason`
+is exactly the original legacy reason (including any agent tuple) or the
+redacted Guard reason. Known turn, dispatch and callback agents are identified;
+aggregate synthesis uses `agent: nil`.
+
+Debate partials use `:turn` and one-based chronological turn indexes. Failure phases are `:turn`, `:dispatch`, `:converge`, and `:synthesizer_reply`.
+
+Partials contain only completed successful response texts, including the response
+that triggers a callback failure and all completed synthesis inputs. Failed turns
+and outstanding turns contribute no invented outputs or streamed fragments.
+Only text is journaled in structured mode; retained text is cleared on success,
+terminal failure, cancellation and successor start. Partials never mix queued
+requests. Guard still redacts callback payloads, messages and stacktraces from
+`reason`; response text and backend reasons may contain application data.
+
+Agent deaths, halt, cancellation, timeouts, initialization/startup errors and
+custom strategy/framework errors are outside this structured guarantee and keep
+their existing semantics. Callers must handle those outcomes separately.
+Structured failures are optional; the default contract remains legacy.

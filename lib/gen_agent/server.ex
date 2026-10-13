@@ -16,9 +16,11 @@ defmodule GenAgent.Server do
   @behaviour :gen_statem
 
   alias GenAgent.{Event, Response}
+  require Logger
 
   @default_watchdog_ms :timer.minutes(10)
   @default_max_tell_results 100
+  @default_max_tell_result_bytes 8_388_608
   @default_max_events_per_turn 1_000
   @default_max_event_bytes_per_turn 1_048_576
   @default_event_retention :compact
@@ -30,8 +32,13 @@ defmodule GenAgent.Server do
   defmodule Data do
     @moduledoc false
 
+    # Runtime state already spans OTP queues, backend state, and safety limits;
+    # retaining a bounded window of task identities keeps stale OTP messages
+    # from reaching application callbacks.
+    # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
     defstruct [
       :name,
+      :registered,
       :backend,
       :backend_session,
       :task_supervisor,
@@ -40,6 +47,7 @@ defmodule GenAgent.Server do
       :current_request,
       :watchdog_ms,
       :max_tell_results,
+      :max_tell_result_bytes,
       :max_events_per_turn,
       :max_event_bytes_per_turn,
       :event_retention,
@@ -48,19 +56,14 @@ defmodule GenAgent.Server do
       :max_pending_notifications,
       :max_pending_notification_bytes,
       halted: false,
-      # Flipped to true after `c:GenAgent.pre_run/1` has run successfully.
-      # No prompts are dispatched before pre_run completes -- since pre_run
-      # runs synchronously inside the agent process at init time, in practice
-      # external calls that arrive during pre_run are held in the gen_statem
-      # message queue and processed once pre_run returns.
-      pre_run_done: false,
+      halt_pending: false,
+      draining: false,
       self_chain: nil,
       mailbox: :queue.new(),
       ask_monitors: %{},
       pending_prompt_bytes: 0,
-      # Events delivered via `GenAgent.notify/2` that arrived while
-      # the agent was in `:processing` are buffered here instead of
-      # having their `handle_event/2` callback invoked immediately.
+      # Notifications and ordinary OTP messages that arrive during a turn
+      # are buffered here instead of invoking their callbacks immediately.
       # Without this deferral, state mutations from `handle_event`
       # that happen during an in-flight turn are silently overwritten
       # when the task's `handle_response/3` runs with the snapshot
@@ -68,12 +71,21 @@ defmodule GenAgent.Server do
       # at turn completion, before the agent transitions to `:idle`.
       pending_events: :queue.new(),
       pending_notification_bytes: 0,
+      retired_tasks: :queue.new(),
+      retired_task_refs: MapSet.new(),
+      retired_task_pids: MapSet.new(),
       tell_results: %{},
       tell_result_order: :queue.new(),
+      tell_result_bytes: 0,
       # Opt-in stream recipients by request ref. An entry exists from
       # admission until the request is dispatched, cancelled or failed.
       stream_recipients: %{}
     ]
+  end
+
+  defmodule PendingInfo do
+    @moduledoc false
+    defstruct [:message]
   end
 
   # ---------------------------------------------------------------------------
@@ -81,9 +93,15 @@ defmodule GenAgent.Server do
   # ---------------------------------------------------------------------------
 
   def child_spec(opts) do
+    shutdown = Keyword.get(opts, :shutdown, 5_000)
+
+    unless shutdown == :infinity or (is_integer(shutdown) and shutdown >= 0) do
+      raise ArgumentError, ":shutdown must be a non-negative integer or :infinity"
+    end
+
     %{
       id: Keyword.fetch!(opts, :name),
-      start: {__MODULE__, :start_link, [opts]},
+      start: {__MODULE__, :start_link, [Keyword.delete(opts, :shutdown)]},
       # :temporary means the DynamicSupervisor does not auto-restart a dead
       # agent. This is the safer default for a framework where agents carry
       # conversation state (backend session id, message history, summary)
@@ -91,7 +109,7 @@ defmodule GenAgent.Server do
       # silently lose everything. Users who kill or crash an agent should
       # explicitly call `start_agent/2` again to get a fresh one.
       restart: :temporary,
-      shutdown: 5_000,
+      shutdown: shutdown,
       type: :worker
     }
   end
@@ -115,7 +133,6 @@ defmodule GenAgent.Server do
   catch
     kind, reason ->
       reason_kind = callback_failure_kind(reason)
-      require Logger
       Logger.error("GenAgent initialization failed (#{kind}: #{inspect(reason_kind)})")
       {:stop, {:init_failed, kind, reason_kind}}
   end
@@ -130,12 +147,21 @@ defmodule GenAgent.Server do
     Process.flag(:trap_exit, true)
 
     name = Keyword.fetch!(opts, :name)
+    Process.put({GenAgent, :current_name}, name)
     backend = Keyword.fetch!(opts, :backend)
     module = Keyword.fetch!(opts, :module)
+    # Applications decide which metadata to render; a library must not change
+    # the VM-wide Logger formatter to make its own keys visible by default.
+    # credo:disable-for-next-line Credo.Check.Warning.MissedMetadataKeyInLoggerConfig
+    Logger.metadata(gen_agent: name, gen_agent_module: module)
     task_supervisor = Keyword.fetch!(opts, :task_supervisor)
     init_opts = Keyword.get(opts, :init_opts, [])
     watchdog_ms = Keyword.get(opts, :watchdog_ms, @default_watchdog_ms)
     max_tell_results = Keyword.get(opts, :max_tell_results, @default_max_tell_results)
+
+    max_tell_result_bytes =
+      Keyword.get(opts, :max_tell_result_bytes, @default_max_tell_result_bytes)
+
     max_events_per_turn = Keyword.get(opts, :max_events_per_turn, @default_max_events_per_turn)
 
     max_event_bytes_per_turn =
@@ -154,6 +180,9 @@ defmodule GenAgent.Server do
     max_pending_notification_bytes =
       Keyword.get(opts, :max_pending_notification_bytes, @default_max_pending_notification_bytes)
 
+    validate_watchdog!(watchdog_ms)
+    validate_pending_limit!(max_tell_results, :max_tell_results)
+    validate_pending_limit!(max_tell_result_bytes, :max_tell_result_bytes)
     validate_capture_limit!(max_events_per_turn, :max_events_per_turn)
     validate_capture_limit!(max_event_bytes_per_turn, :max_event_bytes_per_turn)
     validate_event_retention!(event_retention)
@@ -162,10 +191,13 @@ defmodule GenAgent.Server do
     validate_pending_limit!(max_pending_notifications, :max_pending_notifications)
     validate_pending_limit!(max_pending_notification_bytes, :max_pending_notification_bytes)
 
-    with {:ok, backend_opts, agent_state} <- module.init_agent(init_opts),
-         {:ok, backend_session} <- backend.start_session(backend_opts) do
+    with {:ok, backend_opts, agent_state} <- initialize_agent(module, init_opts),
+         {:ok, backend_session} <- initialize_backend(backend, backend_opts) do
       data = %Data{
         name: name,
+        registered:
+          Keyword.get(opts, :register) ==
+            {:via, Registry, {GenAgent.Registry, name}},
         backend: backend,
         backend_session: backend_session,
         task_supervisor: task_supervisor,
@@ -173,6 +205,7 @@ defmodule GenAgent.Server do
         agent_state: agent_state,
         watchdog_ms: watchdog_ms,
         max_tell_results: max_tell_results,
+        max_tell_result_bytes: max_tell_result_bytes,
         max_events_per_turn: max_events_per_turn,
         max_event_bytes_per_turn: max_event_bytes_per_turn,
         event_retention: event_retention,
@@ -185,23 +218,65 @@ defmodule GenAgent.Server do
       emit_state_change(name, nil, :idle)
       {:ok, :idle, data, [{:next_event, :internal, :pre_run}]}
     else
-      {:error, reason} -> {:stop, {:backend_start_failed, reason}}
-      other -> {:stop, {:init_agent_failed, other}}
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp initialize_agent(module, opts) do
+    case module.init_agent(opts) do
+      {:ok, backend_opts, agent_state} -> {:ok, backend_opts, agent_state}
+      {:error, reason} -> {:error, {:init_agent_failed, reason}}
+      other -> {:error, {:init_agent_failed, other}}
+    end
+  end
+
+  defp initialize_backend(backend, opts) do
+    case backend.start_session(opts) do
+      {:ok, session} -> {:ok, session}
+      {:error, reason} -> {:error, {:backend_start_failed, reason}}
+      other -> {:error, {:backend_start_failed, other}}
     end
   end
 
   @impl :gen_statem
   def terminate(reason, _state, %Data{} = data) do
+    if graceful_termination?(reason) do
+      reply_to_pending_asks(data, reason)
+    end
+
     if data.current_request do
       cleanup_task(data.current_request)
     end
 
-    safely_call(data.agent_module, :terminate_agent, [reason, data.agent_state])
-    safely_call(data.backend, :terminate_session, [data.backend_session])
+    safely_call(data.name, data.agent_module, :terminate_agent, [reason, data.agent_state])
+    safely_call(data.name, data.backend, :terminate_session, [data.backend_session])
+    emit_terminated(data.name, reason)
     :ok
   end
 
   def terminate(_reason, _state, _data), do: :ok
+
+  defp graceful_termination?(reason) when reason in [:normal, :shutdown], do: true
+  defp graceful_termination?(_reason), do: false
+
+  defp reply_to_pending_asks(%Data{} = data, reason) do
+    outcome = {:error, {:agent_terminated, reason}}
+
+    case data.current_request do
+      %{kind: {:ask, from}} -> :gen_statem.reply(from, outcome)
+      _ -> :ok
+    end
+
+    Enum.each(:queue.to_list(data.mailbox), fn
+      {_ref, {:ask, from}, _prompt} -> :gen_statem.reply(from, outcome)
+      _other -> :ok
+    end)
+
+    case data.self_chain do
+      {:retry, _prompt, {:ask, from}, _ref, _attempt} -> :gen_statem.reply(from, outcome)
+      _other -> :ok
+    end
+  end
 
   @impl :gen_statem
   def format_status(status) when is_map(status) do
@@ -229,6 +304,9 @@ defmodule GenAgent.Server do
         tell_result_order: :redacted,
         stream_recipients: :redacted,
         ask_monitors: :redacted,
+        retired_tasks: :redacted,
+        retired_task_refs: :redacted,
+        retired_task_pids: :redacted,
         self_chain: :redacted
     }
   end
@@ -274,8 +352,12 @@ defmodule GenAgent.Server do
       # arguments in the OTP crash report, outside format_status/1's reach.
       # Stop with a content-free reason instead of exposing the live state.
       reason_kind = callback_failure_kind(reason)
-      require Logger
-      Logger.error("GenAgent state callback failed (#{kind}: #{inspect(reason_kind)})")
+
+      Logger.error(
+        "GenAgent #{inspect(data.name)} #{inspect(data.agent_module)} state callback failed " <>
+          "(#{kind}: #{inspect(reason_kind)})\n" <> redacted_stacktrace(__STACKTRACE__)
+      )
+
       {:stop, {:callback_failed, kind, reason_kind}, data}
   end
 
@@ -300,20 +382,23 @@ defmodule GenAgent.Server do
   # any user-visible turn. See `c:GenAgent.pre_run/1`.
   # ---------------------------------------------------------------------------
 
-  defp dispatch_event(:internal, :pre_run, :idle, %Data{pre_run_done: true}) do
-    :keep_state_and_data
-  end
-
   defp dispatch_event(:internal, :pre_run, :idle, %Data{} = data) do
-    case safely_pre_run(data.agent_module, data.agent_state) do
+    case safely_pre_run(data.name, data.agent_module, data.agent_state) do
       {:ok, new_agent_state} ->
-        {:keep_state, %{data | agent_state: new_agent_state, pre_run_done: true}}
+        {:keep_state, %{data | agent_state: new_agent_state}}
 
       {:error, reason} ->
         {:stop, {:pre_run_failed, reason}, data}
 
       {:crashed, exception} ->
         {:stop, {:pre_run_crashed, callback_failure_kind(exception)}, data}
+
+      _other ->
+        Logger.error(
+          "GenAgent #{inspect(data.name)} #{inspect(data.agent_module)}.pre_run/1 returned unexpected shape"
+        )
+
+        {:stop, :pre_run_invalid, data}
     end
   end
 
@@ -321,8 +406,21 @@ defmodule GenAgent.Server do
   # Internal: :process_next -- decide what to do on entry to :idle
   # ---------------------------------------------------------------------------
 
+  defp dispatch_event(:internal, :process_next, :idle, %Data{draining: true} = data) do
+    {:stop, :normal, data}
+  end
+
   defp dispatch_event(:internal, :process_next, :idle, %Data{halted: true}) do
     :keep_state_and_data
+  end
+
+  defp dispatch_event(
+         :internal,
+         :process_next,
+         :idle,
+         %Data{self_chain: {:retry, prompt, kind, ref, attempt}} = data
+       ) do
+    try_dispatch(%{data | self_chain: nil}, ref, kind, prompt, attempt)
   end
 
   defp dispatch_event(:internal, :process_next, :idle, %Data{self_chain: prompt} = data)
@@ -347,6 +445,70 @@ defmodule GenAgent.Server do
         data = clear_ask_monitor(data, request_ref)
         try_dispatch(data, request_ref, kind, prompt)
     end
+  end
+
+  # A rejected generated prompt can request another self-chain. Resume it
+  # through the mailbox instead of a :next_event so callers can still inspect
+  # or stop an agent whose pre_turn/2 keeps rejecting retries.
+  defp dispatch_event(:info, :retry_generated_prompt, :idle, %Data{} = data),
+    do: dispatch_event(:internal, :process_next, :idle, data)
+
+  defp dispatch_event(:info, :retry_generated_prompt, :processing, _data),
+    do: :keep_state_and_data
+
+  # Stop admitting work before waiting for the active turn to finish.
+  defp dispatch_event({:call, from}, :drain, state, %Data{} = data) do
+    {data, queued_replies} = if data.draining, do: {data, []}, else: begin_drain(data)
+    actions = queued_replies ++ [{:reply, from, :ok}]
+
+    if state == :idle do
+      {:keep_state, data, actions ++ [{:next_event, :internal, :process_next}]}
+    else
+      {:keep_state, data, actions}
+    end
+  end
+
+  defp dispatch_event({:call, from}, {:ask, _prompt}, _state, %Data{draining: true} = data),
+    do: reject_during_drain(data, from)
+
+  defp dispatch_event({:call, from}, {:tell, _prompt}, _state, %Data{draining: true} = data),
+    do: reject_during_drain(data, from)
+
+  defp dispatch_event(
+         {:call, from},
+         {:tell_with_completion, _prompt, _recipient},
+         _state,
+         %Data{draining: true} = data
+       ),
+       do: reject_during_drain(data, from)
+
+  defp dispatch_event(
+         {:call, from},
+         {:tell_with_completion, _prompt, _recipient, _on_halt},
+         _state,
+         %Data{draining: true} = data
+       ),
+       do: reject_during_drain(data, from)
+
+  defp dispatch_event(
+         {:call, from},
+         {:tell_with_completion, _prompt, _recipient, _on_halt, _stream_to},
+         _state,
+         %Data{draining: true} = data
+       ),
+       do: reject_during_drain(data, from)
+
+  defp dispatch_event(
+         {:call, from},
+         {:notify_ack, _event},
+         _state,
+         %Data{draining: true} = data
+       ),
+       do: reject_during_drain(data, from)
+
+  defp dispatch_event(:cast, {:notify, _event}, _state, %Data{draining: true} = data) do
+    emit_input_rejected(data.name, :draining)
+    :keep_state_and_data
   end
 
   # ---------------------------------------------------------------------------
@@ -509,7 +671,7 @@ defmodule GenAgent.Server do
         match?(%{request_ref: ^ref}, data.current_request) ->
           {:ok, :pending}
 
-        in_mailbox?(data.mailbox, ref) ->
+        match?({:retry, _, _, ^ref, _}, data.self_chain) or in_mailbox?(data.mailbox, ref) ->
           {:ok, :pending}
 
         true ->
@@ -574,6 +736,36 @@ defmodule GenAgent.Server do
     {:keep_state_and_data, [{:reply, from, {:error, :not_current}}]}
   end
 
+  defp dispatch_event({:call, from}, :reset_session, :idle, %Data{draining: false} = data) do
+    result =
+      if function_exported?(data.backend, :reset_session, 1) do
+        try do
+          data.backend.reset_session(data.backend_session)
+        catch
+          _kind, reason -> {:error, {:backend_reset_failed, callback_failure_kind(reason)}}
+        end
+      else
+        {:error, :unsupported}
+      end
+
+    case result do
+      {:ok, session} ->
+        {:keep_state, %{data | backend_session: session}, [{:reply, from, :ok}]}
+
+      {:error, reason} ->
+        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+
+      _ ->
+        {:keep_state_and_data, [{:reply, from, {:error, :invalid_reset_result}}]}
+    end
+  end
+
+  defp dispatch_event({:call, from}, :reset_session, _state, %Data{draining: true}),
+    do: {:keep_state_and_data, [{:reply, from, {:error, :draining}}]}
+
+  defp dispatch_event({:call, from}, :reset_session, _state, _data),
+    do: {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
+
   defp dispatch_event({:call, from}, :status, state, %Data{} = data) do
     status = %{
       state: state,
@@ -585,6 +777,8 @@ defmodule GenAgent.Server do
           %{request_ref: ref} -> ref
         end,
       halted: data.halted,
+      halt_pending: data.halt_pending,
+      draining: data.draining,
       agent_state: data.agent_state
     }
 
@@ -601,6 +795,7 @@ defmodule GenAgent.Server do
           %{
             ref: current.request_ref,
             origin: request_origin(current.kind),
+            attempt: current.attempt,
             elapsed_ms: max(System.monotonic_time(:millisecond) - current.started_at, 0),
             watchdog_ms: data.watchdog_ms
           }
@@ -609,6 +804,8 @@ defmodule GenAgent.Server do
     snapshot = %{
       phase: state,
       halted: data.halted,
+      halt_pending: data.halt_pending,
+      draining: data.draining,
       pending_prompts: :queue.len(data.mailbox),
       pending_notifications: :queue.len(data.pending_events),
       self_chain_pending: not is_nil(data.self_chain),
@@ -693,12 +890,26 @@ defmodule GenAgent.Server do
   end
 
   # ---------------------------------------------------------------------------
-  # resume -- unhalt and re-trigger drain
+  # halt/resume -- pause dispatch without interrupting the active turn
   # ---------------------------------------------------------------------------
+
+  defp dispatch_event(:cast, :halt, :idle, %Data{draining: false} = data) do
+    {:keep_state, transition_to_halted(data)}
+  end
+
+  defp dispatch_event(:cast, :halt, :processing, %Data{draining: false} = data) do
+    {:keep_state, %{data | halt_pending: true}}
+  end
+
+  defp dispatch_event(:cast, :halt, _state, _data), do: :keep_state_and_data
 
   defp dispatch_event(:cast, :resume, :idle, %Data{halted: true} = data) do
     data = %{data | halted: false}
     {:keep_state, data, [{:next_event, :internal, :process_next}]}
+  end
+
+  defp dispatch_event(:cast, :resume, :processing, %Data{halt_pending: true} = data) do
+    {:keep_state, %{data | halt_pending: false}}
   end
 
   defp dispatch_event(:cast, :resume, _state, _data), do: :keep_state_and_data
@@ -734,7 +945,20 @@ defmodule GenAgent.Server do
         handle_task_result(task_result, current, data)
 
       _ ->
-        :keep_state_and_data
+        if MapSet.member?(data.retired_task_refs, ref) do
+          :keep_state_and_data
+        else
+          dispatch_unhandled_info({ref, task_result}, :processing, data)
+        end
+    end
+  end
+
+  defp dispatch_event(:info, {ref, _result} = message, state, %Data{} = data)
+       when is_reference(ref) do
+    if MapSet.member?(data.retired_task_refs, ref) do
+      :keep_state_and_data
+    else
+      dispatch_unhandled_info(message, state, data)
     end
   end
 
@@ -756,7 +980,21 @@ defmodule GenAgent.Server do
 
   defp dispatch_event(
          :info,
-         {:DOWN, ref, :process, _pid, reason},
+         {:DOWN, ref, :process, _pid, _reason} = message,
+         state,
+         %Data{} = data
+       )
+       when is_reference(ref) and state != :processing do
+    if MapSet.member?(data.retired_task_refs, ref) do
+      :keep_state_and_data
+    else
+      dispatch_unhandled_info(message, state, data)
+    end
+  end
+
+  defp dispatch_event(
+         :info,
+         {:DOWN, ref, :process, _pid, reason} = message,
          :processing,
          %Data{current_request: current} = data
        )
@@ -766,7 +1004,11 @@ defmodule GenAgent.Server do
         finish_error(data, current, current.checkpoint_error || {:task_crashed, reason})
 
       _ ->
-        :keep_state_and_data
+        if MapSet.member?(data.retired_task_refs, ref) do
+          :keep_state_and_data
+        else
+          dispatch_unhandled_info(message, :processing, data)
+        end
     end
   end
 
@@ -783,7 +1025,160 @@ defmodule GenAgent.Server do
     :keep_state_and_data
   end
 
-  defp dispatch_event(:info, _msg, _state, _data), do: :keep_state_and_data
+  defp dispatch_event(:info, {:gen_agent_stream, _ref, _tag, _event}, _state, _data),
+    do: :keep_state_and_data
+
+  # Registry registration links the agent to its Registry partition. Because
+  # agents trap exits to clean up prompt tasks, losing that partition would
+  # otherwise leave a live agent that can no longer be addressed by name.
+  # Prompt tasks are linked too, so verify ownership instead of treating every
+  # linked-process exit as a Registry failure.
+  defp dispatch_event(
+         :info,
+         {:EXIT, pid, reason} = message,
+         state,
+         %Data{registered: true} = data
+       ) do
+    if registered_here?(data.name) do
+      dispatch_linked_exit(message, pid, reason, state, data)
+    else
+      {:stop, {:shutdown, :registry_lost}, data}
+    end
+  end
+
+  defp dispatch_event(:info, {:EXIT, pid, reason} = message, state, %Data{} = data),
+    do: dispatch_linked_exit(message, pid, reason, state, data)
+
+  defp dispatch_event({:call, from}, _request, _state, %Data{} = data) do
+    Logger.debug("GenAgent #{inspect(data.name)} received an unknown call")
+    {:keep_state_and_data, [{:reply, from, {:error, :unknown_request}}]}
+  end
+
+  defp dispatch_event(:cast, _request, _state, %Data{} = data) do
+    Logger.debug("GenAgent #{inspect(data.name)} received an unknown cast")
+    :keep_state_and_data
+  end
+
+  defp dispatch_event(:info, message, state, %Data{} = data),
+    do: dispatch_unhandled_info(message, state, data)
+
+  defp dispatch_linked_exit(message, pid, reason, state, data) do
+    current_task_pid = get_in(data.current_request || %{}, [:task_pid])
+
+    if pid == current_task_pid or MapSet.member?(data.retired_task_pids, pid) or reason == :normal do
+      :keep_state_and_data
+    else
+      logged_reason = if is_atom(reason), do: reason, else: :redacted
+
+      Logger.warning(
+        "GenAgent #{inspect(data.name)} linked process exited (#{inspect(logged_reason)})"
+      )
+
+      dispatch_unhandled_info(message, state, data)
+    end
+  end
+
+  # Keep a small window of completed task identities so late replies, DOWNs,
+  # and linked exits do not surface as application messages. Bounded history
+  # avoids growing the server with one entry per turn.
+  defp retire_task(data, %{task_ref: ref, task_pid: pid}) do
+    tasks = :queue.in({ref, pid}, data.retired_tasks)
+    refs = MapSet.put(data.retired_task_refs, ref)
+    pids = MapSet.put(data.retired_task_pids, pid)
+
+    if :queue.len(tasks) > 64 do
+      {{:value, {old_ref, old_pid}}, tasks} = :queue.out(tasks)
+
+      %{
+        data
+        | retired_tasks: tasks,
+          retired_task_refs: MapSet.delete(refs, old_ref),
+          retired_task_pids: MapSet.delete(pids, old_pid)
+      }
+    else
+      %{data | retired_tasks: tasks, retired_task_refs: refs, retired_task_pids: pids}
+    end
+  end
+
+  defp dispatch_unhandled_info(message, state, data) do
+    cond do
+      data.draining ->
+        :keep_state_and_data
+
+      not function_exported?(data.agent_module, :handle_info, 2) ->
+        Logger.debug("GenAgent #{inspect(data.name)} received an unexpected info message")
+        :keep_state_and_data
+
+      state == :processing ->
+        case enqueue_notification(data, %PendingInfo{message: message}) do
+          {:ok, queued} ->
+            {:keep_state, queued}
+
+          {:error, _reason} ->
+            Logger.warning(
+              "GenAgent #{inspect(data.name)} dropped an info message because the pending queue is full"
+            )
+
+            :keep_state_and_data
+        end
+
+      true ->
+        {result, _acknowledgement} =
+          apply_immediate_decision(
+            data,
+            safely_handle_info(data.name, data.agent_module, message, data.agent_state)
+          )
+
+        result
+    end
+  end
+
+  defp reject_during_drain(data, from) do
+    emit_input_rejected(data.name, :draining)
+    {:keep_state_and_data, [{:reply, from, {:error, :draining}}]}
+  end
+
+  defp begin_drain(%Data{} = data) do
+    {data, replies} =
+      Enum.reduce(:queue.to_list(data.mailbox), {data, []}, fn {ref, kind, _prompt},
+                                                               {data, replies} ->
+        emit_turn_rejected(data.name, ref, kind, :draining)
+        {data, reply} = record_error(data, %{request_ref: ref, kind: kind}, :draining)
+        {data, Enum.reverse(reply, replies)}
+      end)
+
+    {data, queued_replies} =
+      case data.self_chain do
+        {:retry, _prompt, kind, ref, attempt} ->
+          emit_turn_rejected(data.name, ref, kind, :draining, attempt)
+          {data, reply} = record_error(data, %{request_ref: ref, kind: kind}, :draining)
+          {data, Enum.reverse(reply, replies)}
+
+        _other ->
+          {data, replies}
+      end
+
+    Enum.each(Map.keys(data.ask_monitors), &Process.demonitor(&1, [:flush]))
+
+    {%{
+       data
+       | draining: true,
+         mailbox: :queue.new(),
+         ask_monitors: %{},
+         pending_prompt_bytes: 0,
+         pending_events: :queue.new(),
+         pending_notification_bytes: 0,
+         self_chain: nil,
+         stream_recipients: %{}
+     }, Enum.reverse(queued_replies)}
+  end
+
+  defp registered_here?(name) do
+    Registry.whereis_name({GenAgent.Registry, name}) == self()
+  catch
+    # The Registry may still be down when its linked partition's EXIT arrives.
+    _, _ -> false
+  end
 
   defp request_origin({:ask, _from}), do: :ask
   defp request_origin({:tell, _recipient}), do: :tell
@@ -795,7 +1190,15 @@ defmodule GenAgent.Server do
       finish_error(%{data | agent_state: new_agent_state}, current, current.checkpoint_error)
     else
       new_session = restore_checkpoint(data.backend, new_session, current)
-      emit_prompt_stop(data.name, current.request_ref, response.duration_ms, new_agent_state)
+
+      emit_prompt_stop(
+        data.name,
+        current.request_ref,
+        response.duration_ms,
+        new_agent_state,
+        current.attempt
+      )
+
       emit_turn_stop(data.name, current)
       finish_turn(data, current, response, new_session, new_agent_state)
     end
@@ -823,6 +1226,11 @@ defmodule GenAgent.Server do
     end
   end
 
+  defp cancel_queued_tell(%Data{self_chain: {:retry, _, kind, ref, attempt}} = data, from, ref)
+       when kind == :tell or elem(kind, 0) == :tell do
+    deliver_queued_tell_cancel(%{data | self_chain: nil}, from, ref, kind, attempt)
+  end
+
   defp cancel_queued_tell(data, from, ref) do
     case find_queued_entry(data.mailbox, ref) do
       {^ref, :tell, prompt} ->
@@ -846,6 +1254,10 @@ defmodule GenAgent.Server do
 
   defp finish_queued_tell_cancel(data, from, ref, kind, prompt) do
     data = remove_queued_entry(data, ref, prompt)
+    deliver_queued_tell_cancel(data, from, ref, kind)
+  end
+
+  defp deliver_queued_tell_cancel(data, from, ref, kind, attempt \\ 1) do
     data = %{data | stream_recipients: Map.delete(data.stream_recipients, ref)}
     data = store_tell_result(data, ref, {:error, :cancelled})
 
@@ -853,7 +1265,7 @@ defmodule GenAgent.Server do
       send(recipient, {:gen_agent, :completion, data.name, ref, {:error, :cancelled}})
     end
 
-    emit_turn_cancelled(data.name, ref, kind, :caller_cancelled)
+    emit_turn_cancelled(data.name, ref, kind, :caller_cancelled, attempt)
     {:keep_state, data, [{:reply, from, {:ok, :cancelled}}]}
   end
 
@@ -968,12 +1380,18 @@ defmodule GenAgent.Server do
 
   # Self-chaining has one reserved slot so a callback can make progress even
   # when callers have filled the FIFO. It still obeys the prompt byte cap.
+  defp self_chain_prompt({:retry, prompt, _, _, _}), do: prompt
+  defp self_chain_prompt(prompt), do: prompt
+
   defp enqueue_self_chain(data, prompt) do
-    incoming_bytes = :erlang.external_size(prompt)
+    incoming_bytes = :erlang.external_size(self_chain_prompt(prompt))
     pending_count = if(is_nil(data.self_chain), do: 0, else: 1)
 
     pending_bytes =
-      if(is_nil(data.self_chain), do: 0, else: :erlang.external_size(data.self_chain))
+      if(is_nil(data.self_chain),
+        do: 0,
+        else: :erlang.external_size(self_chain_prompt(data.self_chain))
+      )
 
     case overload_reason(
            :self_chain,
@@ -1035,20 +1453,26 @@ defmodule GenAgent.Server do
     emit_event_received(data.name, event)
 
     {result, acknowledgement} =
-      case safely_handle_event(data.agent_module, event, data.agent_state) do
-        {:noreply, new_agent_state} ->
-          {{:keep_state, %{data | agent_state: new_agent_state}}, :ok}
-
-        {:prompt, prompt, new_agent_state} ->
-          notify_idle_prompt(%{data | agent_state: new_agent_state}, prompt)
-
-        {:halt, new_agent_state} ->
-          data = %{data | agent_state: new_agent_state}
-          data = transition_to_halted(data)
-          {{:keep_state, data}, :ok}
-      end
+      apply_immediate_decision(
+        data,
+        safely_handle_event(data.name, data.agent_module, event, data.agent_state)
+      )
 
     reply_notification(from, result, acknowledgement)
+  end
+
+  defp apply_immediate_decision(data, decision) do
+    case decision do
+      {:noreply, new_agent_state} ->
+        {{:keep_state, %{data | agent_state: new_agent_state}}, :ok}
+
+      {:prompt, prompt, new_agent_state} ->
+        notify_idle_prompt(%{data | agent_state: new_agent_state}, prompt)
+
+      {:halt, new_agent_state} ->
+        data = %{data | agent_state: new_agent_state} |> transition_to_halted()
+        {{:keep_state, data}, :ok}
+    end
   end
 
   defp notify_idle_prompt(data, prompt) do
@@ -1087,58 +1511,85 @@ defmodule GenAgent.Server do
   # directly. Runs `pre_turn/2` first and branches on its return:
   #
   #   {:ok, prompt, state} -- normal dispatch to the backend task.
-  #   {:skip, state}       -- drop the prompt, deliver :pre_turn_skipped
-  #                           via record_error (so ask/tell callers see
-  #                           an error, self_chain/event paths no-op),
-  #                           stay in :idle.
+  #   {:skip, state}       -- reject the prompt with :pre_turn_skipped.
+  #                           Generated prompts also notify handle_error/3.
   #   {:halt, state}       -- same as skip, plus transition_to_halted.
   #
   # Returns a gen_statem handle_event result tuple.
-  defp try_dispatch(%Data{} = data, request_ref, kind, prompt) do
+  defp try_dispatch(%Data{} = data, request_ref, kind, prompt, attempt \\ 1) do
     # Take the stream recipient out of the map here so every outcome below
     # (dispatch, skip, halt, rejection) leaves nothing behind.
     {stream_to, recipients} = Map.pop(data.stream_recipients, request_ref)
     data = %{data | stream_recipients: recipients}
 
-    case safely_pre_turn(data.agent_module, prompt, data.agent_state) do
-      {:ok, new_prompt, new_state} when is_binary(new_prompt) ->
+    case safely_pre_turn(data.name, data.agent_module, prompt, data.agent_state) do
+      {:returned, {:ok, new_prompt, new_state}} when is_binary(new_prompt) ->
         data = %{data | agent_state: new_state}
 
-        case dispatch(data, request_ref, kind, new_prompt, prompt, stream_to) do
+        case dispatch(data, request_ref, kind, new_prompt, prompt, stream_to, attempt) do
           {:ok, data} ->
             {:next_state, :processing, data}
 
           {:error, reason} ->
-            reject_dispatch(data, request_ref, kind, reason)
+            reject_dispatch(data, request_ref, kind, reason, attempt)
         end
 
-      {:skip, new_state} ->
+      {:returned, {:skip, new_state}} ->
         pseudo_current = %{request_ref: request_ref, kind: kind}
         data = %{data | agent_state: new_state}
-        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_skipped)
-        {data, reply_actions} = record_error(data, pseudo_current, :pre_turn_skipped)
-        {:keep_state, data, with_process_next(reply_actions)}
+        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_skipped, attempt)
+        {data, reply_actions} = reject_pre_turn(data, pseudo_current, :pre_turn_skipped)
+        {:keep_state, data, after_pre_turn_rejection(data, kind, reply_actions)}
 
-      {:halt, new_state} ->
+      {:returned, {:halt, new_state}} ->
         pseudo_current = %{request_ref: request_ref, kind: kind}
         data = %{data | agent_state: new_state}
-        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_halted)
+        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_halted, attempt)
         {data, reply_actions} = record_error(data, pseudo_current, :pre_turn_halted)
         data = transition_to_halted(data)
         {:keep_state, data, with_process_next(reply_actions)}
 
-      _other ->
-        # Malformed pre_turn return -- treat as skip with a warning.
-        require Logger
-        Logger.error("GenAgent pre_turn/2 returned unexpected shape")
+      {:crashed, failure_kind} ->
         pseudo_current = %{request_ref: request_ref, kind: kind}
-        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_invalid)
-        {data, reply_actions} = record_error(data, pseudo_current, :pre_turn_invalid)
-        {:keep_state, data, with_process_next(reply_actions)}
+        reason = pre_turn_crash_reason(kind, failure_kind)
+        emit_turn_rejected(data.name, request_ref, kind, reason, attempt)
+        {data, reply_actions} = reject_pre_turn(data, pseudo_current, reason)
+        {:keep_state, data, after_pre_turn_rejection(data, kind, reply_actions)}
+
+      {:returned, _other} ->
+        Logger.warning(
+          "GenAgent #{inspect(data.name)} #{inspect(data.agent_module)}.pre_turn/2 returned unexpected shape"
+        )
+
+        pseudo_current = %{request_ref: request_ref, kind: kind}
+        emit_turn_rejected(data.name, request_ref, kind, :pre_turn_invalid, attempt)
+        {data, reply_actions} = reject_pre_turn(data, pseudo_current, :pre_turn_invalid)
+        {:keep_state, data, after_pre_turn_rejection(data, kind, reply_actions)}
     end
   end
 
-  defp dispatch(%Data{} = data, request_ref, kind, prompt, original_prompt, stream_to) do
+  defp after_pre_turn_rejection(data, kind, reply_actions)
+       when kind in [:self_chain, :event] and not is_nil(data.self_chain) and not data.halted do
+    Process.send_after(self(), :retry_generated_prompt, 10)
+    reply_actions
+  end
+
+  defp after_pre_turn_rejection(_data, _kind, reply_actions),
+    do: with_process_next(reply_actions)
+
+  defp pre_turn_crash_reason(kind, failure_kind) when kind in [:self_chain, :event],
+    do: {:pre_turn_crashed, failure_kind}
+
+  defp pre_turn_crash_reason(_kind, _failure_kind), do: :pre_turn_skipped
+
+  defp reject_pre_turn(data, %{kind: kind, request_ref: ref}, reason)
+       when kind in [:self_chain, :event],
+       do: {reject_generated_prompt(data, ref, reason), []}
+
+  defp reject_pre_turn(data, pseudo_current, reason),
+    do: record_error(data, pseudo_current, reason)
+
+  defp dispatch(%Data{} = data, request_ref, kind, prompt, original_prompt, stream_to, attempt) do
     backend = data.backend
     backend_session = data.backend_session
     module = data.agent_module
@@ -1147,6 +1598,7 @@ defmodule GenAgent.Server do
     max_events_per_turn = data.max_events_per_turn
     max_event_bytes_per_turn = data.max_event_bytes_per_turn
     event_retention = data.event_retention
+    name = data.name
     owner = self()
     stream_tag = if stream_to, do: make_ref()
 
@@ -1158,6 +1610,9 @@ defmodule GenAgent.Server do
       try do
         {:ok,
          Task.Supervisor.async(task_supervisor, fn ->
+           Process.put({GenAgent, :current_name}, name)
+           Process.put({GenAgent, :current_agent_pid}, owner)
+
            run_prompt(
              backend,
              backend_session,
@@ -1176,11 +1631,12 @@ defmodule GenAgent.Server do
     case task do
       {:ok, task} ->
         started_at = System.monotonic_time(:millisecond)
-        emit_prompt_start(data.name, request_ref, prompt, original_prompt, agent_state)
-        emit_turn_start(data.name, request_ref, kind)
+        emit_prompt_start(data.name, request_ref, prompt, original_prompt, agent_state, attempt)
+        emit_turn_start(data.name, request_ref, kind, attempt)
 
         current = %{
           request_ref: request_ref,
+          attempt: attempt,
           task_ref: task.ref,
           task_pid: task.pid,
           kind: kind,
@@ -1199,17 +1655,25 @@ defmodule GenAgent.Server do
     end
   end
 
-  defp reject_dispatch(%Data{} = data, request_ref, kind, reason) do
-    emit_turn_rejected(data.name, request_ref, kind, reason)
-    emit_prompt_error(data.name, request_ref, reason, data.agent_state)
+  defp reject_dispatch(%Data{} = data, request_ref, kind, reason, attempt) do
+    emit_turn_rejected(data.name, request_ref, kind, reason, attempt)
+    emit_prompt_error(data.name, request_ref, reason, data.agent_state, nil, attempt)
 
     # A retry cannot start until the caller restores the task supervisor.
     # Discard an immediate retry from handle_error/3 to avoid an internal loop.
-    decision = safely_handle_error(data.agent_module, request_ref, reason, data.agent_state)
+    decision =
+      safely_handle_error(data.name, data.agent_module, request_ref, reason, data.agent_state)
+
     {transition, decision_state} = decision_to_transition(decision)
 
     {:ok, hooked_state} =
-      safely_post_turn(data.agent_module, {:error, reason}, request_ref, decision_state)
+      safely_post_turn(
+        data.name,
+        data.agent_module,
+        {:error, reason},
+        request_ref,
+        decision_state
+      )
 
     pseudo_current = %{request_ref: request_ref, kind: kind}
     {data, reply_actions} = record_error(data, pseudo_current, reason)
@@ -1457,6 +1921,14 @@ defmodule GenAgent.Server do
     raise ArgumentError, "#{name} must be a positive integer, got: #{inspect(value)}"
   end
 
+  defp validate_watchdog!(:infinity), do: :ok
+  defp validate_watchdog!(value) when is_integer(value) and value > 0, do: :ok
+
+  defp validate_watchdog!(value) do
+    raise ArgumentError,
+          "watchdog_ms must be a positive integer or :infinity, got: #{inspect(value)}"
+  end
+
   defp validate_event_retention!(mode) when mode in [:compact, :lossless], do: :ok
 
   defp validate_event_retention!(_mode) do
@@ -1519,54 +1991,103 @@ defmodule GenAgent.Server do
     :ok
   end
 
-  defp safely_handle_event(module, event, state) do
-    if function_exported?(module, :handle_event, 2) do
-      module.handle_event(event, state)
-    else
-      {:noreply, state}
-    end
+  defp safely_handle_event(name, module, event, state) do
+    decision =
+      if function_exported?(module, :handle_event, 2) do
+        module.handle_event(event, state)
+      else
+        {:noreply, state}
+      end
+
+    normalize_decision(decision, name, module, :handle_event, state)
   rescue
     e ->
-      require Logger
-      Logger.error("GenAgent handle_event/2 raised #{inspect(callback_failure_kind(e))}")
+      Logger.error(
+        "GenAgent #{inspect(name)} #{inspect(module)}.handle_event/2 raised " <>
+          "#{inspect(callback_failure_kind(e))}\n" <> redacted_stacktrace(__STACKTRACE__)
+      )
+
       {:noreply, state}
   catch
     kind, reason ->
-      require Logger
-
       Logger.error(
-        "GenAgent handle_event/2 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
+        "GenAgent #{inspect(name)} #{inspect(module)}.handle_event/2 threw " <>
+          "#{kind}: #{inspect(callback_failure_kind(reason))}\n" <>
+          redacted_stacktrace(__STACKTRACE__)
       )
 
       {:noreply, state}
   end
 
+  defp safely_handle_info(name, module, message, state) do
+    decision = module.handle_info(message, state)
+    normalize_decision(decision, name, module, :handle_info, state)
+  rescue
+    e ->
+      Logger.error(
+        "GenAgent #{inspect(name)} #{inspect(module)}.handle_info/2 raised " <>
+          "#{inspect(callback_failure_kind(e))}\n" <> redacted_stacktrace(__STACKTRACE__)
+      )
+
+      {:noreply, state}
+  catch
+    kind, reason ->
+      Logger.error(
+        "GenAgent #{inspect(name)} #{inspect(module)}.handle_info/2 threw " <>
+          "#{kind}: #{inspect(callback_failure_kind(reason))}\n" <>
+          redacted_stacktrace(__STACKTRACE__)
+      )
+
+      {:noreply, state}
+  end
+
+  defp normalize_decision({:noreply, _state} = decision, _name, _module, _callback, _old_state),
+    do: decision
+
+  defp normalize_decision({:halt, _state} = decision, _name, _module, _callback, _old_state),
+    do: decision
+
+  defp normalize_decision(
+         {:prompt, prompt, _state} = decision,
+         _name,
+         _module,
+         _callback,
+         _old_state
+       )
+       when is_binary(prompt),
+       do: decision
+
+  defp normalize_decision(_decision, name, module, callback, old_state) do
+    arity = if callback in [:handle_event, :handle_info], do: 2, else: 3
+
+    Logger.error(
+      "GenAgent #{inspect(name)} #{inspect(module)}.#{callback}/#{arity} returned unexpected shape"
+    )
+
+    {:noreply, old_state}
+  end
+
   # ---------------------------------------------------------------------------
-  # Lifecycle hook wrappers. Each wraps a user callback in try/rescue/catch
-  # per the semantics in design/001-lifecycle-hooks.md:
+  # Lifecycle hook wrappers catch raises, throws, and exits.
+  # See design/005-lifecycle-hooks.md for the design and current contracts:
   #
-  #   pre_run raise   -> {:crashed, ex}           (server stops)
-  #   pre_turn raise  -> :skip                    (skip turn, back to idle)
-  #   post_turn raise -> {:ok, state}             (log + continue transition)
-  #   post_run raise  -> :ok                      (log + terminate normally)
+  #   pre_run failure   -> {:crashed, failure}   (error log; server stops)
+  #   pre_turn failure  -> {:crashed, kind}      (warning log; reject dispatch)
+  #   post_turn failure -> {:ok, state}          (warning log; keep transition)
+  #   post_run failure  -> :ok                   (warning log; complete halt)
   # ---------------------------------------------------------------------------
 
-  defp safely_pre_run(module, state) do
+  defp safely_pre_run(name, module, state) do
     if function_exported?(module, :pre_run, 1) do
       try do
         module.pre_run(state)
       rescue
         e ->
-          require Logger
-          Logger.error("GenAgent pre_run/1 raised #{inspect(callback_failure_kind(e))}")
+          log_hook_failure(:error, name, module, "pre_run/1", :error, e, __STACKTRACE__)
           {:crashed, e}
       catch
         kind, reason ->
-          require Logger
-
-          Logger.error(
-            "GenAgent pre_run/1 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
-          )
+          log_hook_failure(:error, name, module, "pre_run/1", kind, reason, __STACKTRACE__)
 
           {:crashed, {kind, reason}}
       end
@@ -1575,53 +2096,47 @@ defmodule GenAgent.Server do
     end
   end
 
-  defp safely_pre_turn(module, prompt, state) do
+  defp safely_pre_turn(name, module, prompt, state) do
     if function_exported?(module, :pre_turn, 2) do
       try do
-        module.pre_turn(prompt, state)
+        {:returned, module.pre_turn(prompt, state)}
       rescue
         e ->
-          require Logger
+          log_hook_failure(:warning, name, module, "pre_turn/2", :error, e, __STACKTRACE__)
 
-          Logger.error(
-            "GenAgent pre_turn/2 raised #{inspect(callback_failure_kind(e))} -- skipping turn"
-          )
-
-          {:skip, state}
+          {:crashed, callback_failure_kind(e)}
       catch
         kind, reason ->
-          require Logger
+          log_hook_failure(:warning, name, module, "pre_turn/2", kind, reason, __STACKTRACE__)
 
-          Logger.error(
-            "GenAgent pre_turn/2 threw #{kind}: #{inspect(callback_failure_kind(reason))} -- skipping turn"
-          )
-
-          {:skip, state}
+          {:crashed, callback_failure_kind(reason)}
       end
     else
-      {:ok, prompt, state}
+      {:returned, {:ok, prompt, state}}
     end
   end
 
-  defp safely_post_turn(module, outcome, ref, state) do
+  defp safely_post_turn(name, module, outcome, ref, state) do
     if function_exported?(module, :post_turn, 3) do
       try do
         case module.post_turn(outcome, ref, state) do
-          {:ok, new_state} -> {:ok, new_state}
-          _other -> {:ok, state}
+          {:ok, new_state} ->
+            {:ok, new_state}
+
+          _other ->
+            Logger.warning(
+              "GenAgent #{inspect(name)} #{inspect(module)}.post_turn/3 returned unexpected shape"
+            )
+
+            {:ok, state}
         end
       rescue
         e ->
-          require Logger
-          Logger.error("GenAgent post_turn/3 raised #{inspect(callback_failure_kind(e))}")
+          log_hook_failure(:warning, name, module, "post_turn/3", :error, e, __STACKTRACE__)
           {:ok, state}
       catch
         kind, reason ->
-          require Logger
-
-          Logger.error(
-            "GenAgent post_turn/3 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
-          )
+          log_hook_failure(:warning, name, module, "post_turn/3", kind, reason, __STACKTRACE__)
 
           {:ok, state}
       end
@@ -1630,23 +2145,18 @@ defmodule GenAgent.Server do
     end
   end
 
-  defp safely_post_run(module, state) do
+  defp safely_post_run(name, module, state) do
     if function_exported?(module, :post_run, 1) do
       try do
         module.post_run(state)
         :ok
       rescue
         e ->
-          require Logger
-          Logger.error("GenAgent post_run/1 raised #{inspect(callback_failure_kind(e))}")
+          log_hook_failure(:warning, name, module, "post_run/1", :error, e, __STACKTRACE__)
           :ok
       catch
         kind, reason ->
-          require Logger
-
-          Logger.error(
-            "GenAgent post_run/1 threw #{kind}: #{inspect(callback_failure_kind(reason))}"
-          )
+          log_hook_failure(:warning, name, module, "post_run/1", kind, reason, __STACKTRACE__)
 
           :ok
       end
@@ -1655,20 +2165,46 @@ defmodule GenAgent.Server do
     end
   end
 
-  # Centralized halt transition. Fires post_run hook with the final
-  # state, then emits the :halted telemetry event, then returns data
-  # with halted: true. All clean-halt sites funnel through here so
-  # post_run has exactly one call site.
+  defp log_hook_failure(level, name, module, callback, kind, reason, stacktrace) do
+    failure =
+      if kind == :error,
+        do: "raised #{inspect(callback_failure_kind(reason))}",
+        else: "threw #{kind}: #{inspect(callback_failure_kind(reason))}"
+
+    Logger.log(
+      level,
+      "GenAgent #{inspect(name)} #{inspect(module)}.#{callback} #{failure}\n" <>
+        redacted_stacktrace(stacktrace)
+    )
+  end
+
+  # Centralized halt transition. Stop dispatch before draining, so nested
+  # halt decisions cannot fire completion hooks partway through the batch.
+  # All buffered notifications run before post_run and :halted observe the
+  # final state. All clean-halt sites funnel through this one hook call site.
   defp transition_to_halted(%Data{halted: true} = data), do: data
 
   defp transition_to_halted(%Data{} = data) do
-    :ok = safely_post_run(data.agent_module, data.agent_state)
-    data = fail_halt_aware_queued(data)
+    # Release doomed tells before notification-generated prompts use capacity.
+    data = fail_halt_aware_queued(%{data | halted: true, halt_pending: false})
+    data = drain_pending_events(data)
+    :ok = safely_post_run(data.name, data.agent_module, data.agent_state)
     emit_halted(data.name, data.agent_state)
-    %{data | halted: true}
+    data
   end
 
   defp fail_halt_aware_queued(%Data{} = data) do
+    data =
+      case data.self_chain do
+        {:retry, _, {:tell, _, :fail} = kind, ref, attempt} ->
+          emit_turn_rejected(data.name, ref, kind, :halted, attempt)
+          {data, []} = record_error(data, %{kind: kind, request_ref: ref}, :halted)
+          %{data | self_chain: nil, stream_recipients: Map.delete(data.stream_recipients, ref)}
+
+        _ ->
+          data
+      end
+
     {remaining, data} =
       Enum.reduce(:queue.to_list(data.mailbox), {[], data}, fn
         {ref, {:tell, recipient, :fail} = kind, prompt}, {remaining, data} ->
@@ -1691,12 +2227,12 @@ defmodule GenAgent.Server do
   end
 
   # Drain pending_events synchronously (called from finish_turn /
-  # finish_error before transitioning to :idle). Each buffered event
+  # finish_error before transitioning to :idle). Each buffered notification
   # is processed against the current data.agent_state. Events that
   # return {:prompt, ..., state} enqueue the prompt to the mailbox so
   # it will be dispatched after the upcoming :idle transition. Events
   # that return {:halt, state} set halted: true but drain continues
-  # (subsequent events still get their handle_event called so their
+  # (subsequent items still get their callbacks called so their
   # state mutations are not lost).
   defp drain_pending_events(%Data{} = data) do
     case :queue.out(data.pending_events) do
@@ -1716,7 +2252,16 @@ defmodule GenAgent.Server do
   end
 
   defp apply_pending_event(data, event) do
-    case safely_handle_event(data.agent_module, event, data.agent_state) do
+    decision =
+      case event do
+        %PendingInfo{message: message} ->
+          safely_handle_info(data.name, data.agent_module, message, data.agent_state)
+
+        notification ->
+          safely_handle_event(data.name, data.agent_module, notification, data.agent_state)
+      end
+
+    case decision do
       {:noreply, new_state} ->
         %{data | agent_state: new_state}
 
@@ -1737,7 +2282,7 @@ defmodule GenAgent.Server do
   defp reject_generated_prompt(data, request_ref, reason) do
     emit_prompt_error(data.name, request_ref, reason, data.agent_state)
 
-    case safely_handle_error(data.agent_module, request_ref, reason, data.agent_state) do
+    case safely_handle_error(data.name, data.agent_module, request_ref, reason, data.agent_state) do
       {:noreply, new_state} ->
         %{data | agent_state: new_state}
 
@@ -1763,6 +2308,8 @@ defmodule GenAgent.Server do
   # ---------------------------------------------------------------------------
 
   defp finish_turn(data, current, response, new_session, new_agent_state) do
+    response = %{response | prompt: current.prompt}
+
     decision =
       data.agent_module.handle_response(current.request_ref, response, new_agent_state)
 
@@ -1773,6 +2320,7 @@ defmodule GenAgent.Server do
 
     {:ok, hooked_state} =
       safely_post_turn(
+        data.name,
         data.agent_module,
         {:ok, response},
         current.request_ref,
@@ -1780,6 +2328,8 @@ defmodule GenAgent.Server do
       )
 
     {data, reply_actions} = record_success(data, current, response)
+
+    data = retire_task(data, current)
 
     data = %{
       data
@@ -1790,16 +2340,20 @@ defmodule GenAgent.Server do
 
     case transition do
       :noreply ->
-        data = drain_pending_events(data)
+        data = data |> drain_pending_events() |> finish_external_halt()
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       {:prompt, next_prompt} ->
-        data = drain_pending_events(accept_self_chain(data, next_prompt))
+        data =
+          data
+          |> accept_self_chain(next_prompt)
+          |> drain_pending_events()
+          |> finish_external_halt()
+
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       :halt ->
         data = transition_to_halted(data)
-        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
     end
   end
@@ -1813,11 +2367,21 @@ defmodule GenAgent.Server do
 
   defp finish_error(data, current, reason) do
     duration_ms = max(System.monotonic_time(:millisecond) - current.started_at, 0)
-    emit_prompt_error(data.name, current.request_ref, reason, data.agent_state, duration_ms)
+
+    emit_prompt_error(
+      data.name,
+      current.request_ref,
+      reason,
+      data.agent_state,
+      duration_ms,
+      current.attempt
+    )
+
     emit_turn_error(data.name, current, reason, duration_ms)
 
     decision =
       safely_handle_error(
+        data.name,
         data.agent_module,
         current.request_ref,
         reason,
@@ -1828,38 +2392,84 @@ defmodule GenAgent.Server do
 
     {:ok, hooked_state} =
       safely_post_turn(
+        data.name,
         data.agent_module,
         {:error, reason},
         current.request_ref,
         decision_state
       )
 
-    {data, reply_actions} = record_error(data, current, reason)
-
+    data = retire_task(data, current)
     data = %{data | agent_state: hooked_state, current_request: nil}
+
+    {data, reply_actions, owned_retry?} =
+      record_or_enqueue_error(data, current, reason, transition)
 
     case transition do
       :noreply ->
-        data = drain_pending_events(data)
+        data = data |> drain_pending_events() |> finish_external_halt()
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       {:prompt, next_prompt} ->
-        data = drain_pending_events(accept_self_chain(data, next_prompt))
+        data = if owned_retry?, do: data, else: accept_self_chain(data, next_prompt)
+        data = data |> drain_pending_events() |> finish_external_halt()
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       :halt ->
         data = transition_to_halted(data)
-        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
     end
   end
 
-  defp safely_handle_error(module, ref, reason, state) do
+  defp finish_external_halt(%Data{halt_pending: true, draining: false} = data),
+    do: transition_to_halted(data)
+
+  defp finish_external_halt(%Data{} = data), do: %{data | halt_pending: false}
+
+  defp record_or_enqueue_error(%Data{draining: false} = data, current, reason, {:prompt, prompt})
+       when reason != :interrupted do
+    if request_origin(current.kind) in [:ask, :tell] do
+      retry = {:retry, prompt, current.kind, current.request_ref, current.attempt + 1}
+
+      case enqueue_self_chain(data, retry) do
+        {:ok, queued} ->
+          {retain_retry_stream_recipient(queued, current), [], true}
+
+        {:error, overload} ->
+          {data, actions} = record_error(data, current, reason)
+          {reject_generated_prompt(data, make_ref(), overload), actions, true}
+      end
+    else
+      {data, actions} = record_error(data, current, reason)
+      {data, actions, false}
+    end
+  end
+
+  defp record_or_enqueue_error(data, current, reason, _transition) do
+    {data, actions} = record_error(data, current, reason)
+    {data, actions, false}
+  end
+
+  defp retain_retry_stream_recipient(data, %{stream_to: nil}), do: data
+
+  defp retain_retry_stream_recipient(data, %{stream_to: stream_to, request_ref: ref}) do
+    %{data | stream_recipients: Map.put(data.stream_recipients, ref, stream_to)}
+  end
+
+  defp safely_handle_error(name, module, ref, reason, state) do
     if function_exported?(module, :handle_error, 3) do
       try do
         module.handle_error(ref, reason, state)
+        |> normalize_decision(name, module, :handle_error, state)
       catch
-        _, _ -> {:noreply, state}
+        kind, failure ->
+          Logger.error(
+            "GenAgent #{inspect(name)} #{inspect(module)}.handle_error/3 failed " <>
+              "(#{kind}: #{inspect(callback_failure_kind(failure))})\n" <>
+              redacted_stacktrace(__STACKTRACE__)
+          )
+
+          {:noreply, state}
       end
     else
       {:noreply, state}
@@ -1929,15 +2539,35 @@ defmodule GenAgent.Server do
   end
 
   defp store_tell_result(%Data{} = data, ref, result) do
-    tell_results = Map.put(data.tell_results, ref, result)
-    order = :queue.in(ref, data.tell_result_order)
+    previous = Map.get(data.tell_results, ref)
+    previous_bytes = if previous, do: :erlang.external_size({ref, previous}), else: 0
 
-    if map_size(tell_results) > data.max_tell_results do
-      {{:value, oldest}, order} = :queue.out(order)
-      tell_results = Map.delete(tell_results, oldest)
-      %{data | tell_results: tell_results, tell_result_order: order}
+    %{
+      data
+      | tell_results: Map.put(data.tell_results, ref, result),
+        tell_result_order:
+          if(previous, do: data.tell_result_order, else: :queue.in(ref, data.tell_result_order)),
+        tell_result_bytes:
+          data.tell_result_bytes + :erlang.external_size({ref, result}) - previous_bytes
+    }
+    |> prune_tell_results()
+  end
+
+  defp prune_tell_results(%Data{} = data) do
+    if map_size(data.tell_results) > data.max_tell_results or
+         data.tell_result_bytes > data.max_tell_result_bytes do
+      {{:value, oldest}, order} = :queue.out(data.tell_result_order)
+      result = Map.fetch!(data.tell_results, oldest)
+
+      %{
+        data
+        | tell_results: Map.delete(data.tell_results, oldest),
+          tell_result_order: order,
+          tell_result_bytes: data.tell_result_bytes - :erlang.external_size({oldest, result})
+      }
+      |> prune_tell_results()
     else
-      %{data | tell_results: tell_results, tell_result_order: order}
+      data
     end
   end
 
@@ -1947,28 +2577,48 @@ defmodule GenAgent.Server do
     |> Enum.any?(fn {r, _kind, _prompt} -> r == ref end)
   end
 
-  defp safely_call(module, fun, args) do
+  defp safely_call(name, module, fun, args) do
     if function_exported?(module, fun, length(args)) do
       try do
         apply(module, fun, args)
       catch
-        _, _ -> :ok
+        kind, failure ->
+          Logger.error(
+            "GenAgent #{inspect(name)} #{inspect(module)}.#{fun}/#{length(args)} failed " <>
+              "(#{kind}: #{inspect(callback_failure_kind(failure))})\n" <>
+              redacted_stacktrace(__STACKTRACE__)
+          )
+
+          :ok
       end
     else
       :ok
     end
   end
 
+  defp redacted_stacktrace(stacktrace) do
+    stacktrace
+    |> Enum.map(fn
+      {module, function, args, info} when is_list(args) ->
+        {module, function, length(args), info}
+
+      frame ->
+        frame
+    end)
+    |> Exception.format_stacktrace()
+  end
+
   # ---------------------------------------------------------------------------
   # Telemetry
   # ---------------------------------------------------------------------------
 
-  defp emit_prompt_start(name, ref, prompt, original_prompt, agent_state) do
+  defp emit_prompt_start(name, ref, prompt, original_prompt, agent_state, attempt) do
     rewritten = not is_nil(original_prompt) and original_prompt != prompt
 
     :telemetry.execute([:gen_agent, :prompt, :start], %{system_time: System.system_time()}, %{
       agent: name,
       ref: ref,
+      attempt: attempt,
       prompt: prompt,
       original_prompt: original_prompt || prompt,
       rewritten: rewritten,
@@ -1976,15 +2626,16 @@ defmodule GenAgent.Server do
     })
   end
 
-  defp emit_prompt_stop(name, ref, duration_ms, agent_state) do
+  defp emit_prompt_stop(name, ref, duration_ms, agent_state, attempt) do
     :telemetry.execute([:gen_agent, :prompt, :stop], %{duration: duration_ms}, %{
       agent: name,
       ref: ref,
+      attempt: attempt,
       agent_state: agent_state
     })
   end
 
-  defp emit_prompt_error(name, ref, reason, agent_state, duration_ms \\ nil) do
+  defp emit_prompt_error(name, ref, reason, agent_state, duration_ms \\ nil, attempt \\ 1) do
     measurements = %{system_time: System.system_time()}
 
     measurements =
@@ -1993,15 +2644,17 @@ defmodule GenAgent.Server do
     :telemetry.execute([:gen_agent, :prompt, :error], measurements, %{
       agent: name,
       ref: ref,
+      attempt: attempt,
       reason: reason,
       agent_state: agent_state
     })
   end
 
-  defp emit_turn_start(name, ref, kind) do
+  defp emit_turn_start(name, ref, kind, attempt) do
     :telemetry.execute([:gen_agent, :turn, :start], %{system_time: System.system_time()}, %{
       agent: name,
       ref: ref,
+      attempt: attempt,
       origin: request_origin(kind)
     })
   end
@@ -2012,6 +2665,7 @@ defmodule GenAgent.Server do
     :telemetry.execute([:gen_agent, :turn, :stop], %{duration_ms: duration_ms}, %{
       agent: name,
       ref: current.request_ref,
+      attempt: current.attempt,
       origin: request_origin(current.kind)
     })
   end
@@ -2020,24 +2674,27 @@ defmodule GenAgent.Server do
     :telemetry.execute([:gen_agent, :turn, :error], %{duration_ms: duration_ms}, %{
       agent: name,
       ref: current.request_ref,
+      attempt: current.attempt,
       origin: request_origin(current.kind),
       reason_kind: turn_error_kind(reason)
     })
   end
 
-  defp emit_turn_rejected(name, ref, kind, reason_kind) do
+  defp emit_turn_rejected(name, ref, kind, reason_kind, attempt \\ 1) do
     :telemetry.execute([:gen_agent, :turn, :rejected], %{system_time: System.system_time()}, %{
       agent: name,
       ref: ref,
+      attempt: attempt,
       origin: request_origin(kind),
       reason_kind: reason_kind
     })
   end
 
-  defp emit_turn_cancelled(name, ref, kind, reason_kind) do
+  defp emit_turn_cancelled(name, ref, kind, reason_kind, attempt \\ 1) do
     :telemetry.execute([:gen_agent, :turn, :cancelled], %{system_time: System.system_time()}, %{
       agent: name,
       ref: ref,
+      attempt: attempt,
       origin: request_origin(kind),
       reason_kind: reason_kind
     })
@@ -2079,6 +2736,13 @@ defmodule GenAgent.Server do
     :telemetry.execute([:gen_agent, :halted], %{system_time: System.system_time()}, %{
       agent: name,
       agent_state: agent_state
+    })
+  end
+
+  defp emit_terminated(name, reason) do
+    :telemetry.execute([:gen_agent, :terminated], %{system_time: System.system_time()}, %{
+      agent: name,
+      reason: reason
     })
   end
 end

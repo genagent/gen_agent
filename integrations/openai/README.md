@@ -23,8 +23,8 @@ this backend:
 - Talks HTTP, not a subprocess
 - Has **no tool use** by default (pure text in/text out)
 - Tracks conversation state via the API's server-side
-  `previous_response_id`, so multi-turn works without resending
-  the full history each turn
+  `previous_response_id` by default, or via a local session history
+  when `store: false`
 - Is the simplest backend to use for HTTP-only workflows or when
   you do not want a CLI dependency
 
@@ -34,9 +34,10 @@ This backend targets the **Responses API** (`/v1/responses`), not
 Chat Completions. The Responses API is OpenAI's newer agent-first
 primitive and is a much cleaner fit for `GenAgent`:
 
-- Server-side state via `previous_response_id` means the session
-  struct only has to track one id across turns, not a messages
-  array.
+- With the default `store: true`, server-side state via
+  `previous_response_id` means the session tracks one id across turns.
+  With `store: false`, it keeps input and output items locally and
+  resends them on each turn.
 - Reasoning models (o1/o3/o4/gpt-5) surface reasoning items in the
   output array; this backend ignores them for text extraction but
   surfaces `reasoning_tokens` in the `:usage` event so patterns
@@ -54,12 +55,11 @@ environment, or pass `:api_key` as a backend option.
 
 ## Installation
 
+Add `gen_agent` using the current requirement in the [core installation guide](https://github.com/genagent/gen_agent#installation).
+
 ```elixir
 def deps do
-  [
-    {:gen_agent, "~> 0.3.0"},
-    {:gen_agent_openai, "~> 0.2.0"}
-  ]
+  [{:gen_agent_openai, "~> 0.4.1"}] # x-release-please-version
 end
 ```
 
@@ -76,7 +76,7 @@ defmodule MyApp.Assistant do
   @impl true
   def init_agent(_opts) do
     backend_opts = [
-      instructions: "You are a concise, helpful assistant.",
+      system_prompt: "You are a concise, helpful assistant.",
       max_output_tokens: 512
     ]
 
@@ -100,9 +100,10 @@ IO.puts(response.text)
 
 ## Session continuation
 
-The Responses API is **stateful server-side**. Each response is
-stored for 30 days and can be referenced via `previous_response_id`
-in the next request. This backend threads one id across turns:
+By default this backend sends `store: true`. OpenAI stores each response
+as application state for at least 30 days, so it can be referenced via
+`previous_response_id` in the next request. The backend threads one id
+across turns:
 
 ```elixir
 # Turn 1: fresh conversation, no previous_response_id
@@ -116,15 +117,55 @@ in the next request. This backend threads one id across turns:
 
 The `previous_response_id` lives on the session struct and is
 updated via `update_session/2` when each terminal `:result` event
-lands. `store: true` is sent on every request (the default) so
-responses remain referenceable.
+lands.
+
+Set `store: false` in the backend options to disable response storage:
+
+```elixir
+backend_opts = [system_prompt: "Be concise.", store: false]
+```
+
+The backend then keeps completed input and output items in its local
+session and resends them with each new prompt. It requests encrypted
+reasoning content for models that return reasoning items. No
+`previous_response_id` is sent in this mode. History grows with each
+turn, increasing request size and input-token usage; reset the session
+to discard it. Failed and incomplete turns are not added to history.
+This setting controls response application-state storage, not the
+separate abuse-monitoring logs described in OpenAI's
+[data controls](https://developers.openai.com/api/docs/guides/your-data).
+Use `store: false` explicitly for organizations where OpenAI enforces
+Zero Data Retention, so the backend uses local continuation.
+
+If the API rejects an established chain because the previous response is
+unavailable or the context window is exceeded, the failed turn returns
+`{:error, %GenAgent.Backend.Error{kind: :conversation_lost}}` with the old
+`{:conversation_lost, body}` reason in `:raw`. The backend clears the saved
+`previous_response_id`, so the next prompt starts a fresh conversation
+without losing the agent process or its application state. It does not
+retry the failed prompt automatically. Set `truncation: "auto"` to let the
+API drop older items before the context window fills; the default is the
+API's `"disabled"` behavior. Other HTTP errors retain the chain.
+
+Call `GenAgent.reset_session(name)` between turns to discard the current
+`previous_response_id` or local history and start a fresh conversation on
+the next prompt.
+The agent process and its application state remain in place. Reset returns
+`{:error, :busy}` during an active turn.
+Other HTTP failures use the same error struct with `:status`,
+`:retryable?`, and the original `Req.Response` (including headers) in
+`:raw`. The `:retry_after` field preserves the unparsed `Retry-After`
+header on rate limits. Invalid 200 response bodies are labeled
+`:invalid_response`, separately from exceptions in an injected `:http_fn`.
+When paired with a core version that predates `GenAgent.Backend.Error`,
+this adapter retains its earlier tuple reasons.
 
 ## Instructions do not persist across turns
 
 OpenAI's docs are explicit: instructions from a prior turn do
 **not** carry over when you chain via `previous_response_id`. This
-backend therefore resends `:instructions` on every request when
-the option is set. The per-turn token cost is tiny, but the
+backend therefore resends the `:system_prompt` option as API `instructions`
+on every request when the option is set. The per-turn token cost is tiny, but the
 invariant matters -- a future optimization that "only sends
 instructions once" would silently break system-prompt behavior on
 every turn after the first.
@@ -136,24 +177,56 @@ every turn after the first.
   returns `{:error, :missing_api_key}` (through `GenAgent.start_agent/2`,
   `{:error, {:backend_start_failed, :missing_api_key}}`), unless a one-arity
   `:http_fn` is supplied.
+- `:base_url` -- API prefix, default `"https://api.openai.com/v1"`.
+  The backend appends `/responses`. HTTPS is required except for loopback
+  HTTP. The configured host receives the API key and conversation content.
+- `:headers` -- additional headers as a string-keyed map or list of
+  `{name, value}` pairs. Auth, content type, and transport headers cannot
+  be overridden. Values must contain only printable ASCII or horizontal tabs.
+- `:request_fields` -- extra JSON body fields such as `%{temperature: 0.2}`.
+  Backend-owned fields (input, storage, continuation, reasoning, streaming,
+  and tools) cannot be overridden.
 - `:model` -- model name. Defaults to `"gpt-5"`.
-- `:instructions` -- system prompt (string). Resent every turn.
+- `:store` -- whether OpenAI stores responses for server-side continuation.
+  Defaults to `true`. Set `false` to replay local context each turn.
+- `:system_prompt` -- system prompt (string). Resent every turn as API
+  `instructions`; `:instructions` and `:system` remain deprecated aliases.
 - `:reasoning_effort` -- an atom or string passed through as
   `reasoning.effort` on reasoning models (for example `:low`,
   `:medium`, `:high`), or `nil` for the model default. The backend
   does not validate it; accepted values depend on the model.
+
 - `:max_output_tokens` -- cap on output tokens per turn. Defaults
-  to `nil` (model default).
+  to `nil` (model default). `:max_tokens` remains a deprecated alias.
+- `:truncation` -- `"auto"` or `"disabled"`. Omitted by default; the API
+  then uses `"disabled"`. `"auto"` drops older conversation items to fit
+  the context window.
 - `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
   to `60_000`. The 60-second default can be short for long reasoning turns.
 - `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults
-  to `nil` (Req's default).
+  to `nil` (Req's default). Configure it when starting a named Finch pool;
+  `:connect_timeout` cannot be combined with `finch: [name: MyFinch]`.
+- `:finch` -- per-session Finch options. Use
+  `finch: [size: 100, pool_timeout: 20_000]` for a dynamic pool, or start
+  a Finch child with a larger pool and pass `finch: [name: MyFinch]`.
+  `:count` is also supported for dynamic pools; `:pool_timeout` is accepted
+  with either kind. Req's default HTTP/1 pool has 50 connections per host
+  and a 5-second checkout timeout. Named pools set connection options at
+  startup; pool `:size` and `:count` cannot be combined with `:name`.
+  Dynamic pools with identical pool configuration are shared across sessions;
+  `:size` limits connections per shard.
 - `:http_fn` -- a 1-arity function
   `(request_map) -> {:ok, response_map} | {:error, term}`
   that replaces the default `Req`-backed HTTP call. Intended for
   tests that want to stub out the API.
 
 See `GenAgent.Backends.OpenAI` for the full module docs.
+Unknown keys fail session startup with `{:unknown_option, key}`; conflicting
+values supplied through aliases fail with `{:conflicting_options, keys}`.
+
+When the API includes `usage.input_tokens_details.cached_tokens`, the
+normalized `Response.usage.cached_input_tokens` reports that subset of
+`input_tokens`. It is not added to the total a second time.
 
 ## Why no tool use?
 

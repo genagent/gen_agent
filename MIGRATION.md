@@ -1,5 +1,45 @@
 # Upgrading GenAgent
 
+## Unreleased: common backend errors
+
+The Claude, Codex, Anthropic HTTP, and OpenAI HTTP adapters now pass
+`%GenAgent.Backend.Error{}` to `GenAgent.ask/3`, `poll/3`, and
+`handle_error/3` for backend failures when paired with a core version that
+provides the struct. Match on `kind`, `retryable?`, `status`, or
+`retry_after` instead of a provider-specific tuple, string, or map. The
+original reason remains in `raw`. `retry_after` is the unparsed HTTP header
+value, either seconds or an HTTP date; no automatic retry is performed.
+Core-generated errors such as `:no_terminal_event` keep their existing shape.
+
+Adapters still return their previous error values when paired with an older
+published core that does not provide `GenAgent.Backend.Error`. Applications
+supporting both core generations should handle both shapes until they raise
+their minimum core requirement.
+
+## Unreleased: caller-owned error retries
+
+`handle_error/3` returning `{:prompt, prompt, state}` now retries an ask or tell
+for its original caller. Previously the first error was delivered immediately
+and the follow-up result was discarded. Ask now waits for the final outcome;
+poll remains pending across attempts, and completion recipients receive exactly
+one final outcome. Use `{:noreply, state}` to deliver an error immediately.
+Keep retry budgets in agent state; there is no built-in cap, and the watchdog
+restarts for each attempt.
+Timer-based retries that return `{:noreply, state}` and later prompt from
+`handle_event/2` remain separate turns: the original request receives its
+first error. The Retry guide shows both forms.
+
+Telemetry consumers must correlate dispatched start/terminal events by
+`(ref, attempt)`, rather than ref alone. Each attempt retains the original
+ask/tell origin and request ref. `turn.*` and `prompt.*` start, stop, and error
+metadata include the 1-based attempt.
+
+Interruptions still end the caller's request. A subsequent prompt from the
+error callback is independent, as are event/self-chain error follow-ups and
+all response callback follow-ups. Pending retries survive halt for asks,
+plain tells, and `on_halt: :queue`; `on_halt: :fail` receives `:halted`.
+A halted pending tell retry can be cancelled by its original ref.
+
 ## Runtime changes since 0.2.0
 
 The core package and its integrations have separate versions. Check the
@@ -144,3 +184,81 @@ directory. The sibling Mix projects resolve core and each other by path.
 For a publishable archive, set `GEN_AGENT_HEX=1` so the dependencies resolve
 from Hex instead. See [RELEASING.md](https://github.com/genagent/gen_agent/blob/main/RELEASING.md)
 for release order and tags.
+
+## Depending on a package from another project
+
+Pick the form that matches how the consumer gets the code. The examples use
+`gen_agent_claude`; substitute the package name and directory from the table
+above, and check the package's `mix.exs` for its current version.
+
+### Published Hex package
+
+This is the supported choice for applications. No environment variable is
+needed, and `gen_agent` resolves from Hex through the package's requirement.
+
+```elixir
+{:gen_agent_claude, "~> 0.2.2"}
+```
+
+### Git dependency on one package (sparse)
+
+Mix can fetch a single directory of a Git repository with `:sparse`:
+
+```elixir
+{:gen_agent_claude,
+ git: "https://github.com/genagent/gen_agent.git",
+ sparse: "integrations/claude"}
+```
+
+A sparse checkout contains only that directory, so the core project files are
+absent. The package's default `gen_agent` dependency (`path: "../.."`) points
+at the checkout root, which has no core `mix.exs`. Set `GEN_AGENT_HEX=1` so the package takes `gen_agent` from Hex. The
+variable is read by the package's `mix.exs` each time Mix loads it, so export
+it for every Mix command in the consumer, not only `mix deps.get`:
+
+```sh
+export GEN_AGENT_HEX=1
+mix deps.get
+mix compile
+```
+
+Without it, `mix deps.get` succeeds but `mix compile` fails: Mix cannot
+compile `:gen_agent` because there is no `mix.exs` at `../..`.
+Pin a branch, tag, or commit with `ref:`, `branch:`, or `tag:` when the
+consumer needs a reproducible source. A git dependency still resolves
+`gen_agent` from Hex, so the requirement in the package's `mix.exs` decides
+which core version is used, not the commit of the core source in the same
+repository.
+
+### Git dependency with a full checkout (subdir)
+
+`:subdir` fetches the whole repository and uses a directory inside it as the
+Mix project:
+
+```elixir
+{:gen_agent_claude,
+ git: "https://github.com/genagent/gen_agent.git",
+ subdir: "integrations/claude"}
+```
+
+Here `../..` resolves to the root of the fetched repository, which contains
+the core source, so the default path dependency can be satisfied without
+`GEN_AGENT_HEX=1`. Set `GEN_AGENT_HEX=1` to use the published core instead, as
+in the sparse case.
+
+### Local path dependency
+
+When working in a full checkout of this repository, point at the package
+directory:
+
+```elixir
+{:gen_agent_claude, path: "../gen_agent/integrations/claude"}
+```
+
+The package finds the core at `../..` inside that checkout, so
+`GEN_AGENT_HEX=1` is not needed. This is a source checkout workflow for
+developing across packages. Do not use it for an application that is
+published or deployed from a machine without the checkout; use the Hex
+form there. If the consumer also depends on `gen_agent` directly, declare it
+with the same path (`path: "../gen_agent"`) or with `override: true` so the
+two declarations agree.

@@ -32,7 +32,7 @@ defmodule GenAgentEnsemble.Strategies.UsageTest do
         Supervisor ->
           [
             coordinator: {"a", StubAgent, []},
-            worker_template: {"worker", StubAgent, []},
+            worker_template: {"worker", StubAgent, [backend: GenAgent.Backends.Mock]},
             decomposer: fn _ -> ["one", "two"] end
           ]
       end

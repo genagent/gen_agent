@@ -10,8 +10,21 @@ defmodule GenAgentEnsemble.RunFencingTest do
 
     on_exit(fn ->
       case Registry.lookup(GenAgentEnsemble.Registry, name) do
-        [{server, _}] -> if Process.alive?(server), do: Ensemble.stop(name)
-        [] -> :ok
+        [{server, _}] ->
+          try do
+            GenServer.stop(server, :normal, 10_000)
+          catch
+            # The linked test owner may already have begun session shutdown.
+            :exit, {{reason, {:sys, :terminate, _}}, {GenServer, :stop, _}}
+            when reason in [:noproc, :normal, :shutdown] ->
+              :ok
+
+            :exit, {reason, _} when reason in [:noproc, :normal, :shutdown] ->
+              :ok
+          end
+
+        [] ->
+          :ok
       end
     end)
 

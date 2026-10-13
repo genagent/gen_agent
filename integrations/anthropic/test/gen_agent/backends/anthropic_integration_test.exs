@@ -7,6 +7,8 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
   """
 
   use ExUnit.Case, async: true
+  @compile {:no_warn_undefined, GenAgent}
+  alias GenAgent.Test.BackendErrorAssertions, as: Errors
 
   @moduletag capture_log: true
 
@@ -14,20 +16,26 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
     use GenAgent
 
     defmodule State do
-      defstruct responses: []
+      defstruct responses: [], test_pid: nil
     end
 
     @impl true
     def init_agent(opts) do
       backend_opts =
-        Keyword.take(opts, [:api_key, :model, :max_tokens, :system, :http_fn])
+        Keyword.take(opts, [:api_key, :model, :max_tokens, :system, :max_history_turns, :http_fn])
 
-      {:ok, backend_opts, %State{}}
+      {:ok, backend_opts, %State{test_pid: opts[:test_pid]}}
     end
 
     @impl true
     def handle_response(_ref, response, %State{} = state) do
       {:noreply, %{state | responses: state.responses ++ [response]}}
+    end
+
+    @impl true
+    def handle_error(_ref, reason, %State{test_pid: test_pid} = state) do
+      if test_pid, do: send(test_pid, {:anthropic_error, reason})
+      {:noreply, state}
     end
   end
 
@@ -47,6 +55,15 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
   end
 
   defp unique_name(prefix), do: "#{prefix}-#{System.unique_integer([:positive])}"
+
+  defp assert_unanswered_outcome(name, :ok) do
+    assert {:ok, %{text: ""}} = GenAgent.ask(name, "unanswered")
+  end
+
+  defp assert_unanswered_outcome(name, reason) do
+    assert {:error, actual} = GenAgent.ask(name, "unanswered")
+    Errors.assert_error(actual, :anthropic, reason)
+  end
 
   defp start_anthropic_agent(http_fn, extra_opts \\ []) do
     name = unique_name("anthropic")
@@ -73,6 +90,36 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
   end
 
   describe "round trip through GenAgent.ask/2" do
+    test "bounds completed history and resets it in place" do
+      observer = self()
+
+      http_fn = fn request ->
+        send(observer, {:request_messages, request.body.messages})
+        prompt = List.last(request.body.messages).content
+        {:ok, api_response("reply to #{prompt}")}
+      end
+
+      name = start_anthropic_agent(http_fn, max_history_turns: 1)
+      assert {:ok, _} = GenAgent.ask(name, "one")
+      assert {:ok, _} = GenAgent.ask(name, "two")
+      assert {:ok, _} = GenAgent.ask(name, "three")
+
+      assert_receive {:request_messages, [%{content: "one"}]}
+
+      assert_receive {:request_messages,
+                      [%{content: "one"}, %{content: "reply to one"}, %{content: "two"}]}
+
+      assert_receive {:request_messages,
+                      [%{content: "two"}, %{content: "reply to two"}, %{content: "three"}]}
+
+      if function_exported?(GenAgent, :reset_session, 1) do
+        assert :ok = GenAgent.reset_session(name)
+        assert {:ok, _} = GenAgent.ask(name, "four")
+        assert_receive {:request_messages, [%{content: "four"}]}
+        assert length(GenAgent.status(name).agent_state.responses) == 4
+      end
+    end
+
     test "assembles a Response from the faked API call" do
       http_fn = fn _req -> {:ok, api_response("hello from the API")} end
 
@@ -148,14 +195,14 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
       assert r1.session_id == r2.session_id
     end
 
-    for {scenario, response_opts} <- [
-          {"empty end_turn", [content: []]},
-          {"empty refusal", [content: [], stop_reason: "refusal"]},
+    for {scenario, response_opts, expected} <- [
+          {"empty end_turn", [content: []], :ok},
+          {"empty refusal", [content: [], stop_reason: "refusal"], {:refusal, nil}},
           {"thinking-only max_tokens",
            [
              content: [%{"type" => "thinking", "thinking" => "hmm", "signature" => "sig"}],
              stop_reason: "max_tokens"
-           ]}
+           ], {:response_incomplete, %{stop_reason: "max_tokens", stop_details: nil}}}
         ] do
       test "drops the unanswered turn after #{scenario}" do
         test_pid = self()
@@ -176,7 +223,8 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
         name = start_anthropic_agent(http_fn)
 
         assert {:ok, %{text: "first reply"}} = GenAgent.ask(name, "first")
-        assert {:ok, %{text: ""}} = GenAgent.ask(name, "unanswered")
+        assert_unanswered_outcome(name, unquote(Macro.escape(expected)))
+
         assert {:ok, %{text: "next reply"}} = GenAgent.ask(name, "next")
 
         assert_receive {^ref, [%{role: "user", content: "first"}]}
@@ -197,12 +245,75 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
       end
     end
 
+    test "refusal, token limit, and context limit call handle_error and preserve history" do
+      test_pid = self()
+      ref = make_ref()
+      details = %{"type" => "refusal", "category" => "general_harms"}
+
+      failures = %{
+        "refused" => {"refusal", "", details},
+        "truncated" => {"max_tokens", "partial answer", nil},
+        "context" => {"model_context_window_exceeded", "partial answer", nil}
+      }
+
+      http_fn = fn req ->
+        messages = req.body.messages
+        send(test_pid, {ref, messages})
+
+        case List.last(messages).content do
+          "first" ->
+            {:ok, api_response("first reply")}
+
+          "next" ->
+            {:ok, api_response("next reply")}
+
+          prompt ->
+            {reason, text, stop_details} = Map.fetch!(failures, prompt)
+
+            {:ok,
+             api_response(text, stop_reason: reason)
+             |> Map.put("stop_details", stop_details)}
+        end
+      end
+
+      name = start_anthropic_agent(http_fn, test_pid: test_pid)
+      assert {:ok, %{text: "first reply"}} = GenAgent.ask(name, "first")
+
+      for {prompt, expected} <- [
+            {"refused", {:refusal, details}},
+            {"truncated",
+             {:response_incomplete, %{stop_reason: "max_tokens", stop_details: nil}}},
+            {"context",
+             {:response_incomplete,
+              %{stop_reason: "model_context_window_exceeded", stop_details: nil}}}
+          ] do
+        assert {:error, reason} = GenAgent.ask(name, prompt)
+        Errors.assert_error(reason, :anthropic, expected)
+        assert_receive {:anthropic_error, callback_reason}
+        Errors.assert_error(callback_reason, :anthropic, expected)
+      end
+
+      assert {:ok, %{text: "next reply"}} = GenAgent.ask(name, "next")
+
+      assert_receive {^ref, [%{role: "user", content: "first"}]}
+
+      for prompt <- ["refused", "truncated", "context", "next"] do
+        assert_receive {^ref,
+                        [
+                          %{role: "user", content: "first"},
+                          %{role: "assistant", content: "first reply"},
+                          %{role: "user", content: ^prompt}
+                        ]}
+      end
+    end
+
     test "propagates HTTP errors" do
       http_fn = fn _req -> {:error, {:http_error, 401, %{"error" => "invalid api key"}}} end
 
       name = start_anthropic_agent(http_fn)
 
-      assert {:error, {:http_error, 401, _}} = GenAgent.ask(name, "hi")
+      assert {:error, reason} = GenAgent.ask(name, "hi")
+      Errors.assert_error(reason, :anthropic, {:http_error, 401, %{"error" => "invalid api key"}})
     end
 
     test "a transport error keeps the previous completed history" do
@@ -223,7 +334,10 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
       name = start_anthropic_agent(http_fn)
 
       assert {:ok, %{text: "first reply"}} = GenAgent.ask(name, "first")
-      assert {:error, :transport_failure} = GenAgent.ask(name, "failed")
+
+      assert {:error, reason} = GenAgent.ask(name, "failed")
+      Errors.assert_error(reason, :anthropic, :transport_failure)
+
       assert {:ok, %{text: "next reply"}} = GenAgent.ask(name, "next")
 
       assert_receive {^ref, [%{role: "user", content: "first"}]}

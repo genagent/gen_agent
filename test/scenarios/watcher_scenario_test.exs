@@ -67,6 +67,11 @@ defmodule GenAgent.Scenarios.WatcherTest do
         parent: self()
       )
 
+    # Registered before any assertion so a failed test still tears down. Only
+    # this test's uniquely named agent is stopped; an already-stopped agent
+    # returns {:error, :not_found}.
+    on_exit(fn -> GenAgent.stop(name) end)
+
     name
   end
 
@@ -89,8 +94,6 @@ defmodule GenAgent.Scenarios.WatcherTest do
       assert length(s.dispatched) == 1
       assert length(s.ignored) == 1
       assert length(s.responses) == 1
-
-      GenAgent.stop(name)
     end
 
     test "multiple interesting events queue correctly and each dispatches" do
@@ -109,8 +112,6 @@ defmodule GenAgent.Scenarios.WatcherTest do
       s = GenAgent.status(name).agent_state
       assert length(s.dispatched) == 3
       assert s.responses == ["r1", "r2", "r3"]
-
-      GenAgent.stop(name)
     end
 
     test "idle-until-triggered: no turn runs until a notify arrives" do
@@ -126,8 +127,6 @@ defmodule GenAgent.Scenarios.WatcherTest do
       # Now trigger.
       GenAgent.notify(name, {:pr_opened, "alice", "first"})
       assert_receive {:responded, "only-on-trigger"}, 500
-
-      GenAgent.stop(name)
     end
   end
 end

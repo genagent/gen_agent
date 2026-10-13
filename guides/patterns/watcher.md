@@ -32,19 +32,26 @@ sits in `:idle`, and it stays there until `notify/2` is called.
 - **`handle_event` returning `{:prompt, text, state}`** to turn
   an interesting event into a dispatched turn.
 
-## State mutation caveat (pre-v0.2)
+## Admission and state
 
-On gen_agent v0.1, `handle_event/2` state mutations could be
-silently overwritten by an in-flight turn's `handle_response`
-state. That was fixed in the notify-deferral patch (v0.1.1): events
-arriving during `:processing` are buffered into `pending_events`
-and drained synchronously against post-decision state before the
-transition to `:idle`.
+Notifications received during a turn are deferred and handled against
+post-turn state. Pending notifications and prompts are bounded by count
+and bytes (`max_pending_notifications`, `max_pending_prompts`, and their
+byte limits). `notify/2` returns `:ok` even when input is dropped, with
+`[:gen_agent, :input, :rejected]` telemetry. Use `notify_ack/3` for admission
+results. A rejected notification may be safe to retry if it never reached
+`handle_event/2`; a generated prompt rejected after `handle_event/2` is
+already recorded in `failures`, so blind retry would duplicate it. Inspect
+that state or use event IDs before retrying. Admission is not completion:
+a deferred event's generated prompt can later be rejected with
+`{:overloaded, info}` through `handle_error/3`.
 
-**If you're on gen_agent v0.1.1 or later, you can mutate state
-from `handle_event/2` freely.** The example below is conservative
-and only mutates state from `handle_response/3`, which still works
-as a style choice if you want a single place for state writes.
+The example records pending events before dispatch, then records either
+an action or a failure. A rejected new prompt is removed from the tail;
+turns that start consume the head in FIFO order. Failures are retained for
+inspection or explicit replay, without an automatic retry loop. This is
+in-memory history, not durable delivery. Drive this agent only through
+events so unrelated `tell`/`ask` turns cannot consume its pending events.
 
 ## The pattern
 
@@ -67,7 +74,7 @@ defmodule Watcher.Agent do
   use GenAgent
 
   defmodule State do
-    defstruct actions: []
+    defstruct actions: [], pending: [], active: nil, failures: []
   end
 
   @impl true
@@ -87,7 +94,7 @@ defmodule Watcher.Agent do
   @impl true
   def handle_event({:ci_result, :passed}, state), do: {:noreply, state}
 
-  def handle_event({:ci_result, :failed, details}, state) do
+  def handle_event({:ci_result, :failed, details} = event, state) do
     prompt = """
     CI build failed with this error:
 
@@ -96,24 +103,54 @@ defmodule Watcher.Agent do
     Diagnose the likely cause and first debugging step.
     """
 
-    {:prompt, prompt, state}
+    {:prompt, prompt, %{state | pending: state.pending ++ [{event, prompt}]}}
   end
 
-  def handle_event({:pr_opened, author, title}, state) do
+  def handle_event({:pr_opened, author, title} = event, state) do
     prompt = ~s|#{author} just opened a PR titled: "#{title}". Welcome them in one sentence.|
-    {:prompt, prompt, state}
+    {:prompt, prompt, %{state | pending: state.pending ++ [{event, prompt}]}}
   end
 
   def handle_event({:timer, _label}, state), do: {:noreply, state}
 
   def handle_event(_other, state), do: {:noreply, state}
 
+  # A queue rejection happens before pre_turn; an executing turn owns active.
+  # Match the generated prompt so an unrelated direct prompt cannot claim an event.
+  @impl true
+  def pre_turn(prompt, %State{pending: [{event, prompt} | rest]} = state) do
+    {:ok, prompt, %{state | pending: rest, active: event}}
+  end
+
+  # This recipe processes event-generated prompts only. Unmatched direct
+  # prompts are skipped explicitly, rather than claiming a queued event.
+  def pre_turn(_prompt, %State{} = state), do: {:skip, state}
+
   # --- Turn completion ---
 
   @impl true
   def handle_response(_ref, response, %State{} = state) do
-    action = %{text: String.trim(response.text), at: System.system_time(:millisecond)}
-    {:noreply, %{state | actions: state.actions ++ [action]}}
+    action = %{
+      event: state.active,
+      text: String.trim(response.text),
+      at: System.system_time(:millisecond)
+    }
+
+    {:noreply, %{state | active: nil, actions: state.actions ++ [action]}}
+  end
+
+  @impl true
+  def handle_error(_ref, reason, %State{} = state) do
+    {event, pending} =
+      if is_nil(state.active) do
+        {{event, _prompt}, rest} = List.pop_at(state.pending, -1)
+        {event, rest}
+      else
+        {state.active, state.pending}
+      end
+
+    failure = %{event: event, reason: reason, at: System.system_time(:millisecond)}
+    {:noreply, %{state | active: nil, pending: pending, failures: state.failures ++ [failure]}}
   end
 end
 ```
@@ -147,6 +184,12 @@ Enum.each(actions, fn a -> IO.puts(a.text) end)
 GenAgent.stop("ci-watcher")
 ```
 
+Use `runtime_snapshot/2` (timeout optional) to inspect queue counts without
+copying action history. Its current request ref can be passed to
+`interrupt_request/3` to interrupt the active turn. `tell_with_completion/4`
+and `cancel_request/3` apply to caller-owned prompts on a separate agent, not
+to this event-driven recipe. Notification admission is not completion.
+
 ## Variations
 
 - **External signal sources.** Hook a GenServer or a Task that
@@ -157,7 +200,8 @@ GenAgent.stop("ci-watcher")
   watchers for different event classes, start N named watchers
   and have the dispatcher pattern-match events to routes.
 - **Rate limiting.** If the event stream is bursty, the watcher's
-  mailbox can fill up. Drop-on-busy at the notify source, or use
+  bounded pending queues can reject input. Handle `notify_ack/3` overload
+  at the source, or use
   `handle_event({:ci_result, :failed, _}, %{recent: ts})` with a
   state-tracked cooldown.
 - **Combine with Pool.** A single watcher can receive events and

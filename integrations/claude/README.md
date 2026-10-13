@@ -24,12 +24,11 @@ for install instructions.
 
 ## Installation
 
+Add `gen_agent` using the current requirement in the [core installation guide](https://github.com/genagent/gen_agent#installation).
+
 ```elixir
 def deps do
-  [
-    {:gen_agent, "~> 0.3.0"},
-    {:gen_agent_claude, "~> 0.1.0"}
-  ]
+  [{:gen_agent_claude, "~> 0.2.7"}] # x-release-please-version
 end
 ```
 
@@ -48,7 +47,7 @@ defmodule MyApp.Coder do
     path = Keyword.fetch!(opts, :cwd)
 
     backend_opts = [
-      cwd: path,
+      working_dir: path,
       system_prompt: "You are a coding assistant.",
       permission_mode: :plan
     ]
@@ -114,7 +113,7 @@ GenAgent does not call `resume_session/2`; every agent start calls
 `start_session/1` with the options returned from `init_agent/1`. To continue
 a prior conversation after the agent process restarts, save
 `response.session_id` and pass it back as `:resume` in those options, with
-the same `:cwd` as before:
+the same working directory as before:
 
 ```elixir
 defmodule MyApp.Reviewer do
@@ -126,8 +125,8 @@ defmodule MyApp.Reviewer do
 
     backend_opts =
       case MyApp.SessionStore.get("reviewer") do
-        nil -> [cwd: cwd]
-        saved_id -> [cwd: cwd, resume: saved_id]
+        nil -> [working_dir: cwd]
+        saved_id -> [working_dir: cwd, resume: saved_id]
       end
 
     {:ok, backend_opts, %{}}
@@ -161,14 +160,19 @@ supplied for the first turn, the backend omits it once `--resume` is used.
 
 Options are passed to `ClaudeWrapper.stream/2` unchanged, except that `:cwd`
 is renamed to `:working_dir` and `:include_partial_messages` defaults to
-`true`. `ClaudeWrapper` ignores keys it does not recognize, and ignores
-`:allowed_tools`, `:disallowed_tools`, and `:tools` when they are not lists.
-The lists below cover the commonly used options; see `ClaudeWrapper.Query`
-for the full set.
+`true`. `start_session/1` (and `resume_session/2`) validates the options
+before any turn runs: an unsupported key returns
+`{:error, {:unknown_option, key}}`, and a malformed value (a bad
+`:permission_mode` or `:effort`, a non-binary `:json_schema`, a non-list
+`:allowed_tools`, `:disallowed_tools`, or `:tools`, and so on) returns
+`{:error, {:invalid_option, key, value}}`. A `nil` value is treated as unset.
+The lists below cover common options; the backend also accepts the other
+options handled by `ClaudeWrapper.Query.apply_opts/2` in its supported wrapper
+version.
 
 **Process:**
 - `:binary` -- path to the `claude` executable.
-- `:working_dir` (aliased as `:cwd`) -- directory the CLI runs in.
+- `:working_dir` (deprecated alias `:cwd`) -- directory the CLI runs in.
 - `:env` -- environment variables set on top of the inherited environment.
   See [Environment and working directory](#environment-and-working-directory).
 - `:debug` -- passes `--debug` to the CLI.
@@ -258,7 +262,7 @@ read the project and cannot edit files or run shell commands:
 @impl true
 def init_agent(opts) do
   backend_opts = [
-    cwd: Keyword.fetch!(opts, :cwd),
+    working_dir: Keyword.fetch!(opts, :cwd),
     system_prompt: "You review code. Do not modify files.",
     tools: ["Read", "Grep", "Glob"],
     allowed_tools: ["Read", "Grep", "Glob"],
@@ -341,7 +345,7 @@ values by `GenAgent.Backends.Claude.EventTranslator`:
 
 | Claude event | GenAgent event |
 |---|---|
-| `"system"` | filtered |
+| `"system"` init | `:session` with model, permission mode, and tool names; later system events are filtered |
 | `"assistant"` | `:text` and `:tool_use` from ordered content blocks |
 | `"user"` | `:tool_result` from tool-result content blocks |
 | `"stream_event"` with text delta | immediate `:text`; completed assistant text is deduplicated |
@@ -359,6 +363,10 @@ Failed results reach `handle_error/3` and return `{:error, reason}` from
 `ask/3` or `poll/3`. They are not retried automatically. Tool calls
 are emitted from completed assistant blocks so full input is retained;
 partial tool-input JSON is not emitted on its own.
+With a core version that provides `GenAgent.Backend.Error`, `reason` is
+that struct. Its `:kind` is `:provider_error` for CLI failures and `:raw`
+retains the original Claude reason; older core versions keep the original
+reason directly.
 
 ### Event data
 
@@ -368,6 +376,7 @@ partial tool-input JSON is not emitted on its own.
 so one turn's events mix both key types.
 
 - `:text` -- `%{text: String.t()}`.
+- `:session` -- `%{model: String.t(), permission_mode: String.t(), tools: [String.t()]}` from the CLI's init event. Missing fields are omitted; unrelated raw fields are not forwarded.
 - `:tool_use` -- the raw block, for example
   `%{"type" => "tool_use", "id" => "toolu_...", "name" => "Read", "input" => %{"file_path" => "lib/foo.ex"}}`.
   `"input"` is the tool's argument map. Other fields the CLI includes, such
@@ -378,18 +387,29 @@ so one turn's events mix both key types.
   present only when the CLI includes it.
 - `:usage` -- `%{input_tokens: integer, output_tokens: integer}`. A count
   the CLI omits is omitted. Cache token counts are not included.
-- `:result` -- `%{text: String.t(), session_id: String.t(), cost_usd: number, duration_ms: integer, num_turns: integer, is_error: false}`.
-  Fields the CLI omits are omitted, except `:text` (defaults to `""`) and
-  `:is_error`.
+- `:result` -- `%{text: String.t(), session_id: String.t(), model: String.t(), cost_usd: number, duration_ms: integer, num_turns: integer, is_error: false, raw: map}`.
+  The reported init model is also available as `Response.model`, even with compact event retention.
+  Fields the CLI omits are omitted, except `:is_error`. `:raw` is the string-keyed result event, so
+  `structured_output` (with `:json_schema`), `stop_reason`,
+  `permission_denials`, `duration_api_ms` and extended usage are read from
+  `raw`. When the result text is empty or absent, `:text` is omitted, so
+  `Response.text` is assembled from the turn's `:text` events; a nonempty
+  result text is always used as given. The original empty or missing value
+  stays in `raw`. Tool inputs are never used as
+  text: a plan passed to `ExitPlanMode` is read from that `:tool_use` event's
+  `"input"`. The fallback is covered by synthetic stream tests; the CLI
+  output of a plan-mode turn that ends in `ExitPlanMode` with an empty result
+  has not been recorded.
 - `:error` from a failed `"result"` -- `%{reason: reason, data: raw}`,
-  where `raw` is the string-keyed result event and `reason` is
-  `%{provider: :claude, subtype: String.t(), message: term, session_id: String.t(), cost_usd: number, usage: map}`
-  with absent fields omitted. `:message` is the result's `"result"` or
-  `"error"` field, or `:unknown` when neither is present. A max-turns
-  failure reports its text only in `raw["errors"]`, so its `:message` is
-  `:unknown`.
+  where `raw` is the string-keyed result event and `reason.raw` is
+  `%{provider: :claude, subtype: String.t(), message: term, errors: [term], num_turns: integer, session_id: String.t(), cost_usd: number, usage: map}`
+  with absent fields omitted. `:message` is the first of: a nonempty
+  `"result"` string, the nonempty `"errors"` list joined with `"; "`, a
+  nonempty `"error"` string, or `:unknown`. `:errors` keeps the list. The
+  recorded CLI 2.1.284 max-turns failure carries only `"errors"`, so its
+  `:message` is that text. Other failure subtypes have not been recorded.
 - `:error` from an `"error"` event -- `%{reason: reason, data: raw}`, where
-  `reason` is the event's `"error"` or `"message"` field, or `:unknown`.
+  `reason.raw` is the event's `"error"` or `"message"` field, or `:unknown`.
   When the CLI exits without a terminal result (idle deadline, non-zero
   exit, or spawn failure), `reason` is `"stream_truncated"`.
 
@@ -400,10 +420,8 @@ The translator emits nothing for:
 - partial tool-input JSON (`input_json_delta`) and other non-text stream
   deltas, message start and stop events, and content block start and stop
   events
-- `"system"` events, including the `init` event (model, tools, MCP server
-  status, and similar session metadata) and later subtypes such as
-  `status`, `thinking_tokens`, and task progress. The backend still reads
-  `session_id` from them for checkpointing.
+- later `"system"` subtypes such as `status`, `thinking_tokens`, and task
+  progress. The backend still reads `session_id` from them for checkpointing.
 - `"rate_limit_event"` and any other unrecognized event type
 
 ## Testing

@@ -87,18 +87,44 @@ defmodule GenAgent.Backends.CodexStreamingTest do
                Codex.resume_session("fixture-thread", [{option, "fixture"}])
     end
 
+    assert {:error, {:unsupported_resume_option, :ephemeral}} =
+             Codex.start_session(ephemeral: true)
+
+    assert {:error, {:unsupported_resume_option, :ephemeral}} =
+             Codex.resume_session("fixture-thread", ephemeral: true)
+
+    assert {:ok, _session} = Codex.start_session(ephemeral: false)
+    assert {:ok, _session} = Codex.resume_session("fixture-thread", ephemeral: false)
+
     assert {:error, {:invalid_approval_policy, :on_failure}} =
              Codex.start_session(approval_policy: :on_failure)
   end
 
-  test "unknown options report an unsupported option on start and resume" do
-    for option <- [:system_prompt, :system, :max_tokens, :modle] do
+  test "unsupported concepts and unknown options are distinct on start and resume" do
+    for option <- [:system_prompt, :system, :instructions, :max_tokens, :max_output_tokens] do
       assert {:error, {:unsupported_option, ^option}} =
                Codex.start_session([{option, "fixture"}])
 
       assert {:error, {:unsupported_option, ^option}} =
                Codex.resume_session("fixture-thread", [{option, "fixture"}])
     end
+
+    for option <- [:modle] do
+      assert {:error, {:unknown_option, ^option}} =
+               Codex.start_session([{option, "fixture"}])
+
+      assert {:error, {:unknown_option, ^option}} =
+               Codex.resume_session("fixture-thread", [{option, "fixture"}])
+    end
+
+    assert {:error, {:unsupported_option, :verbose}} =
+             Codex.start_session(verbose: true)
+
+    assert {:error, {:unsupported_option, :verbose}} =
+             Codex.resume_session("fixture-thread", verbose: true)
+
+    assert {:ok, _session} = Codex.start_session(verbose: false)
+    assert {:ok, _session} = Codex.resume_session("fixture-thread", verbose: false)
   end
 
   test "an explicit approval policy wins over a conflicting config override on resume" do

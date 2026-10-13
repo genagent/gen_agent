@@ -3,6 +3,7 @@ defmodule GenAgent.Backends.OpenAITest do
 
   alias GenAgent.Backends.OpenAI
   alias GenAgent.Event
+  alias GenAgent.Test.BackendErrorAssertions, as: Errors
 
   defp ok_response(text, opts \\ []) do
     fn _req ->
@@ -57,6 +58,35 @@ defmodule GenAgent.Backends.OpenAITest do
   end
 
   describe "start_session/1" do
+    test "validates Finch pool options and rejects a named-pool connect timeout" do
+      for finch <- [
+            MyFinch,
+            [name: nil],
+            [name: "MyFinch"],
+            [name: MyFinch, size: 100],
+            [name: MyFinch, count: 2],
+            [size: 0],
+            [count: -1],
+            [pool_timeout: -1],
+            [pool_timeout: "later"],
+            [size: 10, size: 20],
+            [unknown: true]
+          ] do
+        assert {:error, {:invalid_option, :finch, :invalid}} =
+                 OpenAI.start_session(finch: finch, http_fn: ok_response("ok"))
+      end
+
+      assert {:error, {:conflicting_options, [:finch, :connect_timeout]}} =
+               OpenAI.start_session(
+                 finch: [name: MyFinch],
+                 connect_timeout: 2_000,
+                 http_fn: ok_response("ok")
+               )
+
+      assert {:error, {:invalid_option, :connect_timeout, -1}} =
+               OpenAI.start_session(connect_timeout: -1, http_fn: ok_response("ok"))
+    end
+
     test "Inspect shows session metadata without credentials or conversation content" do
       {:ok, session} =
         OpenAI.start_session(
@@ -152,6 +182,19 @@ defmodule GenAgent.Backends.OpenAITest do
     test "uses default model" do
       {:ok, session} = OpenAI.start_session(http_fn: ok_response("hi"))
       assert session.model == "gpt-5"
+      assert session.store == true
+    end
+
+    test "accepts boolean store and rejects other values" do
+      for store <- [true, false] do
+        assert {:ok, %{store: ^store}} =
+                 OpenAI.start_session(store: store, http_fn: ok_response("hi"))
+      end
+
+      for store <- [nil, "false", 0] do
+        assert {:error, {:invalid_option, :store, ^store}} =
+                 OpenAI.start_session(store: store, http_fn: ok_response("hi"))
+      end
     end
 
     test "receive_timeout defaults to 60_000 and connect_timeout uses Req's default" do
@@ -179,13 +222,152 @@ defmodule GenAgent.Backends.OpenAITest do
           instructions: "Be terse.",
           model: "gpt-5-mini",
           max_output_tokens: 256,
+          truncation: "auto",
           reasoning_effort: :medium
         )
 
       assert session.instructions == "Be terse."
       assert session.model == "gpt-5-mini"
       assert session.max_output_tokens == 256
+      assert session.truncation == "auto"
       assert session.reasoning_effort == :medium
+    end
+
+    test "accepts shared names and forwards them in the request" do
+      ref = make_ref()
+
+      {:ok, session} =
+        OpenAI.start_session(
+          http_fn: recording_fn(ref, ok_response("hi")),
+          system_prompt: "Be terse.",
+          max_output_tokens: 256
+        )
+
+      assert session.instructions == "Be terse."
+      {:ok, _, _} = OpenAI.prompt(session, "hello")
+      assert_receive {^ref, %{body: %{instructions: "Be terse.", max_output_tokens: 256}}}
+    end
+
+    test "custom request options preserve stored and stateless continuation" do
+      for store <- [true, false] do
+        ref = make_ref()
+
+        {:ok, session} =
+          OpenAI.start_session(
+            api_key: "secret-key",
+            base_url: "https://proxy.example/api/v1/",
+            headers: %{"X-Tenant" => "team-a"},
+            request_fields: %{temperature: 0.2, metadata: %{source: "agent"}},
+            store: store,
+            http_fn: recording_fn(ref, ok_response("answer"))
+          )
+
+        {:ok, events, session} = OpenAI.prompt(session, "first")
+        assert_receive {^ref, first}
+        assert first.url == "https://proxy.example/api/v1/responses"
+
+        assert Map.new(first.headers) == %{
+                 "authorization" => "Bearer secret-key",
+                 "content-type" => "application/json",
+                 "x-tenant" => "team-a"
+               }
+
+        assert first.body["temperature"] == 0.2
+        assert first.body["metadata"] == %{source: "agent"}
+        assert first.body.store == store
+
+        %{data: result} = Enum.find(events, &(&1.kind == :result))
+        session = OpenAI.update_session(session, result)
+        {:ok, _, _} = OpenAI.prompt(session, "second")
+        assert_receive {^ref, second}
+        assert second.body["temperature"] == 0.2
+        assert second.body["metadata"] == %{source: "agent"}
+
+        if store do
+          assert second.body.previous_response_id == result.response_id
+          assert second.body.input == [%{role: "user", content: "second"}]
+        else
+          refute Map.has_key?(second.body, :previous_response_id)
+          assert second.body.include == ["reasoning.encrypted_content"]
+          assert length(second.body.input) == 3
+        end
+
+        refute inspect(session) =~ "secret-key"
+        refute inspect(session) =~ "team-a"
+      end
+    end
+
+    test "rejects unsafe request customization at session startup" do
+      for url <- [
+            "http://proxy.example/v1",
+            "https://user:pass@proxy.example/v1",
+            "https://proxy.example/v1#fragment",
+            "not a URL"
+          ] do
+        assert {:error, {:invalid_option, :base_url, :invalid}} =
+                 OpenAI.start_session(base_url: url, http_fn: ok_response("ok"))
+      end
+
+      for headers <- [
+            %{"Authorization" => "replacement"},
+            [{"X-Tenant", "a"}, {"x-tenant", "b"}],
+            %{"X-Tenant" => "value\r\nInjected: bad"},
+            %{"X-Tenant" => "café"},
+            %{"X-Tenant" => <<1>>},
+            %{"X-Tenant" => <<255>>}
+          ] do
+        assert {:error, {:invalid_option, :headers, :invalid}} =
+                 OpenAI.start_session(headers: headers, http_fn: ok_response("ok"))
+      end
+
+      assert {:ok, _} =
+               OpenAI.start_session(
+                 headers: %{"X-Tenant" => "team a\tb"},
+                 http_fn: ok_response("ok")
+               )
+
+      for fields <- [
+            %{input: []},
+            %{"store" => false},
+            %{include: []},
+            %{"temperature" => 0.4, temperature: 0.2},
+            %{metadata: %{1 => "bad"}},
+            %{temperature: fn -> :bad end}
+          ] do
+        assert {:error, {:invalid_option, :request_fields, :invalid}} =
+                 OpenAI.start_session(request_fields: fields, http_fn: ok_response("ok"))
+      end
+    end
+
+    test "rejects unknown and malformed options before credential lookup" do
+      assert {:error, {:unknown_option, :modle}} = OpenAI.start_session(modle: "wrong")
+
+      assert {:error, {:invalid_options, %{model: "wrong"}}} =
+               OpenAI.start_session(%{model: "wrong"})
+
+      assert {:error, {:invalid_option, :truncation, "automatic"}} =
+               OpenAI.start_session(truncation: "automatic")
+    end
+
+    test "warns for legacy names and rejects conflicting prompt values" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, session} =
+                   OpenAI.start_session(
+                     http_fn: ok_response("hi"),
+                     instructions: "old",
+                     max_tokens: 128
+                   )
+
+          assert session.instructions == "old"
+          assert session.max_output_tokens == 128
+        end)
+
+      assert log =~ ":instructions is deprecated"
+      assert log =~ ":max_tokens is deprecated"
+
+      assert {:error, {:conflicting_options, [:system_prompt, :instructions]}} =
+               OpenAI.start_session(system_prompt: "new", instructions: "old")
     end
   end
 
@@ -298,19 +480,111 @@ defmodule GenAgent.Backends.OpenAITest do
       refute Map.has_key?(request.body, :previous_response_id)
     end
 
-    test "always sends store: true" do
+    test "sends store: true by default and when explicit" do
+      for opts <- [[], [store: true]] do
+        ref = make_ref()
+
+        {:ok, session} =
+          OpenAI.start_session(
+            api_key: "sk-test",
+            http_fn: recording_fn(ref, ok_response("k")),
+            store: Keyword.get(opts, :store, true)
+          )
+
+        {:ok, _events, _session} = OpenAI.prompt(session, "hi")
+
+        assert_receive {^ref, request}
+        assert request.body.store == true
+        refute Map.has_key?(request.body, :include)
+      end
+    end
+
+    test "store: false sends local history, requests encrypted reasoning, and never sends a response id" do
       ref = make_ref()
+
+      output = [
+        %{"type" => "reasoning", "encrypted_content" => "encrypted-state"},
+        hd(default_output("first answer"))
+      ]
 
       {:ok, session} =
         OpenAI.start_session(
-          api_key: "sk-test",
-          http_fn: recording_fn(ref, ok_response("k"))
+          store: false,
+          system_prompt: "Be brief.",
+          http_fn: recording_fn(ref, ok_response("first answer", output: output))
         )
 
-      {:ok, _events, _session} = OpenAI.prompt(session, "hi")
+      {:ok, events, session} = OpenAI.prompt(session, "first question")
+      assert_receive {^ref, %{body: first}}
+      assert first.store == false
+      assert first.input == [%{role: "user", content: "first question"}]
+      assert first.include == ["reasoning.encrypted_content"]
+      refute Map.has_key?(first, :previous_response_id)
 
-      assert_receive {^ref, request}
-      assert request.body.store == true
+      %{data: result} = Enum.find(events, &(&1.kind == :result))
+      session = OpenAI.update_session(session, result)
+      assert session.previous_response_id == nil
+      assert session.history == first.input ++ output
+
+      {:ok, _events, _session} = OpenAI.prompt(session, "second question")
+      assert_receive {^ref, %{body: second}}
+      assert second.store == false
+      assert second.instructions == "Be brief."
+
+      assert second.input ==
+               first.input ++ output ++ [%{role: "user", content: "second question"}]
+
+      refute Map.has_key?(second, :previous_response_id)
+
+      {:ok, reset} = OpenAI.reset_session(session)
+      assert reset.history == []
+      {:ok, _events, _session} = OpenAI.prompt(reset, "fresh question")
+      assert_receive {^ref, %{body: fresh}}
+      assert fresh.input == [%{role: "user", content: "fresh question"}]
+    end
+
+    test "store: false ignores response IDs even if a stale one is present" do
+      ref = make_ref()
+
+      {:ok, session} =
+        OpenAI.start_session(store: false, http_fn: recording_fn(ref, ok_response("ok")))
+
+      session = %{session | previous_response_id: "stale-id"}
+      {:ok, events, session} = OpenAI.prompt(session, "hi")
+      assert_receive {^ref, %{body: body}}
+      refute Map.has_key?(body, :previous_response_id)
+      %{data: result} = Enum.find(events, &(&1.kind == :result))
+      assert OpenAI.update_session(session, result).previous_response_id == nil
+    end
+
+    test "store: false does not add failed responses to local history" do
+      response = ok_response("ignored", status: "failed")
+      {:ok, session} = OpenAI.start_session(store: false, http_fn: response)
+      {:ok, events, session} = OpenAI.prompt(session, "failed question")
+      assert Enum.any?(events, &(&1.kind == :error))
+      assert session.history == []
+      assert session.pending_turn == nil
+    end
+
+    test "passes truncation through only when configured" do
+      for truncation <- ["auto", "disabled"] do
+        ref = make_ref()
+
+        {:ok, session} =
+          OpenAI.start_session(
+            truncation: truncation,
+            http_fn: recording_fn(ref, ok_response("ok"))
+          )
+
+        assert {:ok, _, _} = OpenAI.prompt(session, "hi")
+        assert_receive {^ref, %{body: %{truncation: ^truncation}}}
+      end
+
+      ref = make_ref()
+      {:ok, session} = OpenAI.start_session(http_fn: recording_fn(ref, ok_response("ok")))
+      assert {:ok, _, _} = OpenAI.prompt(session, "hi")
+      assert_receive {^ref, %{body: body}}
+      refute Map.has_key?(body, :truncation)
     end
 
     test "includes reasoning effort when set" do
@@ -365,6 +639,42 @@ defmodule GenAgent.Backends.OpenAITest do
   end
 
   describe "prompt/2 response parsing" do
+    test "resets only recognized chain errors on a stored conversation" do
+      for code <- [
+            "previous_response_not_found",
+            "context_length_exceeded",
+            "context_window_exceeded"
+          ] do
+        body = %{"error" => %{"code" => code}}
+        http_fn = fn _request -> {:error, {:http_error, 400, body}} end
+        {:ok, fresh} = OpenAI.start_session(http_fn: http_fn)
+        session = OpenAI.update_session(fresh, %{response_id: "resp_old"})
+
+        assert {:ok, [%Event{kind: :error, data: %{reason: reason}}], reset} =
+                 OpenAI.prompt(session, "next")
+
+        Errors.assert_error(reason, :openai, {:conversation_lost, body})
+
+        assert reset.previous_response_id == nil
+        assert reset.client_session_id == session.client_session_id
+
+        assert {:error, reason} = OpenAI.prompt(fresh, "first")
+        Errors.assert_error(reason, :openai, {:http_error, 400, body})
+      end
+
+      for {status, code} <- [{400, "invalid_request_error"}, {429, "context_length_exceeded"}] do
+        body = %{"error" => %{"code" => code}}
+        http_fn = fn _request -> {:error, {:http_error, status, body}} end
+        {:ok, fresh} = OpenAI.start_session(http_fn: http_fn)
+        session = OpenAI.update_session(fresh, %{response_id: "resp_old"})
+
+        assert {:error, reason} = OpenAI.prompt(session, "next")
+        Errors.assert_error(reason, :openai, {:http_error, status, body})
+
+        assert session.previous_response_id == "resp_old"
+      end
+    end
+
     test "extracts text from the message item in output[]" do
       {:ok, session} =
         OpenAI.start_session(
@@ -472,6 +782,26 @@ defmodule GenAgent.Backends.OpenAITest do
       assert usage_event.data.output_tokens == 148
     end
 
+    test "reports cached input tokens when the API includes them" do
+      http_fn = fn _request ->
+        {:ok, response} = ok_response("ok").(nil)
+
+        {:ok,
+         put_in(response["usage"]["input_tokens_details"], %{
+           "cached_tokens" => 7
+         })}
+      end
+
+      {:ok, session} = OpenAI.start_session(http_fn: http_fn)
+
+      assert {:ok, [%Event{kind: :usage, data: usage}, %Event{kind: :result}], _} =
+               OpenAI.prompt(session, "hello")
+
+      assert usage.input_tokens == 10
+      assert usage.cached_input_tokens == 7
+      assert usage.total_tokens == 15
+    end
+
     test "omits reasoning_tokens when the field is absent" do
       {:ok, session} =
         OpenAI.start_session(
@@ -499,7 +829,7 @@ defmodule GenAgent.Backends.OpenAITest do
       {:ok, events, _} = OpenAI.prompt(session, "hi")
 
       assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
-      assert data.reason == {:response_failed, api_error}
+      Errors.assert_error(data.reason, :openai, {:response_failed, api_error})
       assert data.response_id == "resp_failed"
       assert data.status == "failed"
     end
@@ -518,7 +848,7 @@ defmodule GenAgent.Backends.OpenAITest do
       {:ok, events, _} = OpenAI.prompt(session, "hi")
 
       assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
-      assert data.reason == {:response_incomplete, details}
+      Errors.assert_error(data.reason, :openai, {:response_incomplete, details})
       assert data.status == "incomplete"
     end
 
@@ -534,7 +864,7 @@ defmodule GenAgent.Backends.OpenAITest do
       {:ok, events, _} = OpenAI.prompt(session, "hi")
 
       assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
-      assert data.reason == {:refusal, "I cannot help with that."}
+      Errors.assert_error(data.reason, :openai, {:refusal, "I cannot help with that."})
       assert data.status == "completed"
     end
 
@@ -543,21 +873,23 @@ defmodule GenAgent.Backends.OpenAITest do
       {:ok, events, _} = OpenAI.prompt(session, "hi")
 
       assert [%Event{kind: :usage}, %Event{kind: :error, data: data}] = events
-      assert data.reason == {:unexpected_response_status, "queued"}
+      Errors.assert_error(data.reason, :openai, {:unexpected_response_status, "queued"})
     end
 
     test "propagates HTTP errors" do
       failing = fn _req -> {:error, {:http_error, 429, %{"error" => "rate_limit"}}} end
       {:ok, session} = OpenAI.start_session(api_key: "sk-test", http_fn: failing)
 
-      assert {:error, {:http_error, 429, _}} = OpenAI.prompt(session, "hi")
+      assert {:error, reason} = OpenAI.prompt(session, "hi")
+      Errors.assert_error(reason, :openai, {:http_error, 429, %{"error" => "rate_limit"}})
     end
 
     test "wraps a raising http_fn" do
       raising = fn _req -> raise "boom" end
       {:ok, session} = OpenAI.start_session(api_key: "sk-test", http_fn: raising)
 
-      assert {:error, {:http_fn_raised, _}} = OpenAI.prompt(session, "hi")
+      assert {:error, reason} = OpenAI.prompt(session, "hi")
+      Errors.assert_error(reason, :openai, {:http_fn_raised, "boom"})
     end
   end
 
@@ -662,7 +994,7 @@ defmodule GenAgent.Backends.OpenAITest do
       {:ok, session} =
         OpenAI.start_session(
           api_key: "sk-test",
-          instructions: "Always be terse.",
+          system_prompt: "Always be terse.",
           http_fn: http_fn
         )
 

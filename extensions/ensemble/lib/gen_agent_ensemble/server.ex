@@ -1,12 +1,16 @@
 defmodule GenAgentEnsemble.Server do
   @moduledoc false
 
-  use GenServer
+  # This process owns a supervisor tree. Let each child's configured shutdown
+  # budget apply rather than cutting off the whole tree after five seconds.
+  use GenServer, shutdown: :infinity
   require Logger
 
   @cancel_child_timeout 5_000
+  @default_max_completed_results 100
 
   defstruct [
+    :owner,
     :strategy_mod,
     :strategy_state,
     :session_name,
@@ -27,6 +31,9 @@ defmodule GenAgentEnsemble.Server do
     :stream_recipients,
     # completed tell results, %{token => {:ok, response} | {:error, reason}}
     :completed,
+    # FIFO of retained tokens only; consumed tokens are removed immediately
+    :completed_order,
+    :max_completed_results,
     # %{token => %{monitor_ref => {from, timer_ref | nil}}}
     :waiters,
     # %{monitor_ref => token}
@@ -42,14 +49,10 @@ defmodule GenAgentEnsemble.Server do
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
 
-    case GenServer.start(__MODULE__, opts, name: via(name)) do
-      {:ok, pid} = result ->
-        Process.link(pid)
-        result
-
-      error ->
-        error
-    end
+    # GenServer.start/3 keeps init failures as {:error, reason} returns rather
+    # than exit signals to the caller; init/1 links the caller itself so a
+    # caller that dies during a slow init still takes the session with it.
+    GenServer.start(__MODULE__, {:linked, self(), opts}, name: via(name))
   end
 
   def tell(name, prompt, opts \\ []), do: GenServer.call(via(name), {:tell, prompt, opts})
@@ -70,8 +73,23 @@ defmodule GenAgentEnsemble.Server do
   end
 
   def ask(name, prompt, opts \\ []) do
-    {timeout, strategy_opts} = Keyword.pop(opts, :timeout, 30_000)
+    {timeout, strategy_opts} = Keyword.pop_lazy(opts, :timeout, &default_ask_timeout/0)
+    validate_ask_timeout!(timeout)
     GenServer.call(via(name), {:ask, prompt, strategy_opts}, timeout)
+  end
+
+  @default_ask_timeout 30_000
+
+  defp default_ask_timeout do
+    Application.get_env(:gen_agent_ensemble, :ask_timeout, @default_ask_timeout)
+  end
+
+  defp validate_ask_timeout!(:infinity), do: :ok
+  defp validate_ask_timeout!(timeout) when is_integer(timeout) and timeout >= 0, do: :ok
+
+  defp validate_ask_timeout!(timeout) do
+    raise ArgumentError,
+          "ask timeout must be a non-negative integer or :infinity, got: #{inspect(timeout)}"
   end
 
   def cancel(name, token), do: GenServer.call(via(name), {:cancel, token}, :infinity)
@@ -105,6 +123,7 @@ defmodule GenAgentEnsemble.Server do
       state
       | strategy_state: :redacted,
         completed: :redacted,
+        completed_order: :redacted,
         waiters: :redacted,
         waiter_monitors: :redacted,
         in_flight: :redacted,
@@ -135,6 +154,26 @@ defmodule GenAgentEnsemble.Server do
   defp redact_status_reason(_), do: :redacted
 
   @impl true
+  def init({:linked, owner, opts}) do
+    # Link before starting the AgentTree. If the owner is already dead, the
+    # link kills this process before any children exist.
+    Process.link(owner)
+
+    case init(opts) do
+      {:ok, state} ->
+        # Keep init interruptible by owner death, then trap exits so runtime
+        # shutdown runs terminate/2 and waits for the owned tree's callbacks.
+        Process.flag(:trap_exit, true)
+        {:ok, %{state | owner: owner}}
+
+      {:stop, _reason} = stop ->
+        # Unlinking first means the {:stop, reason} exit cannot kill the
+        # owner, which receives {:error, reason} from start_link/1 instead.
+        Process.unlink(owner)
+        stop
+    end
+  end
+
   def init(opts) do
     init_impl(opts)
   catch
@@ -153,7 +192,8 @@ defmodule GenAgentEnsemble.Server do
     strategy_opts = Keyword.get(opts, :opts, [])
     session_name = Keyword.fetch!(opts, :name)
 
-    with {:ok, strategy_state, start_specs} <- strategy_mod.init(strategy_opts),
+    with {:ok, max_completed_results} <- validate_max_completed_results(opts),
+         {:ok, strategy_state, start_specs} <- strategy_mod.init(strategy_opts),
          {:ok, agent_tree} <- GenAgentEnsemble.AgentTree.start_link(session_name) do
       # Older releases left this handler behind after abrupt server death.
       # Request-scoped completions now replace the telemetry bridge entirely.
@@ -177,6 +217,8 @@ defmodule GenAgentEnsemble.Server do
         token_contexts: %{},
         stream_recipients: %{},
         completed: %{},
+        completed_order: :queue.new(),
+        max_completed_results: max_completed_results,
         waiters: %{},
         waiter_monitors: %{},
         in_flight: %{},
@@ -195,6 +237,14 @@ defmodule GenAgentEnsemble.Server do
       end
     else
       {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp validate_max_completed_results(opts) do
+    case Keyword.get(opts, :max_completed_results, @default_max_completed_results) do
+      :infinity -> {:ok, :infinity}
+      value when is_integer(value) and value >= 0 -> {:ok, value}
+      value -> {:error, {:invalid_option, :max_completed_results, value}}
     end
   end
 
@@ -340,7 +390,7 @@ defmodule GenAgentEnsemble.Server do
     entries =
       Enum.map(state.completed, fn {token, result} -> {token, result} end)
 
-    {:reply, {:ok, entries}, %{state | completed: %{}}}
+    {:reply, {:ok, entries}, %{state | completed: %{}, completed_order: :queue.new()}}
   end
 
   defp handle_call_impl(:status, _from, state) do
@@ -410,6 +460,18 @@ defmodule GenAgentEnsemble.Server do
     {:noreply, remove_waiter(state, mref, {:error, :timeout})}
   end
 
+  # GenServer.start/3 does not make the manually linked owner the OTP parent.
+  # Handle its exits explicitly, including :normal, and fail with our tree
+  # rather than continuing to route work to dead supervisors.
+  defp handle_info_impl({:EXIT, pid, reason}, state)
+       when pid == state.owner or pid == state.agent_tree do
+    {:stop, reason, state}
+  end
+
+  defp handle_info_impl({:EXIT, _pid, reason}, state) when reason != :normal do
+    {:stop, reason, state}
+  end
+
   defp handle_info_impl({:DOWN, mref, :process, _pid, _reason}, state)
        when is_map_key(state.waiter_monitors, mref) do
     {:noreply, remove_waiter(state, mref, nil)}
@@ -421,6 +483,9 @@ defmodule GenAgentEnsemble.Server do
         {:noreply, state}
 
       {agent, monitors} ->
+        affected_tokens =
+          for {_ref, {name, token}} <- state.in_flight, name == agent, do: token
+
         emit_dropped_dispatches(state, agent, :agent_down)
 
         state = %{
@@ -442,7 +507,7 @@ defmodule GenAgentEnsemble.Server do
 
             %{state | strategy_state: strategy_state} |> apply_ops(ops)
           else
-            state
+            fail_unhandled_tokens(state, affected_tokens, {:agent_down, agent, reason})
           end
 
         {:noreply, state}
@@ -527,12 +592,49 @@ defmodule GenAgentEnsemble.Server do
           "[gen_agent_ensemble] agent #{bare_agent} turn errored (unhandled): #{reason_kind(reason)}"
         )
 
-        state
+        fail_unhandled_token(state, token, reason)
+    end
+  end
+
+  defp fail_unhandled_tokens(state, tokens, reason) do
+    Enum.reduce(Enum.uniq(tokens), state, fn token, acc ->
+      fail_unhandled_token(acc, token, reason)
+    end)
+  end
+
+  # Unscoped dispatches have no token to close. For scoped work, retire every
+  # remaining ref for the failed token, including sibling fanout requests.
+  defp fail_unhandled_token(state, nil, _reason), do: state
+
+  defp fail_unhandled_token(state, token, reason) do
+    if Map.has_key?(state.pending, token) do
+      state =
+        Enum.reduce(state.in_flight, state, fn
+          {ref, {agent, ^token}}, acc ->
+            {{started_at, ordinal}, contexts} = Map.pop(acc.dispatch_contexts, ref)
+
+            emit_dispatch(acc, :error, agent, token, ref, started_at, ordinal,
+              reason_kind: reason_kind(reason)
+            )
+
+            %{acc | in_flight: Map.delete(acc.in_flight, ref), dispatch_contexts: contexts}
+
+          _, acc ->
+            acc
+        end)
+
+      {:ok, state} = reply_to_token(state, token, {:error, reason})
+      state
+    else
+      state
     end
   end
 
   @impl true
   def terminate(reason, state) do
+    # Stop admitting callers while cleanup runs. The AgentTree keeps its own
+    # registration until it dies, so a same-name restart still waits for it.
+    Registry.unregister(GenAgentEnsemble.Registry, state.session_name)
     Enum.each(state.waiter_monitors, fn {mref, _} -> remove_waiter(state, mref, nil) end)
     emit_unfinished_work(state)
     outcome = if state.halted, do: :halted, else: if(reason == :normal, do: :ok, else: :error)
@@ -741,6 +843,9 @@ defmodule GenAgentEnsemble.Server do
              dispatch_contexts: Map.put(state.dispatch_contexts, ref, {started_at, ordinal})
          }}
 
+      {:error, :not_found} ->
+        {:error, {:agent_not_running, name}}
+
       {:error, reason} ->
         emit(
           :dispatch,
@@ -856,8 +961,7 @@ defmodule GenAgentEnsemble.Server do
             remove_waiter(acc, mref, result)
           end)
 
-        completed = Map.put(state.completed, token, result)
-        {:ok, %{state | pending: pending, completed: completed}}
+        {:ok, retain_completed(%{state | pending: pending}, token, result)}
     end
   end
 
@@ -1045,7 +1149,26 @@ defmodule GenAgentEnsemble.Server do
 
   defp pop_completed(state, token) do
     {result, rest} = Map.pop(state.completed, token)
-    {result, %{state | completed: rest}}
+    order = :queue.filter(&(&1 != token), state.completed_order)
+    {result, %{state | completed: rest, completed_order: order}}
+  end
+
+  defp retain_completed(%{max_completed_results: 0} = state, _token, _result), do: state
+
+  defp retain_completed(state, token, result) do
+    state = %{
+      state
+      | completed: Map.put(state.completed, token, result),
+        completed_order: :queue.in(token, state.completed_order)
+    }
+
+    if state.max_completed_results != :infinity and
+         map_size(state.completed) > state.max_completed_results do
+      {{:value, oldest}, order} = :queue.out(state.completed_order)
+      %{state | completed: Map.delete(state.completed, oldest), completed_order: order}
+    else
+      state
+    end
   end
 
   defp active_dispatch?(_state, nil), do: true

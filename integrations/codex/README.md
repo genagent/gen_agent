@@ -27,12 +27,11 @@ Forcola runner (see [Cancellation](#cancellation)) is POSIX-only.
 
 ## Installation
 
+Add `gen_agent` using the current requirement in the [core installation guide](https://github.com/genagent/gen_agent#installation).
+
 ```elixir
 def deps do
-  [
-    {:gen_agent, "~> 0.3.0"},
-    {:gen_agent_codex, "~> 0.2.0"}
-  ]
+  [{:gen_agent_codex, "~> 0.5.0"}] # x-release-please-version
 end
 ```
 
@@ -51,7 +50,7 @@ defmodule MyApp.Coder do
     path = Keyword.fetch!(opts, :cwd)
 
     backend_opts = [
-      cwd: path,
+      working_dir: path,
       sandbox: :read_only,
       skip_git_repo_check: true
     ]
@@ -101,39 +100,97 @@ turn's `exec resume` command.
 
 **Config:**
 - `:binary`, `:working_dir` (aliased as `:cwd`), `:env`, `:timeout`,
-  `:verbose`
+  `:idle_timeout_ms`. `:timeout` bounds the whole turn; `:idle_timeout_ms`
+  bounds gaps between output frames (default 300,000 ms).
 
 **Exec:**
 - `:model`, `:sandbox`, `:approval_policy`, `:full_auto`,
   `:dangerously_bypass_approvals_and_sandbox`, `:skip_git_repo_check`,
-  `:ephemeral`, `:ignore_user_config`, `:profile`,
+  `:ignore_user_config`, `:profile`,
   `:config_overrides`, `:enabled_features`, `:disabled_features`,
   `:images`, `:output_schema`
 
 These settings are forwarded where the CLI supports them. Sandbox and
 approval policy become supported `-c` overrides on resume.
+The backend rejects `ephemeral: true` because its sessions must be resumable,
+and rejects `verbose: true` because the CLI has no such global flag. Explicit
+`false` values remain accepted as no-ops.
 
 | Configuration option | Fresh turn | Resumed turn |
 | --- | --- | --- |
 | `ignore_user_config: true` | Skips the host's Codex configuration | Skips the host's Codex configuration |
 | `profile: "name"` | Selects a named configuration profile | Not supported by `codex exec resume` |
 
-`:working_dir` / `:cwd` remains the subprocess directory on both turns.
+`:working_dir` remains the subprocess directory on both turns. `:cwd` is a
+deprecated alias.
 Options that the resume command cannot preserve (`:cd`, `:add_dirs`,
 `:search`) fail at session startup with
 `{:error, {:unsupported_resume_option, option}}`.
 Other unrecognized options fail on both start and resume with
-`{:error, {:unsupported_option, option}}`. Generic callback options such as
-`:system`, `:system_prompt`, and `:max_tokens` are not Codex backend options;
+`{:error, {:unknown_option, option}}`. System-prompt options (`:system`,
+`:instructions`, `:system_prompt`) and output caps (`:max_tokens`,
+`:max_output_tokens`) are known concepts Codex cannot provide and return
+`{:error, {:unsupported_option, option}}`;
 an agent's `init_agent/1` must return options accepted by its selected backend.
 
-**Backend-only:**
+**Backend-only** (never forwarded to the CLI):
 - `:exec_fn` -- a 2-arity function `(prompt, session) -> {:ok, enumerable} | {:error, term()}`
   that replaces the default `Exec`/`ExecResume` dispatch. Intended for tests.
+- `:response_text` -- `:all_messages` (default) or `:final_message`. Selects
+  what `response.text` holds for a successful turn. See
+  [Response text](#response-text).
 
 Codex has no equivalent of Claude's `--system-prompt`; if you need
 system-level instructions, pass them via `AGENTS.md` in the working
 directory or through Codex's configuration layer.
+
+### Response text
+
+Codex emits one `agent_message` item per assistant message. A turn that
+narrates its work before answering produces several of them, and by default
+`response.text` joins them all with a blank line:
+
+```elixir
+# Codex emits:  agent_message "Let me check the file."
+#               agent_message {"answer": 42}
+{:ok, response} = GenAgent.ask("my-coder", "Answer as JSON")
+response.text
+#=> "Let me check the file.\n\n{\"answer\": 42}"
+```
+
+Set `response_text: :final_message` in the backend options to make
+`response.text` hold only the last completed `agent_message` of the turn.
+This keeps a structured final answer (for example JSON requested through
+`:output_schema`) parseable:
+
+```elixir
+backend_opts = [working_dir: path, response_text: :final_message]
+
+{:ok, response} = GenAgent.ask("my-coder", "Answer as JSON")
+response.text
+#=> "{\"answer\": 42}"
+Jason.decode!(response.text)
+#=> %{"answer" => 42}
+```
+
+Exact semantics of `:final_message`:
+
+- Only `response.text` changes. Every `agent_message` still becomes a
+  `:text` event, reaches `handle_stream_event/2`, and is retained in
+  `response.events`. GenAgent versions that expose `response.final_message`
+  derive it from the same terminal text.
+- The last message wins even when it is empty: an empty final
+  `agent_message` gives `""`.
+- A successful turn with no `agent_message` gives `""`.
+- Text is tracked per turn. A resumed turn never reports a message from an
+  earlier turn.
+- Failed turns are unchanged and still return `{:error, reason}`. Usage
+  deltas and thread checkpointing are unaffected.
+- A session resumed with `resume_session/2` keeps the mode it was given.
+- `response_text: nil` means the default. Any value other than `nil`,
+  `:all_messages`, or `:final_message` fails at session startup or resume
+  with `{:error, {:invalid_option, :response_text, value}}` before the CLI
+  is called. The option is never passed to `codex`.
 
 ### Sandbox and approvals
 
@@ -179,7 +236,7 @@ process group, add `forcola` and select its runner:
 
 ```elixir
 # mix.exs
-{:forcola, "~> 0.3.5"}
+{:forcola, "~> 0.4.0"}
 
 # config/config.exs
 config :codex_wrapper, runner: CodexWrapper.Runner.Forcola
@@ -219,10 +276,17 @@ Codex CLI's NDJSON output is translated into `GenAgent.Event` values by
 | `item.completed` (`tool_call`) | `:tool_use` |
 | `item.completed` (`tool_result`) | `:tool_result` |
 | `item.completed` (`mcp_tool_call`, `command_execution`, `file_change`) | `:tool_use` + `:tool_result`, carrying the complete item including ID, status and output |
-| `turn.completed` | `:usage` + terminal `:result` (with captured `thread_id` as `session_id`) |
+| `turn.completed` | `:usage` (increase since the previous completed turn) + terminal `:result` (with captured `thread_id` as `session_id`; with `response_text: :final_message`, the last `agent_message` text as `:text`) |
 | `turn.failed` | terminal `:error`; the reason falls back to the most recent `error` event when the failure carries none |
 | `error` | retained, not emitted; becomes a terminal `:error` only if the stream ends without `turn.completed` or `turn.failed` |
 | anything else | filtered |
+
+With a core version that provides `GenAgent.Backend.Error`, terminal CLI
+failures and `exec_fn` failures return that struct through `ask/3`, `poll/3`,
+and `handle_error/3`. Its `:kind` is `:provider_error` for unclassified CLI
+failures; `:raw` retains the original Codex string, map, or wrapper error.
+Older core versions keep the original reason directly. CLI text alone is
+not treated as reliable retry metadata, so `:retryable?` defaults to false.
 
 Unlike Claude, Codex emits `thread_id` in the **first** event of a turn,
 not the terminal one. The streaming translator retains it and injects
@@ -233,6 +297,35 @@ can resume the same thread. `item.started` and
 item categories are filtered. A stream that ends with no turn outcome
 and no retained `error` event returns `:no_terminal_event`; the wrapper
 stream API does not report the subprocess exit code.
+
+The terminal result carries `:model` and `Response.model` when known. If
+Codex JSONL reports a model on `thread.started`, `turn.started`, or
+`turn.completed`, that value wins and `:model_source` is `:reported`.
+Current recorded Codex exec JSONL does not contain a model; when `:model`
+was explicitly passed to the backend, the terminal uses it with
+`:model_source` set to `:requested`. That is the requested model, not proof
+of the model the CLI actually selected. Without either value, `Response.model`
+is `nil` and both terminal fields are omitted.
+
+## Usage
+
+Codex reports `turn.completed.usage` as the thread's running total, so a
+resumed turn reports the whole thread so far. The backend stores the previous
+completed total on the session and `response.usage` holds the increase since
+then. All five counters Codex emits are kept: `input_tokens`, `output_tokens`,
+`cached_input_tokens`, `cache_write_input_tokens`, `reasoning_output_tokens`.
+
+  * A session from `start_session/1` starts from zero, so the first turn
+    reports its full usage.
+  * A session from `resume_session/2` has no known earlier total. The first
+    completed turn reports no usage and records the total; later turns report
+    deltas.
+  * A counter that is missing from either completed total, or that decreased
+    (a thread reset), has no delta for that turn. The new total becomes the
+    baseline. Negative values are never emitted.
+  * A failed or interrupted turn does not update the baseline. Tokens it used
+    are included in the next successful turn's delta, because completion
+    totals cannot separate them.
 
 ## Testing
 

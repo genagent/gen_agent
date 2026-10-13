@@ -70,25 +70,25 @@ defmodule GenAgent.LifecycleHooksTest do
       parent = self()
 
       pre_run = fn state ->
-        send(parent, {:ordering, :pre_run})
-        {:ok, state}
+        {:ok, %{state | extra: Map.put(state.extra, :pre_run_ran, true)}}
       end
 
-      responder = fn _ref, _resp, state ->
-        send(parent, {:ordering, :handle_response})
-        {:noreply, state}
+      # pre_turn runs at dispatch; report whether pre_run had already
+      # updated the state by then.
+      pre_turn = fn prompt, state ->
+        send(parent, {:pre_turn_saw, state.extra[:pre_run_ran]})
+        {:ok, prompt, state}
       end
 
       pid =
         start_server(task_sup, [result_events("ok")],
           pre_run: pre_run,
-          responder: responder
+          pre_turn: pre_turn
         )
 
       assert {:ok, _} = ask(pid, "go")
 
-      assert_received {:ordering, :pre_run}
-      assert_received {:ordering, :handle_response}
+      assert_received {:pre_turn_saw, true}
     end
 
     test "error return stops the agent with :pre_run_failed", %{task_sup: task_sup} do
@@ -144,14 +144,17 @@ defmodule GenAgent.LifecycleHooksTest do
         {:ok, "[prefix] " <> prompt, state}
       end
 
-      # Mock backend records the prompt it receives in Mock state;
-      # use the result events but also assert the rewritten prompt
-      # reached the dispatch via telemetry (below test covers telemetry).
-      pid =
-        start_server(task_sup, [result_events("ok")], pre_turn: pre_turn)
+      # A function script receives the prompt the backend was given.
+      script = fn prompt ->
+        send(parent, {:backend_prompt, prompt})
+        result_events("ok")
+      end
+
+      pid = start_server(task_sup, [script], pre_turn: pre_turn)
 
       assert {:ok, _} = ask(pid, "hello")
       assert_received {:rewrote, "hello"}
+      assert_received {:backend_prompt, "[prefix] hello"}
     end
 
     test ":skip delivers :pre_turn_skipped to ask caller", %{task_sup: task_sup} do
@@ -198,6 +201,126 @@ defmodule GenAgent.LifecycleHooksTest do
       # Agent is still alive and :idle.
       assert status(pid).state == :idle
     end
+
+    test "a callback-returned crash tuple is rejected without exposing its value", %{
+      task_sup: task_sup
+    } do
+      parent = self()
+      secret = "review-secret-marker"
+      pre_turn = fn _prompt, _state -> {:crashed, %{token: secret}} end
+      pid = start_server(task_sup, [], pre_turn: pre_turn)
+      name = status(pid).name
+      handler_id = "invalid-pre-turn-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:gen_agent, :turn, :rejected],
+        fn _event, _measurements, meta, _config ->
+          if meta.agent == name, do: send(parent, {:rejected_reason, meta.reason_kind})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert {:error, :pre_turn_invalid} = ask(pid, "go")
+      assert_receive {:rejected_reason, :pre_turn_invalid}
+    end
+
+    test "a self-chain pre_turn crash reaches handle_error and prompt telemetry", %{
+      task_sup: task_sup
+    } do
+      parent = self()
+
+      pre_turn = fn
+        "second", _state -> raise "limiter down"
+        prompt, state -> {:ok, prompt, state}
+      end
+
+      pid =
+        start_server(task_sup, [result_events("first")],
+          pre_turn: pre_turn,
+          responder: fn _ref, _response, state -> {:prompt, "second", state} end,
+          error_handler: fn _ref, reason, state ->
+            send(parent, {:generated_error, reason})
+            {:noreply, state}
+          end
+        )
+
+      name = status(pid).name
+      handler_id = "generated-prompt-error-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:gen_agent, :prompt, :error],
+        fn _event, _measurements, meta, _config ->
+          if meta.agent == name, do: send(parent, {:generated_prompt_error, meta.reason})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert {:ok, %{text: "first"}} = ask(pid, "first")
+      assert_receive {:generated_error, {:pre_turn_crashed, RuntimeError}}
+      assert_receive {:generated_prompt_error, {:pre_turn_crashed, RuntimeError}}
+      assert status(pid).state == :idle
+      assert status(pid).halted == false
+    end
+
+    for {mode, expected_reason} <- [
+          {:skip, :pre_turn_skipped},
+          {:invalid, :pre_turn_invalid}
+        ] do
+      @tag generated_mode: mode, expected_reason: expected_reason
+      test "an event-generated prompt with #{mode} pre_turn reports the rejection", %{
+        task_sup: task_sup,
+        generated_mode: mode,
+        expected_reason: expected_reason
+      } do
+        parent = self()
+
+        pre_turn = fn _prompt, state ->
+          if mode == :skip, do: {:skip, state}, else: :invalid_return
+        end
+
+        pid =
+          start_server(task_sup, [],
+            pre_turn: pre_turn,
+            event_handler: fn _event, state -> {:prompt, "from event", state} end,
+            error_handler: fn _ref, reason, state ->
+              send(parent, {:generated_error, reason})
+              {:noreply, state}
+            end
+          )
+
+        notify(pid, :go)
+        assert_receive {:generated_error, ^expected_reason}
+        assert status(pid).state == :idle
+        assert status(pid).halted == false
+      end
+    end
+
+    test "repeated generated-prompt recovery leaves the mailbox responsive", %{
+      task_sup: task_sup
+    } do
+      parent = self()
+
+      pid =
+        start_server(task_sup, [],
+          pre_turn: fn _prompt, state -> {:skip, state} end,
+          event_handler: fn _event, state -> {:prompt, "retry", state} end,
+          error_handler: fn _ref, _reason, state ->
+            send(parent, :retry_rejected)
+            {:prompt, "retry", state}
+          end
+        )
+
+      notify(pid, :start)
+      assert_receive :retry_rejected, 500
+      assert %{state: :idle} = :gen_statem.call(pid, :status, 500)
+      assert :ok = :gen_statem.stop(pid, :normal, 1_000)
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -239,25 +362,29 @@ defmodule GenAgent.LifecycleHooksTest do
     test "runs between decision callback and transition", %{task_sup: task_sup} do
       parent = self()
 
-      responder = fn _ref, _resp, state ->
-        send(parent, {:ordering, :handle_response})
-        {:noreply, state}
+      record = fn state, entry ->
+        %{state | extra: Map.update(state.extra, :trace, [entry], &(&1 ++ [entry]))}
       end
 
-      post_turn = fn _outcome, _ref, state ->
-        send(parent, {:ordering, :post_turn})
-        {:ok, state}
+      responder = fn _ref, _resp, state -> {:halt, record.(state, :handle_response)} end
+      post_turn = fn _outcome, _ref, state -> {:ok, record.(state, :post_turn)} end
+
+      # post_run fires on the halt transition, so the trace it sees must
+      # have the decision callback first and post_turn second.
+      post_run = fn state ->
+        send(parent, {:trace, state.extra[:trace]})
+        :ok
       end
 
       pid =
         start_server(task_sup, [result_events("ok")],
           responder: responder,
-          post_turn: post_turn
+          post_turn: post_turn,
+          post_run: post_run
         )
 
       assert {:ok, _} = ask(pid, "go")
-      assert_received {:ordering, :handle_response}
-      assert_received {:ordering, :post_turn}
+      assert_receive {:trace, [:handle_response, :post_turn]}, 500
     end
 
     test "crash is caught and transition proceeds", %{task_sup: task_sup} do

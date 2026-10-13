@@ -74,8 +74,9 @@ for {name, behavior} <- [sync_retry: {:fail, :unavailable}, event_retry: {:error
     end
 
   assert hd(refs) == original
-  assert length(Enum.uniq(refs)) == 3
-  # Retrying starts new requests; the original request keeps its failure.
+  assert Enum.uniq(refs) == [original]
+  # Every failed attempt stays with the original request; the final failure
+  # is stored only after the retry budget is exhausted.
   assert {:error, :unavailable} = GenAgent.poll(name, original, 5_000)
 
   assert %{state: :idle, halted: true, queued: 0, agent_state: %{retries: 2}} =

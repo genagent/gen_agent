@@ -68,47 +68,76 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
   end
 
   test "dispatches across free workers first", %{name: name} do
-    # Each worker has one echo script.
-    echo = fn prompt -> [Event.new(:result, %{text: "echo:#{prompt}"})] end
-    {:ok, _} = start_pool(name, 3, [echo, echo, echo])
+    with_held_tasks(name, fn ->
+      start_controlled_pool(name, 3)
 
-    # Three concurrent tells should each land on a different worker.
-    {:ok, t1} = GenAgentEnsemble.tell(name, "a")
-    {:ok, t2} = GenAgentEnsemble.tell(name, "b")
-    {:ok, t3} = GenAgentEnsemble.tell(name, "c")
+      {:ok, t1} = GenAgentEnsemble.tell(name, "a")
+      {:ok, t2} = GenAgentEnsemble.tell(name, "b")
+      {:ok, t3} = GenAgentEnsemble.tell(name, "c")
 
-    # Pool should have no queue depth.
-    {:ok, info} = GenAgentEnsemble.status(name)
-    assert info.queued == 0
+      # All three prompts are running at once, so each landed on its own worker.
+      tasks = for prompt <- ["a", "b", "c"], do: hold_prompt(prompt)
+      assert tasks |> Enum.uniq() |> length() == 3
 
-    assert %{text: "echo:a"} = await_completion(name, t1)
-    assert %{text: "echo:b"} = await_completion(name, t2)
-    assert %{text: "echo:c"} = await_completion(name, t3)
+      {:ok, info} = GenAgentEnsemble.status(name)
+      assert {info.free, info.busy, info.queued} == {0, 3, 0}
+
+      for {task, prompt} <- Enum.zip(tasks, ["a", "b", "c"]) do
+        send(task, {:result, "echo:#{prompt}"})
+      end
+
+      assert {:ok, %{text: "echo:a"}} = GenAgentEnsemble.await(name, t1, 5_000)
+      assert {:ok, %{text: "echo:b"}} = GenAgentEnsemble.await(name, t2, 5_000)
+      assert {:ok, %{text: "echo:c"}} = GenAgentEnsemble.await(name, t3, 5_000)
+
+      {:ok, info} = GenAgentEnsemble.status(name)
+      assert {info.free, info.busy, info.queued} == {3, 0, 0}
+    end)
   end
 
   test "queues when all workers are busy, drains as they free up", %{name: name} do
-    # 2 workers, 4 tells. Each worker needs two scripts (one per turn).
-    echo = fn prompt -> [Event.new(:result, %{text: "r:#{prompt}"})] end
-    {:ok, _} = start_pool(name, 2, [echo, echo, echo, echo])
+    with_held_tasks(name, fn ->
+      start_controlled_pool(name, 2)
 
-    {:ok, t1} = GenAgentEnsemble.tell(name, "p1")
-    {:ok, t2} = GenAgentEnsemble.tell(name, "p2")
-    {:ok, t3} = GenAgentEnsemble.tell(name, "p3")
-    {:ok, t4} = GenAgentEnsemble.tell(name, "p4")
+      {:ok, t1} = GenAgentEnsemble.tell(name, "p1")
+      task1 = hold_prompt("p1")
+      {:ok, t2} = GenAgentEnsemble.tell(name, "p2")
+      task2 = hold_prompt("p2")
+      {:ok, t3} = GenAgentEnsemble.tell(name, "p3")
+      {:ok, t4} = GenAgentEnsemble.tell(name, "p4")
 
-    # Timing-dependent to observe mid-flight queue depth with the Mock
-    # backend -- skip that and just verify all four eventually complete
-    # and pool settles.
-    for t <- [t1, t2, t3, t4] do
-      assert %{text: "r:" <> _} = await_completion(name, t)
-    end
+      # tell/status are serialized by the ensemble, so both queued prompts are
+      # visible here and neither has reached a backend.
+      {:ok, info} = GenAgentEnsemble.status(name)
+      assert {info.free, info.busy, info.queued} == {0, 2, 2}
+      refute_received {:controlled_prompt, _, "p3", _}
+      refute_received {:controlled_prompt, _, "p4", _}
 
-    # Eventually, pool settles back to all-free.
-    Process.sleep(50)
-    {:ok, info} = GenAgentEnsemble.status(name)
-    assert info.free == 2
-    assert info.busy == 0
-    assert info.queued == 0
+      # Finish p2 before p1 (out of start order): the queue head, p3, runs next.
+      send(task2, {:result, "r:p2"})
+      assert {:ok, %{text: "r:p2"}} = GenAgentEnsemble.await(name, t2, 5_000)
+      task3 = hold_prompt("p3")
+      refute_received {:controlled_prompt, _, "p4", _}
+      {:ok, info} = GenAgentEnsemble.status(name)
+      assert {info.free, info.busy, info.queued} == {0, 2, 1}
+
+      send(task1, {:result, "r:p1"})
+      assert {:ok, %{text: "r:p1"}} = GenAgentEnsemble.await(name, t1, 5_000)
+      task4 = hold_prompt("p4")
+      {:ok, info} = GenAgentEnsemble.status(name)
+      assert {info.free, info.busy, info.queued} == {0, 2, 0}
+
+      # Release the last two in reverse of start order.
+      send(task4, {:result, "r:p4"})
+      assert {:ok, %{text: "r:p4"}} = GenAgentEnsemble.await(name, t4, 5_000)
+      {:ok, info} = GenAgentEnsemble.status(name)
+      assert {info.free, info.busy, info.queued} == {1, 1, 0}
+
+      send(task3, {:result, "r:p3"})
+      assert {:ok, %{text: "r:p3"}} = GenAgentEnsemble.await(name, t3, 5_000)
+      {:ok, info} = GenAgentEnsemble.status(name)
+      assert {info.free, info.busy, info.queued} == {2, 0, 0}
+    end)
   end
 
   test "worker turn error fails the token, pool continues", %{name: name} do
@@ -237,17 +266,54 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
     assert length(info.workers) == 3
   end
 
-  defp await_completion(name, token, retries \\ 100) do
-    case GenAgentEnsemble.poll(name, token) do
-      {:ok, :completed, response} ->
-        response
+  defp start_controlled_pool(name, count) do
+    worker =
+      {"#{name}-w", ControlledAgent,
+       [backend: ControlledBackend, observer: self(), tag: "worker"]}
 
-      {:ok, :pending} when retries > 0 ->
-        Process.sleep(20)
-        await_completion(name, token, retries - 1)
+    {:ok, _pid} =
+      GenAgentEnsemble.start_link(
+        name: name,
+        strategy: Pool,
+        opts: [worker_count: count, worker_template: worker]
+      )
+  end
 
-      other ->
-        flunk("expected completion, got: #{inspect(other)}")
+  # Waits for a backend to start `prompt` and records its task so it is
+  # released if the test fails before sending a result.
+  defp hold_prompt(prompt) do
+    assert_receive {:controlled_prompt, "worker", ^prompt, task}, 2_000
+    monitor = Process.monitor(task)
+    Process.put(:held_tasks, [{task, monitor} | Process.get(:held_tasks, [])])
+    task
+  end
+
+  # Unblocks every held or still-announced backend task on exit, including on
+  # assertion failure, so no fixture waits out its timeout.
+  defp with_held_tasks(name, fun) do
+    fun.()
+  after
+    tasks = Process.get(:held_tasks, [])
+    for {task, _monitor} <- tasks, do: send(task, {:error, :test_cleanup})
+    # Stop dispatch before waiting for fixture exits, including after an assertion
+    # fails while other work is still queued. Core termination closes its tasks.
+    safe_stop(name)
+    drain_prompts()
+
+    for {task, monitor} <- tasks do
+      assert_receive {:DOWN, ^monitor, :process, ^task, _reason}, 2_000
+    end
+
+    Process.delete(:held_tasks)
+  end
+
+  defp drain_prompts do
+    receive do
+      {:controlled_prompt, _tag, _prompt, task} ->
+        send(task, {:error, :test_cleanup})
+        drain_prompts()
+    after
+      0 -> :ok
     end
   end
 

@@ -69,6 +69,134 @@ defmodule GenAgent.TurnTelemetryTest do
 
   defp ask(pid, prompt), do: :gen_statem.call(pid, {:ask, prompt}, 5_000)
 
+  test "termination telemetry reports normal and abnormal callback-driven exits",
+       %{name: name, task_sup: task_sup} do
+    observer = self()
+    handler = "terminated-telemetry-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:gen_agent, :terminated],
+        fn event, measurements, metadata, _ ->
+          if metadata.agent == name,
+            do: send(observer, {:terminated, event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    normal = start_agent(name, task_sup, [])
+    assert :ok = :gen_statem.stop(normal, :normal, 1_000)
+
+    assert_receive {:terminated, [:gen_agent, :terminated], %{system_time: time},
+                    %{agent: ^name, reason: :normal}},
+                   500
+
+    assert is_integer(time)
+
+    crashed = start_agent(name, task_sup, [])
+    Process.unlink(crashed)
+    assert :ok = :gen_statem.stop(crashed, :fixture_failure, 1_000)
+
+    assert_receive {:terminated, [:gen_agent, :terminated], %{system_time: time},
+                    %{agent: ^name, reason: :fixture_failure}},
+                   500
+
+    assert is_integer(time)
+  end
+
+  test "an abrupt kill bypasses termination telemetry", %{name: name, task_sup: task_sup} do
+    observer = self()
+    handler = "killed-telemetry-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:gen_agent, :terminated],
+        fn event, measurements, metadata, _ ->
+          if metadata.agent == name,
+            do: send(observer, {:terminated, event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    pid = start_agent(name, task_sup, [])
+    Process.unlink(pid)
+    monitor = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :killed}, 500
+    refute_receive {:terminated, [:gen_agent, :terminated], _, _}, 0
+  end
+
+  test "state, mailbox, and notification telemetry tracks a queued turn",
+       %{name: name, task_sup: task_sup} do
+    parent = self()
+    handler = "runtime-telemetry-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach_many(
+        handler,
+        [
+          [:gen_agent, :state, :changed],
+          [:gen_agent, :mailbox, :queued],
+          [:gen_agent, :event, :received]
+        ],
+        fn event, measurements, metadata, _ ->
+          if metadata.agent == name,
+            do: send(parent, {:runtime_telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    pid =
+      start_agent(name, task_sup, [
+        Mock.gate(:active, [Event.new(:result, %{text: "active"})]),
+        [Event.new(:result, %{text: "queued"})]
+      ])
+
+    assert_receive {:runtime_telemetry, [:gen_agent, :state, :changed], _,
+                    %{from: nil, to: :idle}}
+
+    assert {:ok, _} = :gen_statem.call(pid, {:tell, "active"})
+    assert_receive {:mock_blocked, :active, turn_pid}
+
+    assert_receive {:runtime_telemetry, [:gen_agent, :state, :changed], _,
+                    %{from: :idle, to: :processing}}
+
+    assert {:ok, queued_ref} = :gen_statem.call(pid, {:tell, "queued"})
+
+    assert_receive {:runtime_telemetry, [:gen_agent, :mailbox, :queued], %{depth: 1},
+                    %{agent: ^name}}
+
+    assert :ok = :gen_statem.call(pid, {:notify_ack, :note})
+
+    assert_receive {:runtime_telemetry, [:gen_agent, :event, :received], _,
+                    %{agent: ^name, event: :note}}
+
+    send(turn_pid, {:mock_release, :active})
+    assert {:ok, :completed, %{text: "queued"}} = wait_for_completion(pid, queued_ref)
+  end
+
+  defp wait_for_completion(pid, ref, attempts \\ 50)
+  defp wait_for_completion(_pid, _ref, 0), do: flunk("queued turn did not complete")
+
+  defp wait_for_completion(pid, ref, attempts) do
+    case :gen_statem.call(pid, {:poll, ref}) do
+      {:ok, :pending} ->
+        Process.sleep(10)
+        wait_for_completion(pid, ref, attempts - 1)
+
+      result ->
+        result
+    end
+  end
+
   test "completed turns emit content-free start and stop with matching refs and wall time",
        %{name: name, task_sup: task_sup} do
     pid = start_agent(name, task_sup, [[Event.new(:result, %{text: "ok"})]])
@@ -76,7 +204,7 @@ defmodule GenAgent.TurnTelemetryTest do
 
     assert_receive {:telemetry, [:gen_agent, :turn, :start], %{system_time: time}, start}, 500
     assert is_integer(time)
-    assert start == %{agent: name, ref: start.ref, origin: :ask}
+    assert start == %{agent: name, attempt: 1, ref: start.ref, origin: :ask}
     assert is_reference(start.ref)
 
     assert_receive {:telemetry, [:gen_agent, :turn, :stop], %{duration_ms: duration}, stop}, 500
@@ -104,6 +232,7 @@ defmodule GenAgent.TurnTelemetryTest do
 
     assert meta == %{
              agent: name,
+             attempt: 1,
              ref: ref,
              origin: :ask,
              reason_kind: :backend_or_callback_error
@@ -125,7 +254,7 @@ defmodule GenAgent.TurnTelemetryTest do
                    500
 
     assert duration >= 40
-    assert meta == %{agent: name, ref: ref, origin: :ask, reason_kind: :timeout}
+    assert meta == %{agent: name, attempt: 1, ref: ref, origin: :ask, reason_kind: :timeout}
   end
 
   test "task crashes report a bounded reason kind", %{name: name, task_sup: task_sup} do
@@ -137,7 +266,7 @@ defmodule GenAgent.TurnTelemetryTest do
                    500
 
     assert duration >= 0
-    assert meta == %{agent: name, ref: ref, origin: :ask, reason_kind: :task_crashed}
+    assert meta == %{agent: name, attempt: 1, ref: ref, origin: :ask, reason_kind: :task_crashed}
   end
 
   test "interrupts settle a started turn with an error", %{name: name, task_sup: task_sup} do
@@ -161,7 +290,7 @@ defmodule GenAgent.TurnTelemetryTest do
                    500
 
     assert duration >= 0
-    assert meta == %{agent: name, ref: ref, origin: :ask, reason_kind: :interrupted}
+    assert meta == %{agent: name, attempt: 1, ref: ref, origin: :ask, reason_kind: :interrupted}
   end
 
   test "queued prompt overload is rejected without starting that ref",
@@ -185,6 +314,7 @@ defmodule GenAgent.TurnTelemetryTest do
 
     assert rejected == %{
              agent: name,
+             attempt: 1,
              ref: rejected.ref,
              origin: :ask,
              reason_kind: :overloaded
@@ -213,6 +343,7 @@ defmodule GenAgent.TurnTelemetryTest do
 
     assert meta == %{
              agent: name,
+             attempt: 1,
              ref: meta.ref,
              origin: :ask,
              reason_kind: :pre_turn_skipped

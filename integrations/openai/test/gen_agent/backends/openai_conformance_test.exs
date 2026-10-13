@@ -1,5 +1,6 @@
 defmodule GenAgent.Backends.OpenAIConformanceTest do
   use GenAgent.Test.BackendConformance, async: true
+  alias GenAgent.Test.BackendErrorAssertions, as: Errors
 
   defp conformance_setup(_context) do
     observer = self()
@@ -20,7 +21,7 @@ defmodule GenAgent.Backends.OpenAIConformanceTest do
       second_prompt: "second",
       error_prompt: "fail",
       assert_error: fn reason ->
-        assert reason == {:http_error, 401, %{"error" => "fixture failure"}}
+        Errors.assert_error(reason, :openai, {:http_error, 401, %{"error" => "fixture failure"}})
       end,
       assert_threaded: fn _first, _second ->
         assert_receive {:conformance_request, first_body}
