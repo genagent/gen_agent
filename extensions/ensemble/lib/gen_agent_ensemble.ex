@@ -26,6 +26,49 @@ defmodule GenAgentEnsemble do
       {:ok, response} = GenAgentEnsemble.ask("research-1", "quick question", timeout: 30_000)
 
   See `GenAgentEnsemble.Strategy` for how to implement your own strategy.
+
+  ## Admission limits
+
+  One gate in the session server covers every public `ask`, `tell` and
+  `tell_with_completion` call (including `stream_to:`), for all strategies.
+  It runs before a token is minted, so a rejected call leaves no token, no
+  completion or stream message, no strategy callback, and no child work behind.
+  It returns `{:error, {:overloaded, info}}`:
+
+      %{
+        queue: :ensemble_prompts,
+        limit: :count | :bytes,
+        pending_count: 3,
+        pending_bytes: 120,
+        incoming_bytes: 42,
+        max_count: 1_000 | :infinity,
+        max_bytes: 1_048_576 | :infinity
+      }
+
+  The info map holds numbers and limits only, never the prompt. When both
+  limits would be exceeded, `:count` is reported. A prompt that exactly fills
+  the remaining bytes is admitted.
+
+  A call is charged once, at admission, with `:erlang.external_size/1` of the
+  original prompt (prompt options are not counted, since built-in strategies do
+  not retain them). The charge stays until the logical token reaches its
+  terminal result: success, error, cancellation (including
+  `{:ok, :cancelled_unconfirmed}`), dispatch rejection, or halt. Pipeline
+  stages, Debate and Consensus rounds, and Supervisor or Consensus fanout do not
+  change the charge, and capacity stays charged while a cancellation executes.
+  A caller's `ask/3` timeout does not release the work. Completed-result
+  retention (`:max_completed_results`), `poll/2` and `inbox/1` do not affect it.
+  Accepted requests are never evicted.
+
+  This is a budget for the original serialized prompts of outstanding requests.
+  It is not a total memory limit or a limit on physical work. The raw mailbox,
+  strategy state and options, prompts a strategy generates, intermediate
+  outputs, fanout, child backend histories, and completed results are bounded
+  separately or not at all.
+
+  `status/1` reports the live counters under `:admission`, and each rejection
+  emits `[:gen_agent_ensemble, :admission, :rejected]`; see
+  `GenAgentEnsemble.Telemetry`.
   """
 
   @doc """
@@ -41,6 +84,15 @@ defmodule GenAgentEnsemble do
   order is evicted first; success, error, and cancellation all count.
   Asks are never cached. This is a result count bound, not a byte limit or
   a bound on strategy state or pending work.
+
+  Top-level `:max_pending_prompts` (default 1_000) and
+  `:max_pending_prompt_bytes` (default 1_048_576) bound the public `ask/3`,
+  `tell/3` and `tell_with_completion/4` invocations outstanding in this
+  session, active plus waiting, until each reaches a terminal result. Each
+  accepts a non-negative integer or `:infinity` independently; zero rejects
+  every new admission, including an idle session and an empty prompt. Invalid
+  values return `{:error, {:invalid_option, key, value}}` before strategy
+  initialization or owned tree startup. See "Admission limits" below.
 
   The session is linked to its caller and stops when that caller exits,
   including normally. Runtime shutdown waits for the owned agent tree;
@@ -78,13 +130,15 @@ defmodule GenAgentEnsemble do
 
   @doc """
   Fire-and-forget prompt. Returns `{:ok, token}` immediately; use
-  `poll/2` or `inbox/1` to retrieve the response later.
+  `poll/2` or `inbox/1` to retrieve the response later. Returns
+  `{:error, {:overloaded, info}}` without a token when the session's admission
+  limits are full (see "Admission limits" in the module documentation).
   """
   defdelegate tell(name, prompt), to: GenAgentEnsemble.Server
 
   @doc """
   Like `tell/2` but with strategy-specific options (e.g.
-  `agent: "alice"` for Switchboard).
+  `agent: "alice"` for Switchboard). Subject to the same admission limits.
   """
   defdelegate tell(name, prompt, opts), to: GenAgentEnsemble.Server
 
@@ -95,7 +149,9 @@ defmodule GenAgentEnsemble do
       {:gen_agent_ensemble, :completion, session, token, {:ok, response} | {:error, reason}}
 
   The recipient defaults to the caller. It must be a PID (otherwise raises
-  `FunctionClauseError`).
+  `FunctionClauseError`). When admission limits are full it returns
+  `{:error, {:overloaded, info}}`; no completion or stream message is sent
+  for a rejected call.
   Notification does not consume the result stored for `poll/2` or `inbox/1`.
   It is delivered even when retention is disabled or the cache is full.
   Halt delivers `{:error, {:halted, reason}}` before stopping the session;
@@ -202,6 +258,13 @@ defmodule GenAgentEnsemble do
   `await/3` or `poll/2` while the ensemble is alive. Budget
   long strategies (Debate, Pipeline, Consensus, Supervisor) explicitly with
   `timeout:` or the application setting.
+
+  ## Admission
+
+  When the session's admission limits are full, `ask/3` returns
+  `{:error, {:overloaded, info}}` immediately and starts no work. An accepted
+  ask stays charged until its logical terminal result, even if the caller's
+  timeout expires first.
   """
   defdelegate ask(name, prompt, opts), to: GenAgentEnsemble.Server
 
@@ -227,6 +290,20 @@ defmodule GenAgentEnsemble do
 
   @doc """
   Inspect the ensemble: running agents, strategy phase, queue depth.
+
+  The result always includes an `:admission` map, added after the strategy's own
+  fields so a strategy cannot replace it:
+
+      %{
+        scope: :outstanding,
+        pending_count: 2,
+        pending_bytes: 96,
+        max_pending_prompts: 1_000,
+        max_pending_prompt_bytes: 1_048_576
+      }
+
+  The counters cover outstanding public requests, active plus waiting. The two
+  maximums are non-negative integers or `:infinity`.
   """
   defdelegate status(name), to: GenAgentEnsemble.Server
 

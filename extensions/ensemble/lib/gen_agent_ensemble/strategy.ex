@@ -123,6 +123,21 @@ defmodule GenAgentEnsemble.Strategy do
   from `c:init/1` stops initialization with the same reason and stops any
   children already started.
 
+  ## Admission
+
+  The server admits a public `tell`/`ask` before it calls `handle_tell/4` or
+  `handle_ask/4`, so a strategy never sees a request that exceeded the
+  session's `:max_pending_prompts` or `:max_pending_prompt_bytes`. Capacity
+  covers every outstanding token, active plus queued, and is returned only when
+  the token reaches a terminal result through `{:reply, ...}`,
+  `{:reply_error, ...}`, cancellation, dispatch rejection or halt. A strategy
+  that holds work in its own queue, or fans one token out over several
+  dispatches, therefore needs no accounting of its own, and must not drop a
+  token without closing it: the capacity of an unclosed token is never
+  returned. The charge is the original prompt's `:erlang.external_size/1`;
+  prompts a strategy generates and the options passed to the callbacks are not
+  counted. See `GenAgentEnsemble` ("Admission limits").
+
   ## Tokens
 
   Tokens are opaque strings minted by the framework when the caller
@@ -201,7 +216,7 @@ defmodule GenAgentEnsemble.Strategy do
   """
   @callback handle_agent_down(agent_name, term(), strategy_state) :: result
 
-  @doc "Return extra status fields. These are merged over the server's base map and can replace its keys; if omitted, no extra fields are added."
+  @doc "Return extra status fields. These are merged over the server's base map and can replace its keys, except `:admission`: the server adds that key afterwards and replaces any strategy value. If omitted, no extra fields are added."
   @callback handle_status(strategy_state) :: map()
 
   @optional_callbacks [

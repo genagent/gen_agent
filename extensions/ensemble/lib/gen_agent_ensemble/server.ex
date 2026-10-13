@@ -8,6 +8,8 @@ defmodule GenAgentEnsemble.Server do
 
   @cancel_child_timeout 5_000
   @default_max_completed_results 100
+  @default_max_pending_prompts 1_000
+  @default_max_pending_prompt_bytes 1_048_576
 
   defstruct [
     :owner,
@@ -25,8 +27,13 @@ defmodule GenAgentEnsemble.Server do
     :monitors,
     # tokens awaiting reply, %{token => {:tell, recipient | nil} | {:ask, from}}
     :pending,
-    # %{token => %{started_at: integer, kind: :ask | :tell, dispatches: integer}}
+    # %{token => %{started_at: integer, kind: :ask | :tell, dispatches: integer,
+    #              charge: non_neg_integer}}; charge is the admitted prompt size
     :token_contexts,
+    # sum of the charges of all outstanding (active or waiting) tokens
+    :pending_prompt_bytes,
+    :max_pending_prompts,
+    :max_pending_prompt_bytes,
     # %{token => pid}, only for opted-in completion requests
     :stream_recipients,
     # completed tell results, %{token => {:ok, response} | {:error, reason}}
@@ -193,6 +200,10 @@ defmodule GenAgentEnsemble.Server do
     session_name = Keyword.fetch!(opts, :name)
 
     with {:ok, max_completed_results} <- validate_max_completed_results(opts),
+         {:ok, max_pending_prompts} <-
+           validate_limit(opts, :max_pending_prompts, @default_max_pending_prompts),
+         {:ok, max_pending_prompt_bytes} <-
+           validate_limit(opts, :max_pending_prompt_bytes, @default_max_pending_prompt_bytes),
          {:ok, strategy_state, start_specs} <- strategy_mod.init(strategy_opts),
          {:ok, agent_tree} <- GenAgentEnsemble.AgentTree.start_link(session_name) do
       # Older releases left this handler behind after abrupt server death.
@@ -215,6 +226,9 @@ defmodule GenAgentEnsemble.Server do
         monitors: %{},
         pending: %{},
         token_contexts: %{},
+        pending_prompt_bytes: 0,
+        max_pending_prompts: max_pending_prompts,
+        max_pending_prompt_bytes: max_pending_prompt_bytes,
         stream_recipients: %{},
         completed: %{},
         completed_order: :queue.new(),
@@ -245,6 +259,14 @@ defmodule GenAgentEnsemble.Server do
       :infinity -> {:ok, :infinity}
       value when is_integer(value) and value >= 0 -> {:ok, value}
       value -> {:error, {:invalid_option, :max_completed_results, value}}
+    end
+  end
+
+  defp validate_limit(opts, key, default) do
+    case Keyword.get(opts, key, default) do
+      :infinity -> {:ok, :infinity}
+      value when is_integer(value) and value >= 0 -> {:ok, value}
+      value -> {:error, {:invalid_option, key, value}}
     end
   end
 
@@ -293,30 +315,52 @@ defmodule GenAgentEnsemble.Server do
     do: handle_call_impl({:tell, prompt, opts, recipient, nil}, from, state)
 
   defp handle_call_impl({:tell, prompt, opts, recipient, stream_to}, _from, state) do
-    token = mint_token()
-    state = start_token(state, token, :tell, {:tell, recipient})
+    case admit(state, :tell, prompt) do
+      {:ok, charge} ->
+        token = mint_token()
+        state = start_token(state, token, :tell, {:tell, recipient}, charge)
 
-    state =
-      if stream_to,
-        do: %{state | stream_recipients: Map.put(state.stream_recipients, token, stream_to)},
-        else: state
+        state =
+          if stream_to,
+            do: %{state | stream_recipients: Map.put(state.stream_recipients, token, stream_to)},
+            else: state
 
-    {ops, strategy_state} =
-      call_strategy(state.strategy_mod, :handle_tell, [prompt, opts, token, state.strategy_state])
+        {ops, strategy_state} =
+          call_strategy(state.strategy_mod, :handle_tell, [
+            prompt,
+            opts,
+            token,
+            state.strategy_state
+          ])
 
-    state = %{state | strategy_state: strategy_state} |> apply_ops(ops)
-    {:reply, {:ok, token}, state}
+        state = %{state | strategy_state: strategy_state} |> apply_ops(ops)
+        {:reply, {:ok, token}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   defp handle_call_impl({:ask, prompt, opts}, from, state) do
-    token = mint_token()
-    state = start_token(state, token, :ask, {:ask, from})
+    case admit(state, :ask, prompt) do
+      {:ok, charge} ->
+        token = mint_token()
+        state = start_token(state, token, :ask, {:ask, from}, charge)
 
-    {ops, strategy_state} =
-      call_strategy(state.strategy_mod, :handle_ask, [prompt, opts, token, state.strategy_state])
+        {ops, strategy_state} =
+          call_strategy(state.strategy_mod, :handle_ask, [
+            prompt,
+            opts,
+            token,
+            state.strategy_state
+          ])
 
-    state = %{state | strategy_state: strategy_state} |> apply_ops(ops)
-    {:noreply, state}
+        state = %{state | strategy_state: strategy_state} |> apply_ops(ops)
+        {:noreply, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   defp handle_call_impl({:await, token, timeout}, from, state) do
@@ -409,7 +453,16 @@ defmodule GenAgentEnsemble.Server do
         %{}
       end
 
-    {:reply, {:ok, Map.merge(base, extra)}, state}
+    # Merged last so a strategy cannot replace the authoritative counters.
+    admission = %{
+      scope: :outstanding,
+      pending_count: map_size(state.pending),
+      pending_bytes: state.pending_prompt_bytes,
+      max_pending_prompts: state.max_pending_prompts,
+      max_pending_prompt_bytes: state.max_pending_prompt_bytes
+    }
+
+    {:reply, {:ok, base |> Map.merge(extra) |> Map.put(:admission, admission)}, state}
   end
 
   defp handle_cast_impl({:notify, event}, state) do
@@ -1103,14 +1156,67 @@ defmodule GenAgentEnsemble.Server do
     end)
   end
 
-  defp start_token(state, token, kind, pending) do
+  # One gate for every outstanding public tell/ask, active or waiting. It runs
+  # before a token exists, so a rejection leaves strategy state, children and
+  # recipients untouched. The charge is the original prompt's serialized size,
+  # taken once here and returned when the token reaches a terminal result.
+  defp admit(state, kind, prompt) do
+    count = map_size(state.pending)
+    bytes = state.pending_prompt_bytes
+    incoming = :erlang.external_size(prompt)
+    max_count = state.max_pending_prompts
+    max_bytes = state.max_pending_prompt_bytes
+
+    limit =
+      cond do
+        max_count != :infinity and count >= max_count -> :count
+        max_bytes != :infinity and incoming > max_bytes - bytes -> :bytes
+        true -> nil
+      end
+
+    case limit do
+      nil ->
+        {:ok, incoming}
+
+      limit ->
+        emit(
+          :admission,
+          :rejected,
+          %{pending_count: count, pending_bytes: bytes, incoming_bytes: incoming},
+          session_meta(state)
+          |> Map.merge(%{
+            kind: kind,
+            outcome: :rejected,
+            reason_kind: :overloaded,
+            limit: limit,
+            max_pending_prompts: max_count,
+            max_pending_prompt_bytes: max_bytes
+          })
+        )
+
+        {:error,
+         {:overloaded,
+          %{
+            queue: :ensemble_prompts,
+            limit: limit,
+            pending_count: count,
+            pending_bytes: bytes,
+            incoming_bytes: incoming,
+            max_count: max_count,
+            max_bytes: max_bytes
+          }}}
+    end
+  end
+
+  defp start_token(state, token, kind, pending, charge) do
     started_at = System.monotonic_time()
-    context = %{started_at: started_at, kind: kind, dispatches: 0}
+    context = %{started_at: started_at, kind: kind, dispatches: 0, charge: charge}
 
     state = %{
       state
       | pending: Map.put(state.pending, token, pending),
-        token_contexts: Map.put(state.token_contexts, token, context)
+        token_contexts: Map.put(state.token_contexts, token, context),
+        pending_prompt_bytes: state.pending_prompt_bytes + charge
     }
 
     emit(:token, :start, %{system_time: System.system_time()}, token_meta(state, token))
@@ -1132,10 +1238,14 @@ defmodule GenAgentEnsemble.Server do
 
     emit(:token, event, %{duration_ms: elapsed_ms(context.started_at)}, metadata)
 
+    # The only place a token's capacity is returned. Callers reach it through
+    # reply_to_token, which pops the pending entry first, so a duplicate or
+    # late reply never gets here a second time.
     %{
       state
       | token_contexts: Map.delete(state.token_contexts, token),
-        stream_recipients: Map.delete(state.stream_recipients, token)
+        stream_recipients: Map.delete(state.stream_recipients, token),
+        pending_prompt_bytes: state.pending_prompt_bytes - context.charge
     }
   end
 
