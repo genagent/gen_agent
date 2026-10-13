@@ -3,6 +3,7 @@ defmodule GenAgentEnsemble.Strategies.SwitchboardTest do
 
   alias GenAgent.Backends.Mock
   alias GenAgent.Event
+  alias GenAgentEnsemble.HaltSupport
   alias GenAgentEnsemble.Strategies.Switchboard
   alias GenAgentEnsemble.TestAgent
 
@@ -149,11 +150,34 @@ defmodule GenAgentEnsemble.Strategies.SwitchboardTest do
 
   test "last-agent-dies halts the session", %{name: name} do
     {:ok, pid} = start_session(name, [{"alice", [echo("alice")]}])
-    ref = Process.monitor(pid)
+    watched = HaltSupport.watch(pid)
 
     Process.exit(GenAgent.whereis("#{name}/alice"), :kill)
 
-    assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
+    HaltSupport.assert_tree_gone(watched)
+    HaltSupport.assert_halted(name, :switchboard_exhausted)
+  end
+
+  test "last-agent death keeps the specific errors issued before the halt", %{name: name} do
+    alice =
+      {"alice", GenAgentEnsemble.ControlledAgent,
+       [backend: GenAgentEnsemble.ControlledBackend, observer: self(), tag: "alice"]}
+
+    {:ok, pid} =
+      GenAgentEnsemble.start_link(name: name, strategy: Switchboard, opts: [agents: [alice]])
+
+    {:ok, running} = GenAgentEnsemble.tell(name, "first", agent: "alice")
+    assert_receive {:controlled_prompt, "alice", "first", task}, 2_000
+    {:ok, queued} = GenAgentEnsemble.tell(name, "second", agent: "alice")
+    watched = HaltSupport.watch(pid)
+
+    Process.exit(GenAgent.whereis("#{name}/alice"), :kill)
+    HaltSupport.assert_tree_gone(watched)
+
+    assert GenAgentEnsemble.await(name, running, 0) == {:error, {:agent_down, :killed}}
+    assert GenAgentEnsemble.await(name, queued, 0) == {:error, {:agent_down, :killed}}
+    HaltSupport.assert_halted(name, :switchboard_exhausted)
+    Process.exit(task, :kill)
   end
 
   test "idle agent death removes only that agent; survivor keeps serving", %{name: name} do

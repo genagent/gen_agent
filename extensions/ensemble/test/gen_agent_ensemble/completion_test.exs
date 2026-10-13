@@ -192,7 +192,7 @@ defmodule GenAgentEnsemble.CompletionTest do
     assert Task.await(task) == {:ok, :done}
   end
 
-  test "halt notifies recipients and waiters before session termination", %{name: name} do
+  test "halt notifies recipients and waiters and keeps the result readable", %{name: name} do
     pid = start(name)
     {:ok, token} = E.tell_with_completion(name, "go", self(), observer: self())
     task = waiter(pid, name, token)
@@ -200,9 +200,15 @@ defmodule GenAgentEnsemble.CompletionTest do
     E.notify(name, [{:halt, :done}])
     assert Task.await(task) == {:error, {:halted, :done}}
     assert_receive {:gen_agent_ensemble, :completion, ^name, ^token, {:error, {:halted, :done}}}
-    assert_receive {:DOWN, ^mref, :process, ^pid, :normal}
     refute_receive {:gen_agent_ensemble, :completion, ^name, ^token, _}, 0
-    assert catch_exit(E.poll(name, token))
-    assert catch_exit(E.await(name, token))
+
+    # The session outlives the halt; its result is retained and consumable.
+    refute_received {:DOWN, ^mref, :process, ^pid, _}
+    assert E.await(name, token, 0) == {:error, {:halted, :done}}
+    assert E.await(name, token, 0) == {:error, {:halted, :done}}
+    assert E.poll(name, token) == {:error, {:halted, :done}}
+    assert E.await(name, token, 0) == {:error, :not_found}
+    assert E.poll(name, token) == {:error, :not_found}
+    assert_clean(pid)
   end
 end

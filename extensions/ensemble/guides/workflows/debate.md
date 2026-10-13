@@ -204,7 +204,9 @@ iex> E.start_link(
   against nothing. If the opener's text looks like agreement, the
   `:converge` check still waits until turn 2.
 - **Either agent dying halts the session.** Debate needs both
-  sides; there's no "recover with one speaker" mode.
+  sides; there's no "recover with one speaker" mode. A halted ensemble stays
+  alive, failing the pending request and refusing new ones with
+  `{:error, {:halted, reason}}`, until you stop it.
 - **`:reply :transcript` can get large.** Six turns at 1000 tokens
   each is 6K tokens in the final response. Use `:last` or
   `{:synthesize, ...}` if the full transcript isn't useful

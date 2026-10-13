@@ -69,7 +69,7 @@ defmodule GenAgentEnsemble.Strategy do
       with an error. Callers see `{:error, reason}`.
     * `{:forward, agent_name, event}` -- call `GenAgent.notify/2` on
       the named sub-agent.
-    * `{:halt, reason}` -- terminate the session.
+    * `{:halt, reason}` -- end the session logically. See "Halt" below.
 
   Ops are applied sequentially. A rejected scoped dispatch ends the current
   op batch after notifying the strategy; other op failures are logged and
@@ -87,6 +87,29 @@ defmodule GenAgentEnsemble.Strategy do
   completions cannot alter their results; unrelated tokens remain pending.
   Implement these callbacks when the strategy needs to recover, update its
   own state, or advance queued work. Unscoped dispatches have no token to close.
+
+  ## Halt
+
+  The first applied `{:halt, reason}` takes effect at once. The remaining
+  operations of that batch, including any returned by a nested
+  `handle_start_rejected/3` or `handle_dispatch_rejected/4` callback, are
+  skipped, so list any reply the strategy wants delivered **before** the halt.
+  Operations already applied, such as an earlier `{:reply, ...}`, keep their
+  results. Every token still pending is closed with
+  `{:error, {:halted, reason}}`, all open dispatches are retired, and
+  the owned agent tree is told to shut down. `reason` may be any term,
+  including `nil` or `false`.
+
+  After a halt the framework never calls the strategy again: not
+  `handle_tell/4`, `handle_ask/4`, `handle_response/3`, `handle_error/3`,
+  `handle_agent_down/3`, `handle_cancel/2`, `handle_notify/2` or
+  `handle_status/1`. Late completions, stream events and agent exits are
+  dropped, and new `ask`/`tell` calls are refused with
+  `{:error, {:halted, reason}}`. The strategy state is discarded. A second
+  halt in the same batch, or later, has no effect; the first reason wins.
+
+  The ensemble process itself keeps running so callers can still collect
+  results; see "Halt" in `GenAgentEnsemble`.
 
   ## Malformed operations
 
@@ -193,10 +216,10 @@ defmodule GenAgentEnsemble.Strategy do
   """
   @callback handle_error(agent_name, term(), strategy_state) :: result
 
-  @doc "Handle a rejected child start. Defining this callback halts the current operation batch; if omitted, remaining operations continue."
+  @doc "Handle a rejected child start. Defining this callback ends the current operation batch; if omitted, remaining operations continue."
   @callback handle_start_rejected(agent_name, term(), strategy_state) :: result
 
-  @doc "Handle a rejected token-scoped dispatch. This halts the current operation batch. If omitted, the server closes its token with a dispatch error; a callback that does not close the token also gets that fallback."
+  @doc "Handle a rejected token-scoped dispatch. This ends the current operation batch. If omitted, the server closes its token with a dispatch error; a callback that does not close the token also gets that fallback."
   @callback handle_dispatch_rejected(agent_name, token, term(), strategy_state) :: result
   @doc """
   Remove a cancelled token and advance queued work. Return operations for
@@ -216,7 +239,7 @@ defmodule GenAgentEnsemble.Strategy do
   """
   @callback handle_agent_down(agent_name, term(), strategy_state) :: result
 
-  @doc "Return extra status fields. These are merged over the server's base map and can replace its keys, except `:admission`: the server adds that key afterwards and replaces any strategy value. If omitted, no extra fields are added."
+  @doc "Return extra status fields. These are merged over the server's base map and can replace its keys, except `:admission` and `:lifecycle`: the server adds those keys afterwards and replaces any strategy value. Not called once the session has halted. If omitted, no extra fields are added."
   @callback handle_status(strategy_state) :: map()
 
   @optional_callbacks [

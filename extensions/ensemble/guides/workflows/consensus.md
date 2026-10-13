@@ -280,8 +280,9 @@ iex> E.await("arch-review", tok, 600_000) |> E.puts()
   ensembles.
 - **Agent death halts the session.** The panel size is baked in
   at init; a dead agent invalidates the threshold arithmetic.
-  If an agent's backend (e.g. CLI subprocess) dies, restart the
-  whole ensemble rather than expecting a partial panel.
+  If an agent's backend (e.g. CLI subprocess) dies, the halted ensemble
+  stays alive and refuses new requests with `{:error, {:halted, reason}}`.
+  Stop it and start a new ensemble rather than expecting a partial panel.
 - **Heterogeneous backends == heterogeneous timeouts.** Sonnet
   responses through `gen_agent_anthropic` need `:receive_timeout:
   180_000` to reliably complete long-context rounds. OpenAI's

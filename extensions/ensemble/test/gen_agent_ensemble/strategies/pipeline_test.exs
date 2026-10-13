@@ -5,7 +5,7 @@ defmodule GenAgentEnsemble.Strategies.PipelineTest do
   alias GenAgent.Event
   alias GenAgent.Response
   alias GenAgentEnsemble, as: E
-  alias GenAgentEnsemble.{ControlledAgent, ControlledBackend}
+  alias GenAgentEnsemble.{ControlledAgent, ControlledBackend, HaltSupport}
   alias GenAgentEnsemble.Strategies.Pipeline
   alias GenAgentEnsemble.TestAgent
 
@@ -114,10 +114,11 @@ defmodule GenAgentEnsemble.Strategies.PipelineTest do
     {:ok, pid} =
       start_pipeline(name, [[transform("s1")], [transform("s2")]])
 
-    ref = Process.monitor(pid)
+    watched = HaltSupport.watch(pid)
     Process.exit(GenAgent.whereis("#{name}/#{name}-s1"), :kill)
 
-    assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
+    HaltSupport.assert_tree_gone(watched)
+    assert {:stage_down, _} = HaltSupport.assert_halted(name)
   end
 
   test "status reports pipeline shape", %{name: name} do

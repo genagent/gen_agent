@@ -130,7 +130,7 @@ iex> E.status("reviewers")
 | `{:error, {:unknown_agent, name}}` | `opts[:agent]` not in the fleet                  |
 | `{:error, reason}`                 | The agent's turn errored (that agent only fails) |
 | `{:error, {:agent_down, reason}}`  | An agent crashed mid-turn; queued tokens fail    |
-| session halts                      | Last agent dies; session exits                   |
+| `{:error, {:halted, reason}}`      | Last agent died; the session halted              |
 
 With `ask`, routing errors are returned without starting a turn; backend
 and agent-down errors arrive when that turn fails. With `tell`, the
@@ -143,7 +143,11 @@ A dead agent is removed from the fleet: its queued tokens fail with
 
 A single agent's trouble does not take down the fleet. When the
 last agent dies, the whole ensemble halts with
-`{:halt, :switchboard_exhausted}`.
+`{:halt, :switchboard_exhausted}`. Each pending token fails with
+`{:error, {:halted, :switchboard_exhausted}}` (after any per-token error the
+strategy already issued), and new requests return the same error. The ensemble
+process stays up so those results can be read; stop it with
+`GenAgentEnsemble.stop/1` to release its name.
 
 ## Variations
 

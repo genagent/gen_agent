@@ -110,8 +110,10 @@ config :gen_agent_ensemble,
 
 Config-declared ensembles are started under `GenAgentEnsemble.Supervisor`
 with a `:transient` restart policy. An explicit `GenAgentEnsemble.stop/1`
-or a strategy halt exits normally and the ensemble stays stopped until the
-application is restarted; an abnormal crash of the session is restarted.
+exits normally and the ensemble stays stopped until the application is
+restarted; an abnormal crash of the session is restarted. A strategy halt does
+not exit the process (see "Halting" below): the halted ensemble stays
+registered until it is stopped explicitly.
 Caller supervisors can use the same public child spec described below.
 Recovery after a crash of the
 `GenAgentEnsemble.Supervisor` itself is not provided.
@@ -138,8 +140,8 @@ Supervisor.start_link(children, strategy: :one_for_one)
 `GenAgentEnsemble.child_spec/1` requires `:name`, just like `start_link/1`.
 Its ID is `{GenAgentEnsemble, name}`, so multiple distinct named ensembles
 can share a supervisor without generating atoms. The `:transient` restart
-policy keeps explicit stops and strategy halts stopped and restarts abnormal
-exits. `shutdown: :infinity` lets the owned agent tree finish using each
+policy keeps explicit stops stopped and restarts abnormal exits. A halted
+ensemble is still a live child until it is stopped explicitly. `shutdown: :infinity` lets the owned agent tree finish using each
 sub-agent's configured shutdown budget; blocking callbacks or infinite
 budgets can prolong shutdown indefinitely. Override defaults with
 `Supervisor.child_spec/2` if needed. Direct `start_link/1` calls retain their
@@ -227,6 +229,30 @@ emits `[:gen_agent_ensemble, :admission, :rejected]`. This is a budget for the
 original serialized prompts, not a memory limit or a limit on physical work:
 the mailbox, strategy state and options, generated prompts, intermediate
 outputs, backend histories, and completed results are bounded separately.
+
+### Halting
+
+A strategy's first `{:halt, reason}` ends the session logically and
+immediately: the rest of its operation batch is skipped, every pending token
+finishes with `{:error, {:halted, reason}}` (asks, completion recipients and
+registered `await/3` callers included), and the strategy is never called
+again. Results stored earlier are kept.
+
+The ensemble process stays alive under the same PID and name so those results
+can be collected. `await/3`, `poll/2`, `inbox/1`, `cancel/2` and `status/1`
+keep working (`status/1` reports `lifecycle: :halted`); new `ask`, `tell` and
+`tell_with_completion` calls return `{:error, {:halted, reason}}` without
+starting work, and `notify/2` is ignored. The owned agent tree is told to shut
+down at the halt. That shutdown is asynchronous and each child's configured
+budget applies, so there is no latency guarantee and no guarantee an external
+provider has settled.
+
+A halted ensemble cannot be resumed. It holds its name, and under a
+supervisor it counts as an active child, until `GenAgentEnsemble.stop/1`, an
+explicit supervisor termination, or the exit of its owner disposes of it.
+Disposal discards the retained results. Until then they stay in memory with no
+expiry, bounded by `max_completed_results` (a result count, not bytes; zero
+keeps none). Halt errors count against that bound like any other result.
 
 ### Helpers (iex-flavoured sugar)
 

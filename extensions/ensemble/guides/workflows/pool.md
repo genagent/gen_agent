@@ -125,4 +125,5 @@ Uses whichever worker is free. If all are busy, queues behind them.
   replacement. The new worker has a fresh backend session and loses
   the dead worker's conversation history. If replacement startup fails,
   that slot is removed. Other workers continue; if none remain, the pool
-  halts and pending requests fail.
+  halts and pending requests fail with `{:error, {:halted, reason}}`. The
+  halted ensemble stays alive, refusing new requests, until it is stopped.

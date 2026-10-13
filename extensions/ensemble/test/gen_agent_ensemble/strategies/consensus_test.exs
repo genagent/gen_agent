@@ -3,6 +3,7 @@ defmodule GenAgentEnsemble.Strategies.ConsensusTest do
 
   alias GenAgent.Backends.Mock
   alias GenAgent.Event
+  alias GenAgentEnsemble.HaltSupport
   alias GenAgentEnsemble.Strategies.Consensus
   alias GenAgentEnsemble.TestAgent
 
@@ -757,10 +758,11 @@ defmodule GenAgentEnsemble.Strategies.ConsensusTest do
         {"b", [say("yes.\nVERDICT: APPROVE")]}
       ])
 
-    ref = Process.monitor(pid)
+    watched = HaltSupport.watch(pid)
     Process.exit(GenAgent.whereis("#{name}/a"), :kill)
 
-    assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
+    HaltSupport.assert_tree_gone(watched)
+    assert {:agent_down, _} = HaltSupport.assert_halted(name)
   end
 
   test "status reports round progress", %{name: name} do

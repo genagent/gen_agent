@@ -123,25 +123,51 @@ defmodule GenAgentEnsemble.ChildSpecTest do
     end
   end
 
-  for action <- [:stop, :halt] do
-    test "#{action} stays stopped and cleans up the owned tree", %{names: [name, keep]} do
-      supervisor = supervise([name, keep])
-      server = child(supervisor, name)
-      keep_server = child(supervisor, keep)
-      refs = owned_processes(server, name)
+  test "stop stays stopped and cleans up the owned tree", %{names: [name, keep]} do
+    supervisor = supervise([name, keep])
+    server = child(supervisor, name)
+    keep_server = child(supervisor, keep)
+    refs = owned_processes(server, name)
 
-      case unquote(action) do
-        :stop -> assert :ok = Ensemble.stop(name)
-        :halt -> assert {:ok, _} = Ensemble.tell(name, "halt")
-      end
+    assert :ok = Ensemble.stop(name)
 
-      assert_cleaned_up(refs)
-      assert await_child(supervisor, name, &(&1 == :undefined)) == :undefined
-      assert %{active: 1} = Supervisor.count_children(supervisor)
-      assert child(supervisor, keep) == keep_server
-      assert {:ok, _} = Ensemble.status(keep)
-      assert Registry.lookup(GenAgentEnsemble.Registry, name) == []
-    end
+    assert_cleaned_up(refs)
+    assert await_child(supervisor, name, &(&1 == :undefined)) == :undefined
+    assert %{active: 1} = Supervisor.count_children(supervisor)
+    assert child(supervisor, keep) == keep_server
+    assert {:ok, _} = Ensemble.status(keep)
+    assert Registry.lookup(GenAgentEnsemble.Registry, name) == []
+  end
+
+  test "halt cleans up the owned tree but keeps the live child until it is stopped", %{
+    names: [name, keep]
+  } do
+    supervisor = supervise([name, keep])
+    server = child(supervisor, name)
+    keep_server = child(supervisor, keep)
+
+    {[{^server, server_ref}], owned} =
+      server |> owned_processes(name) |> Enum.split_with(&(elem(&1, 0) == server))
+
+    assert {:ok, token} = Ensemble.tell(name, "halt")
+
+    assert_cleaned_up(owned)
+    refute_received {:DOWN, ^server_ref, :process, ^server, _}
+
+    # Same child, PID, name and accounting; results are still served.
+    assert child(supervisor, name) == server
+    assert %{active: 2} = Supervisor.count_children(supervisor)
+    assert Registry.lookup(GenAgentEnsemble.Registry, name) == [{server, nil}]
+    assert Ensemble.await(name, token, 0) == {:error, {:halted, :done}}
+    assert {:ok, %{lifecycle: :halted}} = Ensemble.status(name)
+    assert child(supervisor, keep) == keep_server
+
+    # Explicit disposal stays stopped (transient) and frees the name.
+    assert :ok = Ensemble.stop(name)
+    assert_receive {:DOWN, ^server_ref, :process, ^server, _}, 2_000
+    assert await_child(supervisor, name, &(&1 == :undefined)) == :undefined
+    assert %{active: 1} = Supervisor.count_children(supervisor)
+    assert Registry.lookup(GenAgentEnsemble.Registry, name) == []
   end
 
   test "abnormal exit restarts with the same identity after owned tree cleanup", %{

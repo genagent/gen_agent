@@ -174,8 +174,18 @@ defmodule GenAgentEnsemble.TelemetryTest do
     {:ok, _} = GenAgentEnsemble.start_link(name: name, strategy: HaltStrategy, opts: [])
     assert {:error, {:halted, :planned}} = GenAgentEnsemble.ask(name, "private")
     assert_event([:session, :halt], %{session: name, reason_kind: :strategy_halt})
+    assert_event([:token, :start], %{session: name, kind: :ask})
     assert_event([:token, :error], %{session: name, reason_kind: :halted})
-    assert_event([:session, :stop], %{session: name, reason_kind: :normal})
+
+    # The halted session is still alive, so it has not stopped.
+    assert {:error, {:halted, :planned}} = GenAgentEnsemble.ask(name, "refused")
+    refute_received {:telemetry, [:gen_agent_ensemble, :session, :stop], _, _}
+    refute_received {:telemetry, [:gen_agent_ensemble, :token, _], _, _}
+
+    :ok = GenAgentEnsemble.stop(name)
+    assert_event([:session, :stop], %{session: name, outcome: :halted, reason_kind: :normal})
+    refute_received {:telemetry, [:gen_agent_ensemble, :session, :halt], _, _}
+    refute_received {:telemetry, [:gen_agent_ensemble, :token, _], _, _}
   end
 
   test "stopping a busy session marks unfinished work", %{name: name} do
