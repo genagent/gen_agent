@@ -399,6 +399,13 @@ defmodule GenAgent do
   including any rewrite by `pre_turn/2`. The request ref and prompt can be
   recorded together for a transcript.
 
+  Returning `{:prompt, next_prompt, state}` completes the caller's request
+  with this response, then starts an independent follow-up with a new request
+  reference. Its outcome is visible to callbacks, not delivered to the original
+  ask, poll or completion recipient. A completed request does not imply the
+  agent is idle. Use explicit workflow stages when a caller needs the final
+  result of several successful turns.
+
   An exception or malformed return stops the agent. Use one of the three
   `t:callback_return/0` shapes; in particular, a follow-up prompt must be a
   binary.
