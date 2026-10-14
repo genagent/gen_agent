@@ -1,6 +1,6 @@
 {
   ".": "0.7.0",
-  "integrations/claude": "0.2.7",
+  "integrations/claude": "0.3.0",
   "integrations/codex": "0.5.0",
   "integrations/anthropic": "0.4.2",
   "integrations/openai": "0.4.1",

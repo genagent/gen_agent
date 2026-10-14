@@ -28,7 +28,7 @@ Add `gen_agent` using the current requirement in the [core installation guide](h
 
 ```elixir
 def deps do
-  [{:gen_agent_claude, "~> 0.2.7"}] # x-release-please-version
+  [{:gen_agent_claude, "~> 0.3.0"}] # x-release-please-version
 end
 ```
 
