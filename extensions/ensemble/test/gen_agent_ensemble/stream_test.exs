@@ -86,7 +86,11 @@ defmodule GenAgentEnsemble.StreamTest do
 
   defp assert_fenced(pid, name, old_refs) do
     for {ref, {member, _}} <- old_refs do
-      send(pid, {:gen_agent, :event, "#{name}/#{member}", ref, Event.new(:text, %{text: "late"})})
+      send(
+        pid,
+        {:gen_agent, :event, GenAgentEnsemble.member_name(name, member), ref,
+         Event.new(:text, %{text: "late"})}
+      )
     end
 
     send(pid, {:gen_agent, :event, "unknown", make_ref(), Event.new(:text)})
@@ -120,7 +124,7 @@ defmodule GenAgentEnsemble.StreamTest do
         end
 
       assert_receive {:stream_gate, "w", task}
-      {_, child_state} = :sys.get_state(GenAgent.whereis("#{name}/w"))
+      {_, child_state} = :sys.get_state(GenAgent.whereis(GenAgentEnsemble.member_name(name, "w")))
       assert child_state.current_request.stream_to == if(mode == :stream, do: pid, else: nil)
       if mode == :stream, do: event(name, token, "w", 0, :text, "first")
       send(task, :release)
@@ -149,7 +153,7 @@ defmodule GenAgentEnsemble.StreamTest do
     event(name, first, "w", 0, :result, "done")
     assert {:ok, _} = completion(name, first)
     assert_receive {:stream_gate, "w", second_task}
-    {_, child_state} = :sys.get_state(GenAgent.whereis("#{name}/w"))
+    {_, child_state} = :sys.get_state(GenAgent.whereis(GenAgentEnsemble.member_name(name, "w")))
     assert child_state.current_request.stream_to == nil
     send(second_task, :release)
     assert {:ok, _} = completion(name, second)
@@ -299,7 +303,7 @@ defmodule GenAgentEnsemble.StreamTest do
     assert_fenced(pid, name, old_refs)
 
     # Trace the real peer completion as a barrier before checking no late relay.
-    child = GenAgent.whereis("#{name}/b")
+    child = GenAgent.whereis(GenAgentEnsemble.member_name(name, "b"))
     :erlang.trace(child, true, [:send])
     send(b, :release)
     assert_receive {:trace, ^child, :send, {:gen_agent, :completion, _, _, _}, ^pid}
@@ -327,7 +331,7 @@ defmodule GenAgentEnsemble.StreamTest do
     :ok = :sys.suspend(pid)
     tag = make_ref()
     send(pid, {:"$gen_call", {self(), tag}, {:cancel, token}})
-    child = GenAgent.whereis("#{name}/w")
+    child = GenAgent.whereis(GenAgentEnsemble.member_name(name, "w"))
     :erlang.trace(child, true, [:send])
     send(task, :release)
     assert_receive {:trace, ^child, :send, {:gen_agent, :completion, _, _, _}, ^pid}
@@ -360,15 +364,26 @@ defmodule GenAgentEnsemble.StreamTest do
       }
     end)
 
-    child = GenAgent.whereis("#{name}/w")
+    child = GenAgent.whereis(GenAgentEnsemble.member_name(name, "w"))
     :ok = :sys.suspend(child)
     :erlang.trace(pid, true, [:send])
     tag = make_ref()
     send(pid, {:"$gen_call", {self(), tag}, {:cancel, token}})
     assert_receive {:trace, ^pid, :send, {:"$gen_call", _, {:cancel_request, ^fake}}, ^child}
     :erlang.trace(pid, false, [:send])
-    send(pid, {:gen_agent, :event, "#{name}/w", fake, Event.new(:text, %{text: "racing"})})
-    send(pid, {:gen_agent, :completion, "#{name}/w", fake, {:ok, %Response{text: "won"}}})
+
+    send(
+      pid,
+      {:gen_agent, :event, GenAgentEnsemble.member_name(name, "w"), fake,
+       Event.new(:text, %{text: "racing"})}
+    )
+
+    send(
+      pid,
+      {:gen_agent, :completion, GenAgentEnsemble.member_name(name, "w"), fake,
+       {:ok, %Response{text: "won"}}}
+    )
+
     :ok = :sys.resume(child)
     assert_receive {^tag, {:error, :already_finished}}
     event(name, token, "w", 0, :text, "racing")
@@ -399,7 +414,7 @@ defmodule GenAgentEnsemble.StreamTest do
     assert_receive {:stream_gate, "w", _task}
     event(name, token, "w", 0, :text, "first")
     old_refs = refs(pid)
-    Process.exit(GenAgent.whereis("#{name}/w"), :kill)
+    Process.exit(GenAgent.whereis(GenAgentEnsemble.member_name(name, "w")), :kill)
     assert completion(name, token) == {:error, :agent_down}
     assert refs(pid) == %{}
     assert_fenced(pid, name, old_refs)

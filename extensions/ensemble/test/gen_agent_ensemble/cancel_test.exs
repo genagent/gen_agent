@@ -39,10 +39,15 @@ defmodule GenAgentEnsemble.CancelTest do
     for {ref, agent} <- refs do
       send(
         pid,
-        {:gen_agent, :completion, "#{name}/#{agent}", ref, {:ok, %Response{text: "late"}}}
+        {:gen_agent, :completion, GenAgentEnsemble.member_name(name, agent), ref,
+         {:ok, %Response{text: "late"}}}
       )
 
-      send(pid, {:gen_agent, :completion, "#{name}/#{agent}", ref, {:error, :interrupted}})
+      send(
+        pid,
+        {:gen_agent, :completion, GenAgentEnsemble.member_name(name, agent), ref,
+         {:error, :interrupted}}
+      )
     end
 
     :sys.get_state(pid)
@@ -102,7 +107,9 @@ defmodule GenAgentEnsemble.CancelTest do
 
       if @strategy != Pool do
         [{ref, _}] = queued_refs
-        assert GenAgent.poll("#{name}/#{target}", ref) == {:error, :cancelled}
+
+        assert GenAgent.poll(GenAgentEnsemble.member_name(name, target), ref) ==
+                 {:error, :cancelled}
       end
 
       assert E.cancel(name, queued) == {:error, :already_finished}
@@ -211,7 +218,7 @@ defmodule GenAgentEnsemble.CancelTest do
     send(pid, {:"$gen_call", {self(), tag}, {:cancel, second}})
     send(backend, {:result, "first result"})
     assert_receive {:controlled_prompt, "w", "second", next}
-    [{child, _}] = Registry.lookup(GenAgent.Registry, "#{name}/w")
+    [{child, _}] = Registry.lookup(GenAgent.Registry, GenAgentEnsemble.member_name(name, "w"))
     :erlang.trace(child, true, [:send])
     send(next, {:result, "second result"})
     assert_receive {:trace, ^child, :send, {:gen_agent, :completion, _, _, {:ok, _}}, ^pid}

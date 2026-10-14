@@ -66,7 +66,7 @@ defmodule GenAgentEnsemble.ChildSpecTest do
       state.agent_tree,
       state.agent_supervisor,
       state.task_supervisor,
-      GenAgent.whereis("#{name}/worker"),
+      GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker")),
       task
     ]
     |> Enum.map(&{&1, Process.monitor(&1)})
@@ -119,7 +119,7 @@ defmodule GenAgentEnsemble.ChildSpecTest do
     for {name, pid} <- Enum.zip(names, pids) do
       assert Registry.lookup(GenAgentEnsemble.Registry, name) == [{pid, nil}]
       assert {:ok, _} = Ensemble.status(name)
-      assert is_pid(GenAgent.whereis("#{name}/worker"))
+      assert is_pid(GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker")))
     end
   end
 
@@ -183,7 +183,7 @@ defmodule GenAgentEnsemble.ChildSpecTest do
     new = await_child(supervisor, name, &(is_pid(&1) and &1 != old))
     assert Registry.lookup(GenAgentEnsemble.Registry, name) == [{new, nil}]
     assert {:ok, _} = Ensemble.status(name)
-    assert is_pid(GenAgent.whereis("#{name}/worker"))
+    assert is_pid(GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker")))
     assert child(supervisor, keep) == keep_server
   end
 end

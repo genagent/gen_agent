@@ -40,6 +40,11 @@ defmodule GenAgentEnsemble.IEx do
   @doc "See `GenAgentEnsemble.list/0`."
   defdelegate list(), to: GenAgentEnsemble
 
+  @doc "See `GenAgentEnsemble.member_name/2`."
+  @spec member_name(GenAgentEnsemble.session_name(), GenAgentEnsemble.bare_member()) ::
+          GenAgentEnsemble.member_name()
+  defdelegate member_name(session, member), to: GenAgentEnsemble
+
   @doc "See `GenAgentEnsemble.start_link/1`."
   defdelegate start_link(opts), to: GenAgentEnsemble
 
@@ -88,7 +93,7 @@ defmodule GenAgentEnsemble.IEx do
   `GenAgentEnsemble.await/3`, which returns `{:error, :timeout}`; this
   module's `await/3` raises on timeout.
   """
-  @spec ask!(String.t(), String.t(), keyword()) :: String.t()
+  @spec ask!(GenAgentEnsemble.session_name(), String.t(), keyword()) :: String.t()
   def ask!(name, prompt, opts \\ []) do
     case GenAgentEnsemble.ask(name, prompt, opts) do
       {:ok, %Response{text: text}} ->
@@ -127,7 +132,7 @@ defmodule GenAgentEnsemble.IEx do
   the prompt was fired with `tell/2` and the caller now wants a
   blocking wait.
   """
-  @spec await(String.t(), String.t(), timeout()) :: Response.t()
+  @spec await(GenAgentEnsemble.session_name(), String.t(), timeout()) :: Response.t()
   def await(name, token, timeout \\ 30_000) do
     case GenAgentEnsemble.await(name, token, timeout) do
       {:ok, %Response{} = response} ->
@@ -147,7 +152,7 @@ defmodule GenAgentEnsemble.IEx do
 
   The quickest way to see what a Pool session has produced.
   """
-  @spec drain(String.t()) :: [{String.t(), String.t() | {:error, term()}}]
+  @spec drain(GenAgentEnsemble.session_name()) :: [{String.t(), String.t() | {:error, term()}}]
   def drain(name) do
     {:ok, entries} = GenAgentEnsemble.inbox(name)
 

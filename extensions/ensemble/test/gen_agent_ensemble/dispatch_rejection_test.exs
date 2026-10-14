@@ -132,7 +132,7 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
     {:ok, server} =
       Ensemble.start_link(name: name, strategy: MissingAgentStrategy, opts: [agents: agents])
 
-    [{dead, _}] = Registry.lookup(GenAgent.Registry, "#{name}/dead")
+    [{dead, _}] = Registry.lookup(GenAgent.Registry, GenAgentEnsemble.member_name(name, "dead"))
     monitor = Process.monitor(dead)
     Process.exit(dead, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^dead, :killed}, 2_000
@@ -178,7 +178,11 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
         ]
       )
 
-    external = Task.async(fn -> GenAgent.ask("#{name}/worker-1", "external") end)
+    external =
+      Task.async(fn ->
+        GenAgent.ask(GenAgentEnsemble.member_name(name, "worker-1"), "external")
+      end)
+
     assert_receive {:controlled_prompt, "worker", "external", external_task}
 
     {:ok, rejected} = Ensemble.tell(name, "rejected")
@@ -202,7 +206,9 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
         opts: [stages: [agent("first"), agent("second")]]
       )
 
-    external = Task.async(fn -> GenAgent.ask("#{name}/second", "external") end)
+    external =
+      Task.async(fn -> GenAgent.ask(GenAgentEnsemble.member_name(name, "second"), "external") end)
+
     assert_receive {:controlled_prompt, "second", "external", external_task}
 
     failed = ask_async(name, "failed")
@@ -233,7 +239,9 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
         opts: [agents: [agent("a"), agent("b")], rounds: 1, verdict_parser: &{:ok, :yes, &1}]
       )
 
-    external = Task.async(fn -> GenAgent.ask("#{name}/b", "external") end)
+    external =
+      Task.async(fn -> GenAgent.ask(GenAgentEnsemble.member_name(name, "b"), "external") end)
+
     assert_receive {:controlled_prompt, "b", "external", external_task}
 
     failed = ask_async(name, "failed")

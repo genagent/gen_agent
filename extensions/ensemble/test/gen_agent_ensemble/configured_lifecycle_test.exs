@@ -85,7 +85,8 @@ defmodule GenAgentEnsemble.ConfiguredLifecycleTest do
   # Registry removes dead owners asynchronously, after their monitor fires.
   defp await_gone(name, attempts \\ 100) do
     cond do
-      lookup(name) == nil and GenAgent.whereis("#{name}/worker") == nil ->
+      lookup(name) == nil and
+          GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker")) == nil ->
         :ok
 
       attempts > 0 ->
@@ -170,7 +171,7 @@ defmodule GenAgentEnsemble.ConfiguredLifecycleTest do
     pids =
       for name <- halted do
         pid = lookup(name)
-        worker = GenAgent.whereis("#{name}/worker")
+        worker = GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker"))
         worker_ref = Process.monitor(worker)
         {:ok, token} = Ensemble.tell(name, "go")
         assert_receive {:DOWN, ^worker_ref, :process, ^worker, _reason}, 2_000
@@ -202,7 +203,7 @@ defmodule GenAgentEnsemble.ConfiguredLifecycleTest do
     boot([name])
 
     old = lookup(name)
-    old_agent = GenAgent.whereis("#{name}/worker")
+    old_agent = GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker"))
     ref = Process.monitor(old)
     Process.exit(old, :kill)
     assert_receive {:DOWN, ^ref, :process, ^old, :killed}, 2_000
@@ -210,6 +211,6 @@ defmodule GenAgentEnsemble.ConfiguredLifecycleTest do
     new = await_restart(name, old)
     assert Process.alive?(new)
     assert {:ok, _} = Ensemble.status(name)
-    assert GenAgent.whereis("#{name}/worker") != old_agent
+    assert GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker")) != old_agent
   end
 end

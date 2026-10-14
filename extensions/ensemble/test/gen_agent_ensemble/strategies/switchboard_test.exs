@@ -152,7 +152,7 @@ defmodule GenAgentEnsemble.Strategies.SwitchboardTest do
     {:ok, pid} = start_session(name, [{"alice", [echo("alice")]}])
     watched = HaltSupport.watch(pid)
 
-    Process.exit(GenAgent.whereis("#{name}/alice"), :kill)
+    Process.exit(GenAgent.whereis(GenAgentEnsemble.member_name(name, "alice")), :kill)
 
     HaltSupport.assert_tree_gone(watched)
     HaltSupport.assert_halted(name, :switchboard_exhausted)
@@ -171,7 +171,7 @@ defmodule GenAgentEnsemble.Strategies.SwitchboardTest do
     {:ok, queued} = GenAgentEnsemble.tell(name, "second", agent: "alice")
     watched = HaltSupport.watch(pid)
 
-    Process.exit(GenAgent.whereis("#{name}/alice"), :kill)
+    Process.exit(GenAgent.whereis(GenAgentEnsemble.member_name(name, "alice")), :kill)
     HaltSupport.assert_tree_gone(watched)
 
     assert GenAgentEnsemble.await(name, running, 0) == {:error, {:agent_down, :killed}}
@@ -189,7 +189,7 @@ defmodule GenAgentEnsemble.Strategies.SwitchboardTest do
 
     session = Process.monitor(pid)
 
-    Process.exit(GenAgent.whereis("#{name}/alice"), :kill)
+    Process.exit(GenAgent.whereis(GenAgentEnsemble.member_name(name, "alice")), :kill)
 
     info = await_fleet(name, ["bob"])
     assert info.pending_per_agent == %{"bob" => 0}
@@ -228,7 +228,7 @@ defmodule GenAgentEnsemble.Strategies.SwitchboardTest do
     {:ok, info} = GenAgentEnsemble.status(name)
     assert info.pending_per_agent["alice"] == 2
 
-    Process.exit(GenAgent.whereis("#{name}/alice"), :kill)
+    Process.exit(GenAgent.whereis(GenAgentEnsemble.member_name(name, "alice")), :kill)
 
     assert {:error, {:agent_down, :killed}} = GenAgentEnsemble.await(name, running, 5_000)
     assert {:error, {:agent_down, :killed}} = GenAgentEnsemble.await(name, queued, 5_000)

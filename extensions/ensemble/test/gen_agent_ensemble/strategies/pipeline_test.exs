@@ -115,7 +115,7 @@ defmodule GenAgentEnsemble.Strategies.PipelineTest do
       start_pipeline(name, [[transform("s1")], [transform("s2")]])
 
     watched = HaltSupport.watch(pid)
-    Process.exit(GenAgent.whereis("#{name}/#{name}-s1"), :kill)
+    Process.exit(GenAgent.whereis(GenAgentEnsemble.member_name(name, "#{name}-s1")), :kill)
 
     HaltSupport.assert_tree_gone(watched)
     assert {:stage_down, _} = HaltSupport.assert_halted(name)
@@ -297,8 +297,18 @@ defmodule GenAgentEnsemble.Strategies.PipelineTest do
     {:ok, new} = E.tell(name, "new")
     assert E.cancel(name, old) == {:ok, :cancelled}
     assert_receive {:controlled_prompt, "a", "new", next}
-    send(pid, {:gen_agent, :completion, "#{name}/b", ref, {:ok, response("late", 999, %{})}})
-    send(pid, {:gen_agent, :completion, "#{name}/b", ref, {:error, :late}})
+
+    send(
+      pid,
+      {:gen_agent, :completion, GenAgentEnsemble.member_name(name, "b"), ref,
+       {:ok, response("late", 999, %{})}}
+    )
+
+    send(
+      pid,
+      {:gen_agent, :completion, GenAgentEnsemble.member_name(name, "b"), ref, {:error, :late}}
+    )
+
     finish_controlled(next, "fresh")
     assert {:ok, result} = E.await(name, new, 2_000)
 

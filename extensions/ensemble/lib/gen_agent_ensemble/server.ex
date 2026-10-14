@@ -27,7 +27,7 @@ defmodule GenAgentEnsemble.Server do
     :agent_tree,
     :task_supervisor,
     :agent_supervisor,
-    # agents we own, MapSet of agent names
+    # agents we own, %{bare_name => pid}
     :agents,
     # monitor refs, %{mref => agent_name}
     :monitors,
@@ -143,6 +143,7 @@ defmodule GenAgentEnsemble.Server do
         in_flight: :redacted,
         dispatch_contexts: :redacted,
         pending: :redacted,
+        agents: :redacted,
         monitors: :redacted,
         stream_recipients: :redacted,
         token_contexts: :redacted
@@ -215,7 +216,7 @@ defmodule GenAgentEnsemble.Server do
          {:ok, agent_tree} <- GenAgentEnsemble.AgentTree.start_link(session_name) do
       # Older releases left this handler behind after abrupt server death.
       # Request-scoped completions now replace the telemetry bridge entirely.
-      _ = :telemetry.detach("gen_agent_ensemble:#{session_name}")
+      detach_legacy_handler(session_name)
 
       {task_supervisor, agent_supervisor} =
         GenAgentEnsemble.AgentTree.supervisors(agent_tree)
@@ -230,7 +231,7 @@ defmodule GenAgentEnsemble.Server do
         agent_tree: agent_tree,
         task_supervisor: task_supervisor,
         agent_supervisor: agent_supervisor,
-        agents: MapSet.new(),
+        agents: %{},
         monitors: %{},
         pending: %{},
         token_contexts: %{},
@@ -458,7 +459,7 @@ defmodule GenAgentEnsemble.Server do
     base = %{
       session: state.session_name,
       strategy: state.strategy_mod,
-      agents: MapSet.to_list(state.agents),
+      agents: Map.keys(state.agents),
       pending_tokens: Map.keys(state.pending),
       in_flight: map_size(state.in_flight)
     }
@@ -487,6 +488,10 @@ defmodule GenAgentEnsemble.Server do
       |> Map.merge(extra)
       |> Map.put(:admission, admission)
       |> Map.put(:lifecycle, state.lifecycle)
+      |> Map.put(
+        :member_names,
+        Map.new(state.agents, fn {bare, _pid} -> {bare, member_name(state, bare)} end)
+      )
 
     {:reply, {:ok, status}, state}
   end
@@ -577,12 +582,10 @@ defmodule GenAgentEnsemble.Server do
     {:noreply, remove_waiter(state, mref, nil)}
   end
 
-  defp handle_info_impl({:DOWN, mref, :process, _pid, reason}, state) do
-    case Map.pop(state.monitors, mref) do
-      {nil, _} ->
-        {:noreply, state}
-
-      {agent, monitors} ->
+  defp handle_info_impl({:DOWN, mref, :process, pid, reason}, state) do
+    case Map.fetch(state.monitors, mref) do
+      {:ok, agent}
+      when is_map_key(state.agents, agent) and :erlang.map_get(agent, state.agents) === pid ->
         affected_tokens =
           for {_ref, {name, token}} <- state.in_flight, name == agent, do: token
 
@@ -590,8 +593,8 @@ defmodule GenAgentEnsemble.Server do
 
         state = %{
           state
-          | monitors: monitors,
-            agents: MapSet.delete(state.agents, agent),
+          | monitors: Map.delete(state.monitors, mref),
+            agents: Map.delete(state.agents, agent),
             in_flight: drop_in_flight_for(state.in_flight, agent),
             dispatch_contexts: drop_dispatch_contexts_for(state, agent)
         }
@@ -610,6 +613,9 @@ defmodule GenAgentEnsemble.Server do
             fail_unhandled_tokens(state, affected_tokens, {:agent_down, agent, reason})
           end
 
+        {:noreply, state}
+
+      _ ->
         {:noreply, state}
     end
   end
@@ -771,6 +777,7 @@ defmodule GenAgentEnsemble.Server do
   # operation cannot smuggle an arbitrary term into the log.
   defp op_summary({:start, {name, _module, _opts}}) when is_binary(name), do: {:start, name}
   defp op_summary({:start, _spec}), do: {:start, :invalid_spec}
+  defp op_summary({:stop, name}) when is_binary(name), do: {:stop, name}
 
   defp op_summary({:dispatch, name, _prompt, token}) when is_binary(name) and is_binary(token),
     do: {:dispatch, name, token}
@@ -852,18 +859,13 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp apply_op({:stop, name}, state) when is_binary(name) do
-    emit_dropped_dispatches(state, name, :agent_stopped)
-    _ = catch_exit(fn -> GenAgent.stop(namespaced(state, name), state.agent_supervisor) end)
-    monitors = drop_monitors_for(state.monitors, name)
+    case Map.fetch(state.agents, name) do
+      {:ok, pid} ->
+        stop_owned_member(state, name, pid)
 
-    {:ok,
-     %{
-       state
-       | agents: MapSet.delete(state.agents, name),
-         monitors: monitors,
-         in_flight: drop_in_flight_for(state.in_flight, name),
-         dispatch_contexts: drop_dispatch_contexts_for(state, name)
-     }}
+      :error ->
+        {:error, {:agent_not_running, name}}
+    end
   end
 
   defp apply_op({:dispatch, name, prompt, token}, state)
@@ -888,8 +890,10 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp apply_op({:forward, name, event}, state) when is_binary(name) do
-    _ = catch_exit(fn -> GenAgent.notify(namespaced(state, name), event) end)
-    {:ok, state}
+    with :ok <- owned_member(state, name),
+         :ok <- catch_exit(fn -> GenAgent.notify(member_name(state, name), event) end) do
+      {:ok, state}
+    end
   end
 
   defp apply_op({:halt, reason}, state), do: {:ok, halt_session(state, reason)}
@@ -923,7 +927,7 @@ defmodule GenAgentEnsemble.Server do
       | lifecycle: :halted,
         halt_reason: reason,
         strategy_state: nil,
-        agents: MapSet.new(),
+        agents: %{},
         monitors: %{},
         in_flight: %{},
         dispatch_contexts: %{}
@@ -976,7 +980,7 @@ defmodule GenAgentEnsemble.Server do
   defp build_child_spec(state, name, module, opts) do
     agent_opts =
       opts
-      |> Keyword.put(:name, namespaced(state, name))
+      |> Keyword.put(:name, member_name(state, name))
       |> Keyword.put(:task_supervisor, state.task_supervisor)
 
     try do
@@ -995,6 +999,9 @@ defmodule GenAgentEnsemble.Server do
     kind, _reason -> {:error, {:start_exception, kind}}
   end
 
+  defp start_agent(state, name, _child_spec) when is_map_key(state.agents, name),
+    do: {:error, {:duplicate_sub_agent, name}}
+
   defp start_agent(state, name, child_spec) do
     case start_child(state.agent_supervisor, child_spec) do
       {:ok, pid} ->
@@ -1003,14 +1010,12 @@ defmodule GenAgentEnsemble.Server do
         {:ok,
          %{
            state
-           | agents: MapSet.put(state.agents, name),
+           | agents: Map.put(state.agents, name, pid),
              monitors: Map.put(state.monitors, mref, name)
          }}
 
       {:error, {:already_started, _pid}} ->
-        # Namespacing by session name means the only way to hit this is a
-        # duplicate sub-agent spec inside a single ensemble. Fail loud.
-        {:error, {:duplicate_sub_agent, name}}
+        {:error, {:member_name_conflict, name}}
 
       {:error, reason} ->
         {:error, reason}
@@ -1025,7 +1030,18 @@ defmodule GenAgentEnsemble.Server do
 
     result =
       try do
-        GenAgent.tell_with_completion(namespaced(state, name), prompt, self(), :infinity, opts)
+        with :ok <- owned_member(state, name) do
+          case GenAgent.tell_with_completion(
+                 member_name(state, name),
+                 prompt,
+                 self(),
+                 :infinity,
+                 opts
+               ) do
+            {:error, :not_found} -> {:error, {:agent_not_running, name}}
+            result -> result
+          end
+        end
       catch
         :exit, {:noproc, _} -> {:error, {:agent_not_running, name}}
         :exit, reason -> {:error, {:dispatch_exit, reason}}
@@ -1045,9 +1061,6 @@ defmodule GenAgentEnsemble.Server do
            | in_flight: Map.put(state.in_flight, ref, {name, token}),
              dispatch_contexts: Map.put(state.dispatch_contexts, ref, {started_at, ordinal})
          }}
-
-      {:error, :not_found} ->
-        {:error, {:agent_not_running, name}}
 
       {:error, reason} ->
         emit(
@@ -1121,12 +1134,12 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp cancel_child(state, agent, ref) do
-    case GenAgent.cancel_request(namespaced(state, agent), ref, @cancel_child_timeout) do
+    case GenAgent.cancel_request(member_name(state, agent), ref, @cancel_child_timeout) do
       {:ok, :cancelled} ->
         true
 
       {:error, :current} ->
-        GenAgent.interrupt_request(namespaced(state, agent), ref, @cancel_child_timeout) ==
+        GenAgent.interrupt_request(member_name(state, agent), ref, @cancel_child_timeout) ==
           {:ok, :accepted}
 
       _ ->
@@ -1189,9 +1202,48 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp drop_monitors_for(monitors, agent_name) do
-    for {mref, name} <- monitors, name != agent_name, into: %{} do
-      {mref, name}
+    Map.reject(monitors, fn {mref, name} ->
+      if name == agent_name do
+        Process.demonitor(mref, [:flush])
+        true
+      else
+        false
+      end
+    end)
+  end
+
+  defp retire_agent(state, name) do
+    emit_dropped_dispatches(state, name, :agent_stopped)
+
+    %{
+      state
+      | agents: Map.delete(state.agents, name),
+        monitors: drop_monitors_for(state.monitors, name),
+        in_flight: drop_in_flight_for(state.in_flight, name),
+        dispatch_contexts: drop_dispatch_contexts_for(state, name)
+    }
+  end
+
+  # Stop the owned incarnation, never a replacement found by name.
+  defp stop_owned_member(state, name, pid) do
+    case stop_child(state.agent_supervisor, pid) do
+      :ok ->
+        {:ok, retire_agent(state, name)}
+
+      {:error, :not_found} ->
+        if Process.alive?(pid),
+          do: {:error, {:agent_not_running, name}},
+          else: {:ok, retire_agent(state, name)}
+
+      {:error, _} = error ->
+        error
     end
+  end
+
+  defp stop_child(supervisor, pid) do
+    DynamicSupervisor.terminate_child(supervisor, pid)
+  catch
+    :exit, _ -> {:error, :agent_stop_failed}
   end
 
   defp drop_in_flight_for(in_flight, agent_name) do
@@ -1372,7 +1424,13 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp dispatch_meta(state, agent, token, ref, ordinal) do
-    Map.merge(session_meta(state), %{token: token, agent: agent, ref: ref, ordinal: ordinal})
+    Map.merge(session_meta(state), %{
+      token: token,
+      agent: agent,
+      member_name: member_name(state, agent),
+      ref: ref,
+      ordinal: ordinal
+    })
   end
 
   defp emit(scope, event, measurements, metadata),
@@ -1395,8 +1453,11 @@ defmodule GenAgentEnsemble.Server do
   defp reason_kind({:dispatch_exit, _}), do: :dispatch_exit
   defp reason_kind(:no_agent_specified), do: :no_agent_specified
   defp reason_kind(:invalid_operation), do: :invalid_operation
+  defp reason_kind(:agent_stop_failed), do: :agent_stop_failed
   defp reason_kind({:invalid_start_spec, _}), do: :invalid_start_spec
   defp reason_kind({:start_exception, _}), do: :start_exception
+  defp reason_kind({:duplicate_sub_agent, _}), do: :duplicate_sub_agent
+  defp reason_kind({:member_name_conflict, _}), do: :member_name_conflict
   defp reason_kind(_reason), do: :backend_or_strategy_error
 
   # The offending field or exception kind of a contained start failure. Both
@@ -1420,12 +1481,39 @@ defmodule GenAgentEnsemble.Server do
     {ops, strategy_state}
   end
 
-  # Internal name used when registering a sub-agent with GenAgent.Registry.
-  # Strategy code always sees the bare name; the Server translates when
-  # calling GenAgent.{tell_with_completion,stop,notify} and ignores the
-  # namespaced name in completion messages (it looks up by ref instead).
-  defp namespaced(%__MODULE__{session_name: session}, bare_name) do
-    "#{session}/#{bare_name}"
+  defp member_name(%__MODULE__{session_name: session}, bare_name),
+    do: GenAgentEnsemble.member_name(session, bare_name)
+
+  # This check and the subsequent public named core call are not atomic.
+  # A replacement between lookup and send requires a future pinned-target API.
+  defp owned_member(state, name) do
+    case Map.fetch(state.agents, name) do
+      {:ok, pid} ->
+        if GenAgent.whereis(member_name(state, name)) === pid,
+          do: :ok,
+          else: {:error, {:agent_not_running, name}}
+
+      :error ->
+        {:error, {:agent_not_running, name}}
+    end
+  end
+
+  # Best-effort cleanup of old scalar handler IDs only. Never invoke a user's
+  # String.Chars implementation or coerce the actual Registry session identity.
+  defp detach_legacy_handler(session) do
+    suffix =
+      cond do
+        is_binary(session) -> session
+        is_atom(session) -> Atom.to_string(session)
+        is_integer(session) -> Integer.to_string(session)
+        is_float(session) -> Float.to_string(session)
+        true -> nil
+      end
+
+    if suffix, do: :telemetry.detach("gen_agent_ensemble:" <> suffix)
+    :ok
+  catch
+    _, _ -> :ok
   end
 
   defp pop_completed(state, token) do

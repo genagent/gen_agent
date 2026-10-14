@@ -109,6 +109,49 @@ defmodule GenAgentEnsemble do
   every result regardless of retention.
   """
 
+  @type session_name :: term()
+  @type bare_member :: binary()
+  @type member_name :: {__MODULE__, session_name(), bare_member()}
+
+  @doc """
+  Construct the canonical core Registry key for an Ensemble member.
+
+      GenAgentEnsemble.member_name("research-1", "worker-a")
+      # => {GenAgentEnsemble, "research-1", "worker-a"}
+
+  This is a pure constructor, not an existence or ownership check. The session
+  term is preserved exactly: `:a`, `"a"`, `1`, `1.0` and `"1"` are distinct.
+  Members must be binaries, including empty or non-UTF-8 binaries. There is no
+  escaping, decoding, Unicode normalization or atom creation. Invalid members
+  raise `ArgumentError` with a fixed message.
+
+  Use this key with public core APIs such as `GenAgent.whereis/1`,
+  `GenAgent.status/1`, `GenAgent.ask/3`, `GenAgent.resume/1` and
+  `GenAgent.interrupt/1`. Core telemetry, messages and `list/0`
+  expose this tuple; Ensemble strategy callbacks and stream envelopes still use
+  bare members. Session references and PIDs identify exact terms, not durable
+  identities across restarts.
+
+  This replaces handwritten `"session/member"` keys; there are no legacy
+  aliases. Migrate lookups, message patterns and telemetry filters to this
+  helper or `status/1`'s `:member_names` map. Ordinary standalone string names
+  may coexist. The tuple family is reserved by convention, not access control.
+
+  Names address the current registration and are replacement-sensitive.
+  Ensemble checks tracked ownership and Registry PID equality before dispatch
+  or forward, but that check and the subsequent named core call are **not
+  atomic**. A replacement between check and send remains possible. Stopping a
+  member targets its tracked PID through its owned supervisor. The helper and
+  status map are not liveness certificates or immutable incarnation handles.
+  Third-party JSON/exporter compatibility is not implied.
+  """
+  @spec member_name(session_name(), bare_member()) :: member_name()
+  def member_name(session, bare_member) when is_binary(bare_member),
+    do: {__MODULE__, session, bare_member}
+
+  def member_name(_session, _bare_member),
+    do: raise(ArgumentError, "member name must be a binary")
+
   @doc """
   Start a new ensemble process. Takes `:name`, `:strategy`, and
   `:opts` (the strategy's own options keyword list).
@@ -348,6 +391,11 @@ defmodule GenAgentEnsemble do
   @doc """
   Inspect the ensemble: running agents, strategy phase, queue depth.
 
+  `:member_names` maps each tracked bare binary member to its canonical
+  `member_name/2` key. It is added after strategy fields and cannot be overridden.
+  It describes logical slots at a point in time, including a dead child whose
+  DOWN has not yet been handled. It is empty immediately after logical halt.
+
   The result always includes an `:admission` map, added after the strategy's own
   fields so a strategy cannot replace it:
 
@@ -383,7 +431,7 @@ defmodule GenAgentEnsemble do
       iex> GenAgentEnsemble.list()
       ["qa-pool", "solo"]
   """
-  @spec list() :: [String.t()]
+  @spec list() :: [session_name()]
   def list do
     GenAgentEnsemble.Registry
     |> Registry.select([{{:"$1", :_, :_}, [], [:"$1"]}])

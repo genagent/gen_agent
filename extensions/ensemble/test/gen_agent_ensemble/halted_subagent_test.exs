@@ -90,7 +90,7 @@ defmodule GenAgentEnsemble.HaltedSubagentTest do
   end
 
   defp halt_member(session, member) do
-    name = "#{session}/#{member}"
+    name = GenAgentEnsemble.member_name(session, member)
     assert {:ok, ref} = GenAgent.tell(name, "halt")
     assert {:error, :pre_turn_halted} = GenAgent.poll(name, ref)
     assert GenAgent.runtime_snapshot(name).halted

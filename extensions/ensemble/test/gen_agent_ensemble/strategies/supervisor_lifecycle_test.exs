@@ -36,7 +36,10 @@ defmodule GenAgentEnsemble.Strategies.SupervisorLifecycleTest do
 
     on_exit(fn ->
       # Release first so the session can finish shutting down.
-      for worker <- ["#{name}/#{name}-w-1", "#{name}/worker-1"],
+      for worker <- [
+            GenAgentEnsemble.member_name(name, "#{name}-w-1"),
+            GenAgentEnsemble.member_name(name, "worker-1")
+          ],
           pid = GenAgent.whereis(worker),
           do: send(pid, :release_worker)
 
@@ -126,7 +129,7 @@ defmodule GenAgentEnsemble.Strategies.SupervisorLifecycleTest do
       assert %{agents: agents} = await_agents(name, ["#{name}-coord"])
       assert agents == ["#{name}-coord"]
     after
-      for worker <- ["#{name}/#{name}-w-1"],
+      for worker <- [GenAgentEnsemble.member_name(name, "#{name}-w-1")],
           pid = GenAgent.whereis(worker),
           do: send(pid, :release_worker)
     end
@@ -180,7 +183,9 @@ defmodule GenAgentEnsemble.Strategies.SupervisorLifecycleTest do
     send(worker2_task, {:result, "TWO"})
     assert %{phase: {:fanning_out, 1, 2}} = await_phase(name, {:fanning_out, 1, 2})
 
-    [{worker2, _}] = Registry.lookup(GenAgent.Registry, "#{name}/worker-2")
+    [{worker2, _}] =
+      Registry.lookup(GenAgent.Registry, GenAgentEnsemble.member_name(name, "worker-2"))
+
     ref = Process.monitor(worker2)
     Process.exit(worker2, :kill)
     assert_receive {:DOWN, ^ref, :process, ^worker2, _}, 2_000
