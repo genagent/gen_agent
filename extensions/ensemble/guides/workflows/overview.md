@@ -26,6 +26,42 @@ Rough guide, not a rulebook -- a Solo can handle multi-turn
 conversation just fine, a Pool can be used for a single prompt if
 you want a fresh worker each time, and so on.
 
+## Custom agent request boundaries
+
+Ensemble tracks each child dispatch by its GenAgent request reference.
+A token result means the strategy finished that request; it does not imply
+that the child is idle or all autonomous work has finished.
+
+A custom agent's `handle_response/3` returning
+`{:prompt, next_prompt, state}` completes the dispatched request with the
+current response, then starts an **independent follow-up** with a fresh
+reference. That follow-up runs before prompts queued in the child. Its result
+reaches the agent's callbacks, but cannot complete an Ensemble token, replace
+a retained result, or consume another token's reply. Solo, Pool and
+Switchboard use the original response; Pipeline passes that response to its
+next stage. Pool can dispatch new work to the logically free worker while its
+follow-up is still running; that work queues inside the child.
+
+Error retries have a different contract, introduced in **GenAgent 0.8**.
+For a dispatched ask/tell, `handle_error/3` returning
+`{:prompt, retry_prompt, state}` retains the original request reference.
+Ensemble waits for the final success or error instead of completing on the
+first failed attempt. Keep a retry budget in agent state; GenAgent supplies
+no automatic retry cap, and the watchdog applies to each attempt. Interrupted
+requests and retries rejected by admission limits are exceptions; see
+`c:GenAgent.handle_error/3` for their terminal outcomes.
+
+**With supported GenAgent 0.7, the first error completes the dispatch and a
+callback-generated retry is an independent follow-up.** Installing Ensemble
+alone does not change this older core behavior. The current Ensemble Hex
+requirement (`~> 0.7.0`) excludes core 0.8, so adopting that contract also
+requires a coordinated dependency-range update. Do not rely on a retried
+token result until compatible core and Ensemble releases are available.
+
+For a result assembled from several successful turns, use explicit Pipeline
+stages or a custom strategy that owns the workflow. A response-generated
+self-chain does not automatically extend the original caller's request.
+
 ## Common idioms across strategies
 
 **Quick synchronous turn:**

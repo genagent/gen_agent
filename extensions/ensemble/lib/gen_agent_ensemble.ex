@@ -70,6 +70,18 @@ defmodule GenAgentEnsemble do
   emits `[:gen_agent_ensemble, :admission, :rejected]`; see
   `GenAgentEnsemble.Telemetry`.
 
+  ## Custom agents and completion
+
+  A child `handle_response/3` follow-up (`{:prompt, prompt, state}`) starts an
+  independent request after delivering the current response. Its outcome goes
+  to the agent's callbacks, not an Ensemble token; a token result is not proof
+  that its child is idle. Pipeline advances with the current response.
+
+  Caller-owned error retries retain the dispatch reference with GenAgent 0.8.
+  Supported core 0.7 instead completes with the first error and starts an
+  independent follow-up. See the [request boundary guide](overview.md#custom-agent-request-boundaries)
+  before relying on retries or self-chaining custom callbacks.
+
   ## Halt
 
   A strategy ends its session logically with the `{:halt, reason}` operation.

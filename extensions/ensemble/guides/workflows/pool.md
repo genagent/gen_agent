@@ -127,3 +127,11 @@ Uses whichever worker is free. If all are busy, queues behind them.
   that slot is removed. Other workers continue; if none remain, the pool
   halts and pending requests fail with `{:error, {:halted, reason}}`. The
   halted ensemble stays alive, refusing new requests, until it is stopped.
+
+## Custom callbacks
+
+A response-generated follow-up is independent of the dispatched request;
+its result does not replace this workflow's token result. Error-retry
+completion depends on the GenAgent core version. See
+[custom agent request boundaries](overview.md#custom-agent-request-boundaries)
+before adding `{:prompt, ...}` callback decisions.

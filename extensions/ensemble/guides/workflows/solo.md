@@ -111,3 +111,11 @@ iex> E.status("solo")
 - **One in-flight turn at a time.** A second `tell` while a turn is
   processing is queued in `GenAgent`'s mailbox and runs after the
   first completes, not in parallel. Use Pool if you want parallelism.
+
+## Custom callbacks
+
+A response-generated follow-up is independent of the dispatched request;
+its result does not replace this workflow's token result. Error-retry
+completion depends on the GenAgent core version. See
+[custom agent request boundaries](overview.md#custom-agent-request-boundaries)
+before adding `{:prompt, ...}` callback decisions.

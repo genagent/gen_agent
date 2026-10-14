@@ -177,3 +177,11 @@ process stays up so those results can be read; stop it with
   queue in order; their reply tokens come back in the same order.
   Tells to different agents run in parallel -- the order they
   *return* depends on backend latency, not dispatch order.
+
+## Custom callbacks
+
+A response-generated follow-up is independent of the dispatched request;
+its result does not replace this workflow's token result. Error-retry
+completion depends on the GenAgent core version. See
+[custom agent request boundaries](overview.md#custom-agent-request-boundaries)
+before adding `{:prompt, ...}` callback decisions.

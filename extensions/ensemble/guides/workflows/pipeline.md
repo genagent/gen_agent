@@ -182,3 +182,11 @@ additional history cache.
 For live capture (including turns before an aborted run), a custom agent's
 `handle_response/3` or `post_turn/3` callback can inspect each full response;
 a custom strategy is unnecessary. Prompt-stop telemetry does not carry text.
+
+## Custom callbacks
+
+A response-generated follow-up is independent of the dispatched request;
+its result does not replace this workflow's token result. Error-retry
+completion depends on the GenAgent core version. See
+[custom agent request boundaries](overview.md#custom-agent-request-boundaries)
+before adding `{:prompt, ...}` callback decisions.
