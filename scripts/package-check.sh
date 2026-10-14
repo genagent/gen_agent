@@ -33,6 +33,19 @@ for package in "${packages[@]}"; do
       export GEN_AGENT_BACKENDS_PATH=1
     fi
     mix deps.get
+    if [[ "${package}" != "." ]]; then
+      # Validate release metadata even before this core version is on Hex.
+      # A missing future core must not hide an incompatible sibling range.
+      GEN_AGENT_ROOT_VERSION="${core_version}" mix run --no-start --no-compile -e '
+        expected = System.fetch_env!("GEN_AGENT_ROOT_VERSION")
+        dep = Enum.find(Mix.Project.config()[:deps], &(elem(&1, 0) == :gen_agent))
+
+        unless is_tuple(dep) and is_binary(elem(dep, 1)) and
+                 Version.match?(expected, elem(dep, 1)) do
+          raise "gen_agent dependency does not admit current core #{expected}"
+        end
+      '
+    fi
     if [[ "${package}" != "." && "${core_status}" == "200" ]]; then
       echo "Compiling and testing ${package} with Hex core ${core_version}"
       mix deps.update gen_agent

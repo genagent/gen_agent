@@ -16,6 +16,10 @@ done
 
 cat > "${fixture}/bin/mix" <<'SH'
 #!/usr/bin/env bash
+if [[ "$*" == *'Version.match?'* && "${PWD#"${TEST_FIXTURE_ROOT}"/}" == "${FAIL_CORE_RANGE_DIR:-none}" ]]; then
+  echo 'gen_agent dependency does not admit current core' >&2
+  exit 19
+fi
 if [[ "$*" == "hex.build" ]]; then
   relative="${PWD#"${TEST_FIXTURE_ROOT}"/}"
   if [[ "${relative}" != "${SKIP_ARCHIVE_DIR:-none}" ]]; then
@@ -64,3 +68,10 @@ if output="$(TAR_PATH_DIR=integrations/claude bash "${fixture}/scripts/package-c
   exit 1
 fi
 [[ "${output}" == *'Path dependency found in gen_agent_claude-0.0.1.tar'* ]]
+
+# A not-yet-published core must still reject incompatible consumer metadata.
+if output="$(FAIL_CORE_RANGE_DIR=extensions/ensemble bash "${fixture}/scripts/package-check.sh" 2>&1)"; then
+  echo 'Incompatible core range unexpectedly passed while core is unpublished' >&2
+  exit 1
+fi
+[[ "${output}" == *'gen_agent dependency does not admit current core'* ]]
