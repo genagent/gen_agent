@@ -59,7 +59,7 @@ Add `gen_agent` using the current requirement in the [core installation guide](h
 
 ```elixir
 def deps do
-  [{:gen_agent_openai, "~> 0.4.1"}] # x-release-please-version
+  [{:gen_agent_openai, "~> 0.5.0"}] # x-release-please-version
 end
 ```
 
