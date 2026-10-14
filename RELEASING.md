@@ -22,12 +22,21 @@ last released from the separate repositories. Baseline component tags for the
 five moved packages point to the consolidation commit; earlier tags and issues
 remain in the original repositories.
 
-Merge only the release pull requests intended for that release. When a core
-change is required by an adapter or Ensemble change, publish core first and
-then release the dependent component with a compatible minimum version. The
-workflow publishes core, then any released integrations, then Ensemble. It
-skips package versions already present on Hex so a failed publish run can be
-retried.
+Merge only the release pull requests intended for that release. For a core
+upgrade that existing consumers support, first widen their requirements and
+verify them against the actual core release candidate while retaining their
+published lower bounds. Publish the widened adapters, then Ensemble, while
+the previous core is still latest. Only then publish the new core and verify
+the complete published family. The default consumer check pins every package
+to its latest Hex release; publishing the new core before those ranges are
+available would make that combination unresolvable and block later release CI.
+
+If a component requires a new core API and cannot retain its earlier minimum,
+it must wait for that core publication. Plan the coordinated release and its
+consumer checks explicitly rather than assuming the range-widening order
+applies. Within one release workflow, publication runs core, then released
+integrations, then Ensemble. It skips versions already present on Hex so a
+failed publish run can be retried.
 
 After publishing core, refresh each dependent package's Hex-mode lock before
 testing or building it against the new core. From the dependent directory run
@@ -38,6 +47,13 @@ resolves the intended published core version. Local path mode does not refresh
 these Hex lock entries. The CI and manual `scripts/publish-package.sh
 <directory> prepare` paths already perform this update before testing and
 building; run it explicitly when preparing a package outside that script.
+
+Ensemble also refreshes its test-only adapter dependencies with core during
+preparation. Their ranges must admit the widened adapter releases, or the
+resolver may remain on an older core. `package-check.sh` verifies that each
+consumer's declared range admits the candidate root version even when that
+version is not yet on Hex; this metadata gate does not replace candidate
+runtime tests or the post-publication exact-version consumer check.
 
 Inside this repository, sibling packages use local path dependencies. Set
 `GEN_AGENT_HEX=1` for each sibling's `mix hex.build` or `mix hex.publish` so

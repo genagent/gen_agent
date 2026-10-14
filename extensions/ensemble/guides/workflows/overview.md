@@ -53,10 +53,9 @@ requests and retries rejected by admission limits are exceptions; see
 
 **With supported GenAgent 0.7, the first error completes the dispatch and a
 callback-generated retry is an independent follow-up.** Installing Ensemble
-alone does not change this older core behavior. The current Ensemble Hex
-requirement (`~> 0.7.0`) excludes core 0.8, so adopting that contract also
-requires a coordinated dependency-range update. Do not rely on a retried
-token result until compatible core and Ensemble releases are available.
+alone does not change this older core behavior. Ensemble admits core 0.7 and
+0.8; the final-outcome retry contract requires actually loading core 0.8.
+Do not infer it from an Ensemble upgrade that still resolves core 0.7.
 
 For a result assembled from several successful turns, use explicit Pipeline
 stages or a custom strategy that owns the workflow. A response-generated

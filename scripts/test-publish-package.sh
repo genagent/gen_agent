@@ -5,10 +5,11 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture="$(mktemp -d)"
 trap 'rm -rf "${fixture}"' EXIT
 
-mkdir -p "${fixture}/scripts" "${fixture}/bin" "${fixture}/integrations/claude"
+mkdir -p "${fixture}/scripts" "${fixture}/bin" "${fixture}/integrations/claude" "${fixture}/extensions/ensemble"
 cp "${root}/scripts/publish-package.sh" "${fixture}/scripts/publish-package.sh"
 printf '  app: :gen_agent,\n  @version "0.0.1"\n' > "${fixture}/mix.exs"
 printf '  app: :gen_agent_claude,\n  @version "0.0.1"\n' > "${fixture}/integrations/claude/mix.exs"
+printf '  app: :gen_agent_ensemble,\n  @version "0.0.1"\n' > "${fixture}/extensions/ensemble/mix.exs"
 
 cat > "${fixture}/bin/mix" <<'SH'
 #!/usr/bin/env bash
@@ -17,6 +18,8 @@ if [[ "$*" == "${FAIL_MIX_COMMAND:-never}" ]]; then exit 17; fi
 if [[ "$*" == "hex.build" && "${BUILD_ARCHIVE:-1}" == 1 ]]; then
   if [[ "$(pwd)" == */integrations/claude ]]; then
     touch gen_agent_claude-0.0.1.tar
+  elif [[ "$(pwd)" == */extensions/ensemble ]]; then
+    touch gen_agent_ensemble-0.0.1.tar
   else
     touch gen_agent-0.0.1.tar
   fi
@@ -113,5 +116,14 @@ fi
 : > "${TEST_LOG}"
 if TAR_PATH=1 env -u HEX_API_KEY bash "${fixture}/scripts/publish-package.sh" . prepare; then
   echo 'Path dependency unexpectedly allowed preparation' >&2
+  exit 1
+fi
+
+# Ensemble must unlock its test-only adapters with core, after they publish.
+: > "${TEST_LOG}"
+env -u HEX_API_KEY bash "${fixture}/scripts/publish-package.sh" extensions/ensemble prepare
+grep -Eq '^deps\.update gen_agent gen_agent_anthropic gen_agent_claude gen_agent_openai gen_agent_codex\|unset$' "${TEST_LOG}"
+if grep -E 'fixture-publish-key|^hex\.publish' "${TEST_LOG}"; then
+  echo 'Publishing key or command reached Ensemble preparation' >&2
   exit 1
 fi

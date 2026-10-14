@@ -30,7 +30,13 @@ if [[ "${package}" != "." ]]; then
   # A release may follow a freshly published core version while the checked-in
   # integration lockfile still points to the previous one. Test against the
   # newest compatible core before publishing the integration.
-  mix deps.update gen_agent
+  if [[ "${package}" == "extensions/ensemble" ]]; then
+    # These test-only adapters may be locked to releases excluding the new
+    # core. Refresh the compatible family after integration publication.
+    mix deps.update gen_agent gen_agent_anthropic gen_agent_claude gen_agent_openai gen_agent_codex
+  else
+    mix deps.update gen_agent
+  fi
 fi
 
 app="$(sed -n 's/^[[:space:]]*app: :\([a-z_]*\),/\1/p' mix.exs | head -1)"
