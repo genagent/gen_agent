@@ -175,8 +175,17 @@ defmodule GenAgentEnsemble.AdmissionTest do
   defp late(pid, name, refs) do
     for {ref, agent} <- refs do
       completed = {:ok, %Response{text: "late"}}
-      send(pid, {:gen_agent, :completion, "#{name}/#{agent}", ref, completed})
-      send(pid, {:gen_agent, :completion, "#{name}/#{agent}", ref, {:error, :interrupted}})
+
+      send(
+        pid,
+        {:gen_agent, :completion, GenAgentEnsemble.member_name(name, agent), ref, completed}
+      )
+
+      send(
+        pid,
+        {:gen_agent, :completion, GenAgentEnsemble.member_name(name, agent), ref,
+         {:error, :interrupted}}
+      )
     end
 
     :sys.get_state(pid)

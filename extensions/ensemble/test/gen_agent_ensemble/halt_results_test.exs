@@ -55,11 +55,11 @@ defmodule GenAgentEnsemble.HaltResultsTest do
     def handle_notify({:ops, ops}, state), do: record(:handle_notify, :ops, ops, state)
     def handle_notify(event, state), do: record(:handle_notify, event, [], state)
 
-    # Tries to replace both server-owned keys.
+    # Tries to replace the server-owned keys.
     @impl true
     def handle_status(state) do
       send(state.observer, {:callback, :handle_status, nil})
-      %{strategy_extra: :present, lifecycle: :fake, admission: :fake}
+      %{strategy_extra: :present, lifecycle: :fake, admission: :fake, member_names: :fake}
     end
 
     defp request(_prompt, callback, opts, token, state) do
@@ -279,7 +279,7 @@ defmodule GenAgentEnsemble.HaltResultsTest do
   end
 
   defp halt_slow_session(server, name) do
-    agent = GenAgent.whereis("#{name}/worker")
+    agent = GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker"))
     assert {:ok, token} = E.tell(name, "go", ops: [{:halt, :slow}])
     assert_receive {:agent_terminating, ^agent, :shutdown}, 2_000
     assert Process.alive?(server)
@@ -492,7 +492,7 @@ defmodule GenAgentEnsemble.HaltResultsTest do
     E.notify(name, {:ops, ops})
     assert E.await(name, p1, 0) == {:ok, :won}
     assert E.await(name, p2, 0) == {:error, {:halted, :first}}
-    assert GenAgent.whereis("#{name}/late") == nil
+    assert GenAgent.whereis(GenAgentEnsemble.member_name(name, "late")) == nil
 
     E.notify(name, {:ops, [{:halt, :third}]})
     send(pid, {:halt_session, :stale})
@@ -545,6 +545,7 @@ defmodule GenAgentEnsemble.HaltResultsTest do
     assert running.lifecycle == :running
     assert running.in_flight == 2
     assert is_map(running.admission)
+    assert running.member_names == %{"w" => E.member_name(name, "w")}
 
     before = :sys.get_state(pid)
     refs = Map.keys(before.in_flight)
@@ -560,14 +561,27 @@ defmodule GenAgentEnsemble.HaltResultsTest do
     refute Map.has_key?(status, :strategy_extra)
     assert status.admission.pending_count == 0
     assert status.in_flight == 0
+    assert status.member_names == %{}
     # Drain the expected asynchronous tree EXIT before comparing stale-message effects.
     await_tree_released(pid)
     halted = :sys.get_state(pid)
 
     for ref <- refs do
-      send(pid, {:gen_agent, :completion, "#{name}/w", ref, {:ok, %Response{text: "late"}}})
-      send(pid, {:gen_agent, :completion, "#{name}/w", ref, {:error, :late}})
-      send(pid, {:gen_agent, :event, "#{name}/w", ref, Event.new(:text)})
+      send(
+        pid,
+        {:gen_agent, :completion, GenAgentEnsemble.member_name(name, "w"), ref,
+         {:ok, %Response{text: "late"}}}
+      )
+
+      send(
+        pid,
+        {:gen_agent, :completion, GenAgentEnsemble.member_name(name, "w"), ref, {:error, :late}}
+      )
+
+      send(
+        pid,
+        {:gen_agent, :event, GenAgentEnsemble.member_name(name, "w"), ref, Event.new(:text)}
+      )
     end
 
     for mref <- monitor_refs, do: send(pid, {:DOWN, mref, :process, self(), :killed})
@@ -643,10 +657,17 @@ defmodule GenAgentEnsemble.HaltResultsTest do
 
   test "reads and refusals stay served while child shutdown is blocked", %{name: name} do
     {:ok, server} = E.start_link(slow_options(name))
-    on_exit(fn -> send(GenAgent.whereis("#{name}/worker") || self(), :release_agent) end)
+
+    on_exit(fn ->
+      send(
+        GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker")) || self(),
+        :release_agent
+      )
+    end)
+
     watched = HaltSupport.watch(server)
     %{agent_tree: tree} = :sys.get_state(server)
-    agent = GenAgent.whereis("#{name}/worker")
+    agent = GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker"))
     agent_ref = Process.monitor(agent)
 
     {:ok, early} = E.tell(name, "early", ops: [{:reply, :token, :won}])

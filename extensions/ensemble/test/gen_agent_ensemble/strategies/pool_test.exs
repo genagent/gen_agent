@@ -153,7 +153,7 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
     echo = fn _ -> [Event.new(:result, %{text: "x"})] end
     {:ok, _pid} = start_pool(name, 2, [echo])
 
-    worker_name = "#{name}/#{name}-w-1"
+    worker_name = GenAgentEnsemble.member_name(name, "#{name}-w-1")
     old_worker = GenAgent.whereis(worker_name)
     Process.exit(old_worker, :kill)
     new_worker = await_replacement(worker_name, old_worker)
@@ -182,7 +182,7 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
     assert_receive {:controlled_prompt, "worker", "first", _first_task}, 2_000
     {:ok, second} = GenAgentEnsemble.tell(name, "second")
 
-    worker_name = "#{name}/#{name}-w-1"
+    worker_name = GenAgentEnsemble.member_name(name, "#{name}-w-1")
     old_worker = GenAgent.whereis(worker_name)
     Process.exit(old_worker, :kill)
 
@@ -213,7 +213,7 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
         opts: [worker_count: 2, worker_template: worker]
       )
 
-    dead_worker = "#{name}/#{name}-w-1"
+    dead_worker = GenAgentEnsemble.member_name(name, "#{name}-w-1")
     Process.exit(GenAgent.whereis(dead_worker), :kill)
 
     info = await_worker_count(name, 1)
@@ -249,7 +249,7 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
     second = Task.async(fn -> GenAgentEnsemble.ask(name, "second", timeout: 5_000) end)
     assert await_queued(name, 1).queued == 1
 
-    Process.exit(GenAgent.whereis("#{name}/#{name}-w-1"), :kill)
+    Process.exit(GenAgent.whereis(GenAgentEnsemble.member_name(name, "#{name}-w-1")), :kill)
 
     assert {:error, {:worker_down, :killed}} = Task.await(first, 5_000)
     # The specific errors issued before the halt are not rewritten by it.
@@ -344,7 +344,7 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
         await_replacement(name, old_pid, retries - 1)
 
       other ->
-        flunk("expected a replacement for #{name}, got: #{inspect(other)}")
+        flunk("expected a replacement for #{inspect(name)}, got: #{inspect(other)}")
     end
   end
 

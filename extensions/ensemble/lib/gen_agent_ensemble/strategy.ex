@@ -50,11 +50,14 @@ defmodule GenAgentEnsemble.Strategy do
   ## Operations
 
     * `{:start, start_spec}` -- start a new sub-agent. `start_spec` is
-      `{name, module, opts}` where `name` is a string, `module` is a
+      `{name, module, opts}` where `name` is a binary, `module` is a
       `GenAgent` callback module, and `opts` is a keyword list that includes
       the `:backend` module. A spec that does not match is rejected as
       described under "Rejected starts" rather than started.
-    * `{:stop, agent_name}` -- terminate a sub-agent.
+    * `{:stop, agent_name}` -- terminate the tracked PID through the owned
+      supervisor. Unknown members are logged as `{:agent_not_running, name}`.
+      Ownership is retired only after confirmed termination or absence;
+      unexpected stop failures leave the slot tracked.
     * `{:dispatch, agent_name, prompt, token}` -- send a prompt to an existing
       sub-agent via `GenAgent.tell_with_completion/3`. The framework calls `handle_response/3`
       only while `token` remains pending, so late results from an aborted run
@@ -70,6 +73,14 @@ defmodule GenAgentEnsemble.Strategy do
     * `{:forward, agent_name, event}` -- call `GenAgent.notify/2` on
       the named sub-agent.
     * `{:halt, reason}` -- end the session logically. See "Halt" below.
+
+  Member names in operations and callbacks remain bare binaries. Registry
+  keys are constructed with `GenAgentEnsemble.member_name/2`. Dispatch and
+  forward require a tracked member whose canonical key resolves to its owned
+  PID; otherwise they fail with `{:agent_not_running, name}`. An unscoped
+  dispatch or forward failure is logged; scoped dispatch uses the callback
+  and terminal-token fallback below. The guard and named core call are not
+  atomic: replacement between check and send remains possible.
 
   Ops are applied sequentially. A rejected scoped dispatch ends the current
   op batch after notifying the strategy; other op failures are logged and
@@ -135,8 +146,13 @@ defmodule GenAgentEnsemble.Strategy do
       `:shutdown`).
     * `{:start_exception, kind}` -- starting the child raised, threw, or
       exited. `kind` is `:error`, `:throw`, or `:exit`.
-    * `{:duplicate_sub_agent, name}`, or the child supervisor's own error
-      reason, as in earlier releases.
+    * `{:duplicate_sub_agent, name}` -- the logical slot is already tracked,
+      even if its PID has died and its DOWN is still pending. Validation and
+      child-spec construction take precedence over this check.
+    * `{:member_name_conflict, name}` -- an unowned registration already uses
+      the exact canonical tuple. The existing process is never adopted. This
+      reason contains only the bare name, no foreign PID or start options.
+    * Other child-supervisor errors pass through as before.
 
   The first two reasons never contain the offending value, exception, or
   stacktrace, because start options often hold credentials. When the name is
@@ -173,7 +189,7 @@ defmodule GenAgentEnsemble.Strategy do
   request.
   """
 
-  @type agent_name :: String.t()
+  @type agent_name :: GenAgentEnsemble.bare_member()
   @type token :: String.t()
   @type start_spec :: {agent_name, module, keyword}
   @type prompt :: String.t()

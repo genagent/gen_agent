@@ -36,7 +36,10 @@ defmodule GenAgentEnsemble.Strategies.FunctionContainmentTest do
     name = "contain-#{System.unique_integer([:positive])}"
 
     on_exit(fn ->
-      for worker <- ["#{name}/#{name}-w-1", "#{name}/worker-1"],
+      for worker <- [
+            GenAgentEnsemble.member_name(name, "#{name}-w-1"),
+            GenAgentEnsemble.member_name(name, "worker-1")
+          ],
           pid = GenAgent.whereis(worker),
           do: send(pid, :release_worker)
 

@@ -8,7 +8,7 @@ defmodule GenAgentEnsemble.Telemetry do
   | --- | --- | --- | --- |
   | `:session` | `:start`, `:stop`, `:halt` | `system_time` on start; `duration_ms` on stop/halt | `session`, `strategy`; `outcome` and `reason_kind` on stop/halt |
   | `:token` | `:start`, `:stop`, `:error` | `system_time` on start; `duration_ms` on stop/error | `session`, `strategy`, `token`, `kind`; `outcome` on stop/error, `reason_kind` on error |
-  | `:dispatch` | `:start`, `:stop`, `:error`, `:rejected` | `system_time` on start; `duration_ms` on stop/error | `session`, `strategy`, `token`, `agent`, `ref`, `ordinal`, `outcome`; `reason_kind` on error/rejected |
+  | `:dispatch` | `:start`, `:stop`, `:error`, `:rejected` | `system_time` on start; `duration_ms` on stop/error | `session`, `strategy`, `token`, `agent`, `member_name`, `ref`, `ordinal`, `outcome`; `reason_kind` on error/rejected |
   | `:admission` | `:rejected` | `pending_count`, `pending_bytes`, `incoming_bytes` | `session`, `strategy`, `kind`, `outcome` (`:rejected`), `reason_kind` (`:overloaded`), `limit` (`:count` or `:bytes`), `max_pending_prompts`, `max_pending_prompt_bytes` |
 
   An `[:gen_agent_ensemble, :admission, :rejected]` event is emitted once for
@@ -34,6 +34,20 @@ defmodule GenAgentEnsemble.Telemetry do
   Supervisor branches. External strategies using unscoped dispatches have
   `nil` token and ordinal. `:ref` is the corresponding core GenAgent turn
   reference, so dispatches can be joined to `GenAgent.Telemetry` events.
+
+  `:agent` remains the bare binary member; `:member_name` is the canonical
+  `GenAgentEnsemble.member_name(session, agent)` tuple. Join core metadata's
+  `:agent` to Ensemble's `:member_name`, and individual turns by `:ref`.
+  Core completion/stream messages and agent listings also expose the tuple.
+  Consumers of handwritten slash keys must migrate; this does not promise
+  compatibility with third-party serializers or telemetry exporters.
+
+  A failed ownership guard emits exactly one `:dispatch, :rejected` event,
+  with `reason_kind: :agent_not_running`, nil ref/ordinal and no dispatch start.
+  Start conflicts and tracked duplicates use bounded `:member_name_conflict`
+  and `:duplicate_sub_agent` reason categories when reported in token errors
+  or operation logs. A supervisor exit during stop is `:agent_stop_failed`.
+  No foreign PID or start options are added to these diagnostics.
 
   Event metadata never includes prompts, responses, full errors, or strategy
   state. `session`, `token`, `ref`, and agent names have high cardinality;

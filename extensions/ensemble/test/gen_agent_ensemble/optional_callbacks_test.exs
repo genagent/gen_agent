@@ -136,7 +136,7 @@ defmodule GenAgentEnsemble.OptionalCallbacksTest do
     state = :sys.get_state(server)
     refs = Map.reject(state.in_flight, fn {_, {_, token}} -> token == unrelated end)
     waiting = waiter(server, name, first)
-    [{agent, _}] = Registry.lookup(GenAgent.Registry, "#{name}/a")
+    [{agent, _}] = Registry.lookup(GenAgent.Registry, GenAgentEnsemble.member_name(name, "a"))
     Process.exit(agent, :kill)
     failure = {:agent_down, "a", :killed}
     assert Task.await(waiting) == {:error, failure}
@@ -173,7 +173,7 @@ defmodule GenAgentEnsemble.OptionalCallbacksTest do
     assert_receive {:response_callback, "b", %GenAgent.Response{text: "recovered"}}
     {:ok, down_token} = E.tell(name, "down")
     assert_receive {:controlled_prompt, "a", "down", _}
-    [{agent, _}] = Registry.lookup(GenAgent.Registry, "#{name}/a")
+    [{agent, _}] = Registry.lookup(GenAgent.Registry, GenAgentEnsemble.member_name(name, "a"))
     Process.exit(agent, :kill)
     assert_receive {:down_callback, "a", :killed}
     assert E.poll(name, token) == {:ok, :pending}

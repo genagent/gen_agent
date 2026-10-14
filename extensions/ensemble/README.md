@@ -18,6 +18,20 @@ This library is both:
   `config/config.exs`, run `iex -S mix`, and your ensembles are
   live as named processes you can drive directly.
 
+## Member names
+
+Members register under `{GenAgentEnsemble, session, bare_member}`. Use
+`GenAgentEnsemble.member_name/2` or `status.member_names` when calling core APIs:
+
+```elixir
+key = GenAgentEnsemble.member_name("research/2026", "reviewer/1")
+%{name: ^key} = GenAgent.status(key)
+```
+
+This replaces handwritten `"session/member"` lookups. Bare strategy names stay
+unchanged. See the [member-name migration guide](guides/member-names.md) for
+collision handling, telemetry and the remaining named-routing identity boundary.
+
 ## Strategies (shipped)
 
 | Strategy      | Topology                                 | Module                                      |

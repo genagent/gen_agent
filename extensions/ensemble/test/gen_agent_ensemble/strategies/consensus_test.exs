@@ -759,7 +759,7 @@ defmodule GenAgentEnsemble.Strategies.ConsensusTest do
       ])
 
     watched = HaltSupport.watch(pid)
-    Process.exit(GenAgent.whereis("#{name}/a"), :kill)
+    Process.exit(GenAgent.whereis(GenAgentEnsemble.member_name(name, "a")), :kill)
 
     HaltSupport.assert_tree_gone(watched)
     assert {:agent_down, _} = HaltSupport.assert_halted(name)

@@ -47,7 +47,7 @@ defmodule GenAgentEnsemble.OwnershipTest do
   defp held_turn(name, server) do
     {:ok, token} = Ensemble.tell(name, "hold")
     assert_receive {:controlled_prompt, "worker", "hold", task}, 2_000
-    agent = GenAgent.whereis("#{name}/worker")
+    agent = GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker"))
     tree = :sys.get_state(server).agent_tree
     {agent, task, tree, token}
   end
@@ -63,7 +63,7 @@ defmodule GenAgentEnsemble.OwnershipTest do
       assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
     end)
 
-    assert_deregistered("#{name}/worker")
+    assert_deregistered(GenAgentEnsemble.member_name(name, "worker"))
     assert no_ensemble_telemetry_handler?(name)
 
     replacement = start_solo(name)
@@ -102,7 +102,7 @@ defmodule GenAgentEnsemble.OwnershipTest do
       assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
     end)
 
-    assert_deregistered("#{name}/worker")
+    assert_deregistered(GenAgentEnsemble.member_name(name, "worker"))
     assert is_pid(start_solo(name))
   end
 
@@ -137,8 +137,8 @@ defmodule GenAgentEnsemble.OwnershipTest do
              )
 
     assert Registry.lookup(GenAgentEnsemble.Registry, name) == []
-    assert_deregistered("#{name}/good")
-    assert_deregistered("#{name}/bad")
+    assert_deregistered(GenAgentEnsemble.member_name(name, "good"))
+    assert_deregistered(GenAgentEnsemble.member_name(name, "bad"))
     assert no_ensemble_telemetry_handler?(name)
     assert is_pid(start_solo(name))
   end
@@ -175,7 +175,7 @@ defmodule GenAgentEnsemble.OwnershipTest do
     assert_receive {:session_start_blocked, server}, 2_000
     assert [{^server, _}] = Registry.lookup(GenAgentEnsemble.Registry, name)
     assert [{tree, _}] = Registry.lookup(GenAgentEnsemble.AgentTreeRegistry, name)
-    agent = GenAgent.whereis("#{name}/worker")
+    agent = GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker"))
     assert is_pid(agent)
     refs = Enum.map([server, tree, agent], &Process.monitor/1)
 
@@ -185,7 +185,7 @@ defmodule GenAgentEnsemble.OwnershipTest do
       assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
     end)
 
-    assert_deregistered("#{name}/worker")
+    assert_deregistered(GenAgentEnsemble.member_name(name, "worker"))
     :telemetry.detach(handler)
     assert is_pid(start_solo(name))
   end
@@ -235,7 +235,7 @@ defmodule GenAgentEnsemble.OwnershipTest do
 
       pid ->
         if System.monotonic_time(:millisecond) >= deadline do
-          flunk("#{name} remained registered as #{inspect(pid)}")
+          flunk("#{inspect(name)} remained registered as #{inspect(pid)}")
         else
           Process.sleep(10)
           await_deregistration(name, deadline)
@@ -257,7 +257,7 @@ defmodule GenAgentEnsemble.OwnershipTest do
   defp await_replacement(name, old_server, attempts \\ 100) do
     case Registry.lookup(GenAgentEnsemble.Registry, name) do
       [{replacement, _}] when replacement != old_server ->
-        if GenAgent.whereis("#{name}/worker") do
+        if GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker")) do
           replacement
         else
           retry_replacement(name, old_server, attempts)

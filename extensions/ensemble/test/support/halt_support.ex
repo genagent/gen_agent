@@ -36,6 +36,7 @@ defmodule GenAgentEnsemble.HaltSupport do
   def assert_halted(name) do
     assert {:ok, %{lifecycle: :halted} = status} = E.status(name)
     assert status.agents == []
+    assert status.member_names == %{}
     assert status.pending_tokens == []
     assert status.in_flight == 0
     assert {:error, {:halted, reason}} = E.ask(name, "after", timeout: 1_000)

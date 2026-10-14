@@ -82,7 +82,7 @@ defmodule GenAgentEnsemble.ShutdownTest do
     name = "shutdown-#{System.unique_integer([:positive])}"
 
     on_exit(fn ->
-      if agent = GenAgent.whereis("#{name}/worker") do
+      if agent = GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker")) do
         send(agent, :release_agent)
         send(agent, :release_backend)
       end
@@ -112,7 +112,7 @@ defmodule GenAgentEnsemble.ShutdownTest do
 
   defp owned_processes(server, name) do
     state = :sys.get_state(server)
-    agent = GenAgent.whereis("#{name}/worker")
+    agent = GenAgent.whereis(GenAgentEnsemble.member_name(name, "worker"))
     pids = [server, state.agent_tree, state.agent_supervisor, state.task_supervisor, agent]
     {agent, Enum.map(pids, &{&1, Process.monitor(&1)})}
   end

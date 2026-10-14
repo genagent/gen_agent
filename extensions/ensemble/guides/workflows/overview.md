@@ -114,3 +114,10 @@ Solo, Pool, and Switchboard pass their selected response through unchanged.
 Only successful responses can be counted: failed turns expose no response to
 the strategy. Usage must be **per turn**. Core keeps the latest usage event
 within each turn; summing session-cumulative backend reports would overcount.
+
+## Member names and migration
+
+Use `GenAgentEnsemble.member_name(session, bare_member)` for core calls, Registry
+lookups and telemetry filters. Members now use tagged tuple keys rather than
+handwritten `"session/member"` strings. See the [member-name migration guide](../member-names.md)
+for the public helper, status mapping, collision errors and ownership boundaries.

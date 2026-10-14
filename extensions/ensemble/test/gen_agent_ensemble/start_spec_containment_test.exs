@@ -429,7 +429,7 @@ defmodule GenAgentEnsemble.StartSpecContainmentTest do
 
       refute log =~ @secret
 
-      eventually(fn -> GenAgent.whereis("#{name}/live") == nil end)
+      eventually(fn -> GenAgent.whereis(GenAgentEnsemble.member_name(name, "live")) == nil end)
       eventually(fn -> Registry.lookup(GenAgentEnsemble.Registry, name) == [] end)
       eventually(fn -> Registry.lookup(GenAgentEnsemble.AgentTreeRegistry, name) == [] end)
       refute_received {:EXIT, _, _}

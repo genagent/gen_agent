@@ -96,6 +96,7 @@ defmodule GenAgentEnsemble.MixProject do
         "README.md",
         "CHANGELOG.md",
         "LICENSE",
+        "guides/member-names.md",
         "guides/workflows/overview.md",
         "guides/workflows/solo.md",
         "guides/workflows/switchboard.md",

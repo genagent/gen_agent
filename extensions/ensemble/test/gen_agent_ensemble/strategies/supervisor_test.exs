@@ -378,7 +378,7 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
     watched = HaltSupport.watch(pid)
 
     # Kill the coordinator; handle_agent_down should halt the session.
-    Process.exit(GenAgent.whereis("#{name}/#{name}-coord"), :kill)
+    Process.exit(GenAgent.whereis(GenAgentEnsemble.member_name(name, "#{name}-coord")), :kill)
 
     HaltSupport.assert_tree_gone(watched)
     assert {:coordinator_down, _} = HaltSupport.assert_halted(name)

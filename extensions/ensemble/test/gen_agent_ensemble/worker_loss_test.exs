@@ -101,7 +101,9 @@ defmodule GenAgentEnsemble.WorkerLossTest do
         agent == "worker-2"
       end)
 
-    [{worker1, _}] = Registry.lookup(GenAgent.Registry, "#{name}/worker-1")
+    [{worker1, _}] =
+      Registry.lookup(GenAgent.Registry, GenAgentEnsemble.member_name(name, "worker-1"))
+
     Process.exit(worker1, :kill)
 
     failure = {:worker_down, "worker-1", :killed}
@@ -115,7 +117,13 @@ defmodule GenAgentEnsemble.WorkerLossTest do
     # Any sibling result already in flight, or delivered after the stop, is
     # fenced out before it can replay queued work or replace the errors.
     send(worker2_task, {:result, "LATE"})
-    send(server, {:gen_agent, :completion, "#{name}/worker-2", late_ref, {:error, :stale}})
+
+    send(
+      server,
+      {:gen_agent, :completion, GenAgentEnsemble.member_name(name, "worker-2"), late_ref,
+       {:error, :stale}}
+    )
+
     assert {:ok, status} = Ensemble.status(name)
     assert status.phase == :idle
     assert status.queued == 0
@@ -144,7 +152,9 @@ defmodule GenAgentEnsemble.WorkerLossTest do
     send(worker2_task, {:result, "FINISHED"})
     assert %{phase: {:fanning_out, 1, 2}} = await_phase(name, {:fanning_out, 1, 2})
 
-    [{worker1, _}] = Registry.lookup(GenAgent.Registry, "#{name}/worker-1")
+    [{worker1, _}] =
+      Registry.lookup(GenAgent.Registry, GenAgentEnsemble.member_name(name, "worker-1"))
+
     Process.exit(worker1, :kill)
 
     assert {:error, {:worker_down, "worker-1", :killed}} = await_poll(name, token)
