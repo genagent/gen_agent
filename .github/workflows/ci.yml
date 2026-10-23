@@ -299,16 +299,17 @@ jobs:
           elixir-version: "1.20"
           otp-version: "29"
 
-      - name: Restore package deps and PLT cache
+      # Cache dependency downloads only: core path-dependency source can change
+      # without a package lockfile change. Recompile and rebuild PLTs for safety,
+      # trading CI time for fresh artifacts. New keys exclude old build/PLT caches.
+      - name: Restore package deps cache
         uses: actions/cache@v6
         with:
           path: |
             ${{ matrix.package }}/deps
-            ${{ matrix.package }}/_build
-            ${{ matrix.package }}/priv/plts
-          key: mix-package-${{ matrix.package }}-1.20-29-${{ hashFiles(format('{0}/mix.lock', matrix.package), format('{0}/mix.exs', matrix.package)) }}
+          key: mix-package-deps-v2-${{ matrix.package }}-1.20-29-${{ hashFiles(format('{0}/mix.lock', matrix.package), format('{0}/mix.exs', matrix.package)) }}
           restore-keys: |
-            mix-package-${{ matrix.package }}-1.20-29-
+            mix-package-deps-v2-${{ matrix.package }}-1.20-29-
 
       - name: Run package quality gates
         run: bash "$GITHUB_WORKSPACE/scripts/quality.sh" "${{ matrix.package }}"
@@ -337,15 +338,16 @@ jobs:
           elixir-version: "1.19"
           otp-version: "27"
 
+      # Keep dependency downloads, but recompile against current path dependencies.
+      # The deps-only namespace prevents fallback to old caches containing _build.
       - name: Restore publish-toolchain deps cache
         uses: actions/cache@v6
         with:
           path: |
             ${{ matrix.package }}/deps
-            ${{ matrix.package }}/_build
-          key: mix-publish-${{ matrix.package }}-1.19-27-${{ hashFiles(format('{0}/mix.lock', matrix.package), format('{0}/mix.exs', matrix.package)) }}
+          key: mix-publish-deps-v2-${{ matrix.package }}-1.19-27-${{ hashFiles(format('{0}/mix.lock', matrix.package), format('{0}/mix.exs', matrix.package)) }}
           restore-keys: |
-            mix-publish-${{ matrix.package }}-1.19-27-
+            mix-publish-deps-v2-${{ matrix.package }}-1.19-27-
 
       - name: Install dependencies
         run: mix deps.get
