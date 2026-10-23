@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.7.0...gen_agent_ensemble-v0.7.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **deps:** admit core 0.9 in published adapters ([#502](https://github.com/genagent/gen_agent/issues/502)) ([df18e37](https://github.com/genagent/gen_agent/commit/df18e3727a99b91e7d4c2f016a4371da3df2a3ce))
+* **ensemble:** keep status reads from crashing sessions ([#496](https://github.com/genagent/gen_agent/issues/496)) ([224ee89](https://github.com/genagent/gen_agent/commit/224ee8980e7534cad95319f93e5cff041bf84f61))
+
 ## [0.7.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.6.1...gen_agent_ensemble-v0.7.0) (2026-10-14)
 
 
