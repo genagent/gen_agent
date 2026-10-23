@@ -22,21 +22,24 @@ last released from the separate repositories. Baseline component tags for the
 five moved packages point to the consolidation commit; earlier tags and issues
 remain in the original repositories.
 
-Merge only the release pull requests intended for that release. For a core
-upgrade that existing consumers support, first widen their requirements and
-verify them against the actual core release candidate while retaining their
-published lower bounds. Publish the widened adapters, then Ensemble, while
-the previous core is still latest. Only then publish the new core and verify
-the complete published family. The default consumer check pins every package
-to its latest Hex release; publishing the new core before those ranges are
-available would make that combination unresolvable and block later release CI.
+Merge only the release pull requests intended for that release. When existing
+consumers can support a new core while retaining their published lower bounds,
+widen their requirements and test against the core release candidate. Publishing
+those adapters, then Ensemble, before core remains a useful release order.
 
-If a component requires a new core API and cannot retain its earlier minimum,
-it must wait for that core publication. Plan the coordinated release and its
-consumer checks explicitly rather than assuming the range-widening order
-applies. Within one release workflow, publication runs core, then released
-integrations, then Ensemble. It skips versions already present on Hex so a
-failed publish run can be retried.
+Core can publish first while the latest published siblings still share an older
+compatible core, as with core 0.9 and all five siblings resolving core 0.8.
+Before publishing any sibling version that requires the new core, publish every
+sibling compatibility range needed to admit it, or coordinate their releases so
+no CI-gated intermediate published set is incoherent.
+The default published-consumer gate pins the
+latest stable release of each of the five siblings and lets Hex select the newest
+core compatible with that set. It may therefore still resolve an earlier core
+while compatibility patches are being released. It never substitutes older
+siblings or skips a package; an incoherent published set fails resolution.
+Within one release workflow, publication runs core, then released integrations,
+then Ensemble. It skips versions already present on Hex so a failed publish run
+can be retried.
 
 After publishing core, refresh each dependent package's Hex-mode lock before
 testing or building it against the new core. From the dependent directory run
@@ -59,13 +62,19 @@ Inside this repository, sibling packages use local path dependencies. Set
 `GEN_AGENT_HEX=1` for each sibling's `mix hex.build` or `mix hex.publish` so
 its archive contains ordinary Hex requirements. `scripts/package-check.sh`
 builds all six archives in that mode and checks their dependency metadata for
-path entries. `scripts/consumer-check.sh` compiles a fresh project against
-the latest published stable versions of all six Hex packages. This default
-mode is safe to run in CI while a release PR contains versions that have not
-been published yet. After publishing a new combination of packages, run
+path entries. These are two separate CI gates: `package-check.sh` also compiles
+and tests current sibling sources against the exact current core when that core
+is published on Hex. This protects source compatibility even when the published
+consumer still resolves an earlier core. `scripts/consumer-check.sh` compiles a
+fresh project with exact latest stable sibling versions and a flexible core
+requirement. It verifies and prints the actually locked core and all five exact
+sibling versions. This default mode checks the published ecosystem while
+compatibility patch releases land independently. After publishing a new
+combination of packages, run
 `scripts/consumer-check.sh --manifest` to verify and compile the exact versions
-in `.release-please-manifest.json`. Both modes use `jq`; the default mode also
-queries the Hex API with `curl`.
+in `.release-please-manifest.json`, including an exact core pin. This post-publish
+check confirms the intended complete release combination. Both modes use `jq`;
+the default mode also queries the Hex API with `curl`.
 
 The publishing workflow needs a `HEX_API_KEY` that can publish all six
 packages. `RELEASE_PLEASE_TOKEN`, when configured, lets release PRs trigger
