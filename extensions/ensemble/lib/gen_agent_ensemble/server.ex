@@ -53,7 +53,7 @@ defmodule GenAgentEnsemble.Server do
     :waiter_monitors,
     # %{gen_agent_ref => {agent_name, run_token}}
     :in_flight,
-    # %{gen_agent_ref => {started_at, ordinal}}
+    # %{gen_agent_ref => {started_at, ordinal, captured_pid, admission}}
     :dispatch_contexts
   ]
 
@@ -534,13 +534,57 @@ defmodule GenAgentEnsemble.Server do
     {:noreply, state}
   end
 
+  # A terminal ref cannot be reopened by a later admission decision.
+  defp handle_info_impl({:gen_agent, :admission, _name, ref, :ok}, state) do
+    {:noreply, accept_dispatch(state, ref)}
+  end
+
+  defp handle_info_impl({:gen_agent, :admission, _name, ref, {:error, reason}}, state) do
+    case Map.fetch(state.dispatch_contexts, ref) do
+      {:ok, {_started_at, ordinal, _pid, :submitted}} ->
+        {agent, token} = Map.fetch!(state.in_flight, ref)
+
+        Logger.warning(
+          "[gen_agent_ensemble] op #{inspect(op_summary(if token == nil, do: {:dispatch, agent, nil}, else: {:dispatch, agent, nil, token}))} failed: #{reason_kind(reason)}"
+        )
+
+        emit(
+          :dispatch,
+          :rejected,
+          %{},
+          dispatch_meta(state, agent, token, ref, ordinal)
+          |> Map.put(:outcome, :rejected)
+          |> Map.put(:reason_kind, reason_kind(reason))
+        )
+
+        state = %{
+          state
+          | in_flight: Map.delete(state.in_flight, ref),
+            dispatch_contexts: Map.delete(state.dispatch_contexts, ref)
+        }
+
+        {:noreply,
+         if(token != nil and Map.has_key?(state.pending, token),
+           do: reject_dispatch(state, agent, token, reason),
+           else: state
+         )}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   defp handle_info_impl({:gen_agent, :completion, _ns_agent, ref, {:ok, response}}, state) do
+    state = accept_dispatch(state, ref)
+
     case Map.pop(state.in_flight, ref) do
       {nil, _} ->
         {:noreply, state}
 
       {{bare_agent, token}, rest} ->
-        {{started_at, ordinal}, contexts} = Map.pop(state.dispatch_contexts, ref)
+        {{started_at, ordinal, _pid, _admission}, contexts} =
+          Map.pop(state.dispatch_contexts, ref)
+
         state = %{state | in_flight: rest, dispatch_contexts: contexts}
         emit_dispatch(state, :stop, bare_agent, token, ref, started_at, ordinal)
         {:noreply, handle_prompt_response(state, bare_agent, token, response)}
@@ -548,12 +592,16 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp handle_info_impl({:gen_agent, :completion, _ns_agent, ref, {:error, reason}}, state) do
+    state = accept_dispatch(state, ref)
+
     case Map.pop(state.in_flight, ref) do
       {nil, _} ->
         {:noreply, state}
 
       {{bare_agent, token}, rest} ->
-        {{started_at, ordinal}, contexts} = Map.pop(state.dispatch_contexts, ref)
+        {{started_at, ordinal, _pid, _admission}, contexts} =
+          Map.pop(state.dispatch_contexts, ref)
+
         state = %{state | in_flight: rest, dispatch_contexts: contexts}
 
         emit_dispatch(state, :error, bare_agent, token, ref, started_at, ordinal,
@@ -644,7 +692,7 @@ defmodule GenAgentEnsemble.Server do
   defp handle_info_impl({:gen_agent, :event, _ns_agent, ref, event}, state) do
     with {:ok, {agent, token}} <- Map.fetch(state.in_flight, ref),
          {:ok, recipient} <- Map.fetch(state.stream_recipients, token) do
-      {_started_at, ordinal} = Map.fetch!(state.dispatch_contexts, ref)
+      {_started_at, ordinal, _pid, _admission} = Map.fetch!(state.dispatch_contexts, ref)
 
       send(
         recipient,
@@ -712,7 +760,8 @@ defmodule GenAgentEnsemble.Server do
       state =
         Enum.reduce(state.in_flight, state, fn
           {ref, {agent, ^token}}, acc ->
-            {{started_at, ordinal}, contexts} = Map.pop(acc.dispatch_contexts, ref)
+            {{started_at, ordinal, _pid, _admission}, contexts} =
+              Map.pop(acc.dispatch_contexts, ref)
 
             emit_dispatch(acc, :error, agent, token, ref, started_at, ordinal,
               reason_kind: reason_kind(reason)
@@ -811,8 +860,8 @@ defmodule GenAgentEnsemble.Server do
 
   defp op_summary(_op), do: :unknown_op
 
-  # Stop the rest of this op batch after a rejected scoped dispatch. In
-  # particular, a Supervisor fanout may contain starts after it. A malformed
+  # Synchronous ownership-guard rejection stops this scoped dispatch batch.
+  # Child admission rejection arrives asynchronously after later ops may run. A malformed
   # operation was never a dispatch attempt, so it is skipped like any other
   # logged failure.
   defp handle_op_failure(_op, :invalid_operation, state), do: {:cont, state}
@@ -1050,37 +1099,25 @@ defmodule GenAgentEnsemble.Server do
         else: [on_halt: :fail]
 
     result =
-      try do
-        with :ok <- owned_member(state, name) do
-          case GenAgent.tell_with_completion(
-                 member_name(state, name),
-                 prompt,
-                 self(),
-                 :infinity,
-                 opts
-               ) do
-            {:error, :not_found} -> {:error, {:agent_not_running, name}}
-            result -> result
-          end
-        end
-      catch
-        :exit, {:noproc, _} -> {:error, {:agent_not_running, name}}
-        :exit, reason -> {:error, {:dispatch_exit, reason}}
+      with :ok <- owned_member(state, name) do
+        pid = Map.fetch!(state.agents, name)
+        {:submitted, ref} = GenAgent.Client.submit_with_completion(pid, prompt, self(), opts)
+        {:submitted, ref, pid}
       end
 
     case result do
-      {:ok, ref} ->
+      {:submitted, ref, pid} ->
         # Child events may already be queued, but this callback registers the
         # ref before the GenServer can process those mailbox messages.
         {ordinal, state} = next_dispatch(state, token)
         started_at = System.monotonic_time()
-        emit_dispatch(state, :start, name, token, ref, started_at, ordinal)
 
         {:ok,
          %{
            state
            | in_flight: Map.put(state.in_flight, ref, {name, token}),
-             dispatch_contexts: Map.put(state.dispatch_contexts, ref, {started_at, ordinal})
+             dispatch_contexts:
+               Map.put(state.dispatch_contexts, ref, {started_at, ordinal, pid, :submitted})
          }}
 
       {:error, reason} ->
@@ -1102,7 +1139,7 @@ defmodule GenAgentEnsemble.Server do
   # just this token's completion could pop an unrelated predecessor instead.
   defp drain_child_messages(state) do
     receive do
-      {:gen_agent, kind, _, _, _} = message when kind in [:event, :completion] ->
+      {:gen_agent, kind, _, _, _} = message when kind in [:admission, :event, :completion] ->
         {:noreply, state} = handle_info_impl(message, state)
         drain_child_messages(state)
     after
@@ -1154,13 +1191,15 @@ defmodule GenAgentEnsemble.Server do
     end
   end
 
-  defp cancel_child(state, agent, ref) do
-    case GenAgent.cancel_request(member_name(state, agent), ref, @cancel_child_timeout) do
+  defp cancel_child(state, _agent, ref) do
+    {_started_at, _ordinal, pid, _admission} = Map.fetch!(state.dispatch_contexts, ref)
+
+    case GenAgent.Client.cancel_request(pid, ref, @cancel_child_timeout) do
       {:ok, :cancelled} ->
         true
 
       {:error, :current} ->
-        GenAgent.interrupt_request(member_name(state, agent), ref, @cancel_child_timeout) ==
+        GenAgent.Client.interrupt_request(pid, ref, @cancel_child_timeout) ==
           {:ok, :accepted}
 
       _ ->
@@ -1171,7 +1210,7 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp fence_cancelled_ref(state, ref, agent, token) do
-    {{started_at, ordinal}, contexts} = Map.pop(state.dispatch_contexts, ref)
+    {{started_at, ordinal, _pid, _admission}, contexts} = Map.pop(state.dispatch_contexts, ref)
     emit_dispatch(state, :error, agent, token, ref, started_at, ordinal, reason_kind: :cancelled)
     %{state | in_flight: Map.delete(state.in_flight, ref), dispatch_contexts: contexts}
   end
@@ -1280,7 +1319,7 @@ defmodule GenAgentEnsemble.Server do
   defp emit_dropped_dispatches(state, agent, reason_kind) do
     Enum.each(state.in_flight, fn {ref, {name, token}} ->
       if name == agent do
-        {started_at, ordinal} = Map.fetch!(state.dispatch_contexts, ref)
+        {started_at, ordinal, _pid, _admission} = Map.fetch!(state.dispatch_contexts, ref)
 
         emit_dispatch(state, :error, name, token, ref, started_at, ordinal,
           reason_kind: reason_kind
@@ -1291,7 +1330,7 @@ defmodule GenAgentEnsemble.Server do
 
   defp emit_open_dispatches(state, reason_kind) do
     Enum.each(state.in_flight, fn {ref, {agent, token}} ->
-      {started_at, ordinal} = Map.fetch!(state.dispatch_contexts, ref)
+      {started_at, ordinal, _pid, _admission} = Map.fetch!(state.dispatch_contexts, ref)
 
       emit_dispatch(state, :error, agent, token, ref, started_at, ordinal,
         reason_kind: reason_kind
@@ -1416,6 +1455,23 @@ defmodule GenAgentEnsemble.Server do
     {ordinal, %{state | token_contexts: Map.put(state.token_contexts, token, context)}}
   end
 
+  defp accept_dispatch(state, ref) do
+    case Map.fetch(state.dispatch_contexts, ref) do
+      {:ok, {started_at, ordinal, pid, :submitted}} ->
+        {agent, token} = Map.fetch!(state.in_flight, ref)
+        emit_dispatch(state, :start, agent, token, ref, started_at, ordinal)
+
+        %{
+          state
+          | dispatch_contexts:
+              Map.put(state.dispatch_contexts, ref, {started_at, ordinal, pid, :accepted})
+        }
+
+      _ ->
+        state
+    end
+  end
+
   defp emit_dispatch(state, event, agent, token, ref, started_at, ordinal, extra \\ []) do
     measurements =
       if event == :start,
@@ -1505,8 +1561,8 @@ defmodule GenAgentEnsemble.Server do
   defp member_name(%__MODULE__{session_name: session}, bare_name),
     do: GenAgentEnsemble.member_name(session, bare_name)
 
-  # This check and the subsequent public named core call are not atomic.
-  # A replacement between lookup and send requires a future pinned-target API.
+  # Dispatch submits to the captured owned PID without a second lookup.
+  # Named forwarding still has a lookup/send race (the separate #490 fence).
   defp owned_member(state, name) do
     case Map.fetch(state.agents, name) do
       {:ok, pid} ->

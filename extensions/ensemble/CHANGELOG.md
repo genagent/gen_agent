@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Strategy migration: asynchronous child admission
+
+For external strategy authors: synchronous ownership-guard rejection of a
+scoped dispatch still ends its operation batch. Child admission rejection is
+asynchronous; later operations in the batch, including sibling starts and
+dispatches, may already have run before `handle_dispatch_rejected/4` is called.
+Strategies must tolerate and clean up that work; rejection does not roll it
+back. Unscoped rejection is logged without calling that token-scoped callback.
+Submission reserves a per-token ordinal even when the child rejects it; the
+`:dispatch, :rejected` event carries that ordinal and ref. Guard-time rejection
+has neither. Accepted dispatch ordinals can therefore have gaps.
+
 ## [0.7.1](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.7.0...gen_agent_ensemble-v0.7.1) (2026-10-23)
 
 

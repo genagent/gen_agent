@@ -135,6 +135,11 @@ defmodule GenAgentEnsemble.FormatStatusTest do
     log =
       capture_log(fn ->
         assert {:ok, token} = Ensemble.tell(name, @prompt)
+
+        assert {:error, {:dispatch_rejected, "worker", {:overloaded, _}}} =
+                 Ensemble.await(name, token)
+
+        Logger.flush()
         send(self(), {:rejected_token, token})
       end)
 

@@ -70,9 +70,12 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
 
     case Ensemble.poll(name, token) do
       {:ok, :pending} ->
-        if System.monotonic_time(:millisecond) < deadline,
-          do: await_poll(name, token, deadline),
-          else: flunk("token #{token} did not complete")
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(1)
+          await_poll(name, token, deadline)
+        else
+          flunk("token #{token} did not complete")
+        end
 
       result ->
         result
@@ -86,7 +89,7 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
     assert_receive {:controlled_prompt, "solo", "first", first_task}
 
     {:ok, rejected} = Ensemble.tell(name, "rejected")
-    assert {:error, {:overloaded, _}} = Ensemble.poll(name, rejected)
+    assert {:error, {:overloaded, _}} = await_poll(name, rejected)
     assert {:ok, %{queued_tokens: 1}} = Ensemble.status(name)
 
     send(first_task, {:result, "FIRST"})
@@ -186,7 +189,7 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
     assert_receive {:controlled_prompt, "worker", "external", external_task}
 
     {:ok, rejected} = Ensemble.tell(name, "rejected")
-    assert {:error, {:overloaded, _}} = Ensemble.poll(name, rejected)
+    assert {:error, {:overloaded, _}} = await_poll(name, rejected)
     assert {:ok, %{free: 1, busy: 0, queued: 0}} = Ensemble.status(name)
 
     send(external_task, {:result, "EXTERNAL"})

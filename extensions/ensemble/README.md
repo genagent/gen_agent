@@ -244,6 +244,31 @@ original serialized prompts, not a memory limit or a limit on physical work:
 the mailbox, strategy state and options, generated prompts, intermediate
 outputs, backend histories, and completed results are bounded separately.
 
+Child dispatch uses nonblocking PID submission: a token acknowledges Ensemble
+admission, not child admission. A held child `pre_turn` callback does not by
+itself block subsequent submission, status, poll, inbox, or notify processing.
+Child rejection closes the existing token through the usual result paths. An
+immediate `poll` may still return `{:ok, :pending}`; use `await` or poll until
+the terminal result arrives to observe child rejection.
+
+For external strategy authors: synchronous ownership-guard rejection of a
+scoped dispatch still ends its operation batch. Child admission rejection is
+asynchronous; later operations in the batch, including sibling starts and
+dispatches, may already have run before `handle_dispatch_rejected/4` is called.
+Strategies must tolerate and clean up that work; rejection does not roll it
+back. Unscoped rejection is logged without calling that token-scoped callback.
+Submission reserves a per-token ordinal even when the child rejects it; the
+`:dispatch, :rejected` event carries that ordinal and ref. Guard-time rejection
+has neither. Accepted dispatch ordinals can therefore have gaps.
+
+Cancellation still performs synchronous child controls, including before child
+admission. A held callback can block the Ensemble server for a five-second
+control timeout (and a further five seconds if interruption is needed), per
+reference. Reads and other commands queue behind that cancellation. Moving
+these controls off the server requires a follow-up cancellation state machine;
+this change does not fully resolve command responsiveness. Strategy callbacks
+and child stop operations can also block the server.
+
 ### Halting
 
 A strategy's first `{:halt, reason}` ends the session logically and

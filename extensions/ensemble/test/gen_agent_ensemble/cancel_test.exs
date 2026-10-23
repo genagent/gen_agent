@@ -196,6 +196,10 @@ defmodule GenAgentEnsemble.CancelTest do
     {name, pid} = start(LegacyStrategy, agent: spec("w"))
     {:ok, token} = E.tell_with_completion(name, "active")
     assert_receive {:controlled_prompt, "w", "active", backend}
+    # Backend entry can precede the child's admission message. A child call
+    # waits for submission handling (and its admission send) to finish before
+    # capturing the Ensemble state that unsupported cancellation must preserve.
+    assert %{state: :processing} = GenAgent.status(GenAgentEnsemble.member_name(name, "w"))
     before = :sys.get_state(pid)
     assert E.cancel(name, token) == {:error, :unsupported}
     assert :sys.get_state(pid) == before
