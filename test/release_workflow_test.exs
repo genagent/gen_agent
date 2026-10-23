@@ -65,13 +65,30 @@ defmodule GenAgent.ReleaseWorkflowTest do
       end
     end
 
-    actions =
-      for workflow <- [release, recovery],
-          [_, action] <- Regex.scan(~r/uses:\s+([^\s#]+)/, workflow),
-          do: action
+    for {workflow, expected_inventory} <- [
+          {release,
+           %{
+             "googleapis/release-please-action" => 1,
+             "actions/checkout" => 3,
+             "erlef/setup-beam" => 3,
+             "dtolnay/rust-toolchain" => 1
+           }},
+          {recovery,
+           %{
+             "actions/checkout" => 1,
+             "erlef/setup-beam" => 1,
+             "dtolnay/rust-toolchain" => 1
+           }}
+        ] do
+      actions =
+        for [_, action] <- Regex.scan(~r/uses:\s+([^\s#]+)/, workflow),
+            do: action
 
-    assert length(actions) == 9
-    assert Enum.all?(actions, &Regex.match?(~r/\A[^@]+@[0-9a-f]{40}\z/, &1))
+      assert Enum.frequencies_by(actions, &(&1 |> String.split("@") |> hd())) ==
+               expected_inventory
+
+      assert Enum.all?(actions, &Regex.match?(~r/\A[^@]+@[0-9a-f]{40}\z/, &1))
+    end
   end
 
   test "only the publish command inherits the Hex key" do
