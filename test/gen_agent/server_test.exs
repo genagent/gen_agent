@@ -72,6 +72,12 @@ defmodule GenAgent.ServerTest do
     pid
   end
 
+  defp submit_completion(pid, opts \\ []) do
+    {:submitted, ref} = GenAgent.Client.submit_with_completion(pid, "go", self(), opts)
+    assert_receive {:gen_agent, :admission, "test", ^ref, :ok}
+    ref
+  end
+
   defp result_events(text), do: [Event.new(:result, %{text: text})]
 
   defp status(pid), do: :gen_statem.call(pid, :status)
@@ -144,7 +150,7 @@ defmodule GenAgent.ServerTest do
     end
 
     test "draining a halted pending retry settles its original caller", %{task_sup: sup} do
-      for mode <- [:ask, :tell] do
+      for mode <- [:ask, :tell, :pid] do
         observer = self()
 
         pid =
@@ -159,9 +165,16 @@ defmodule GenAgent.ServerTest do
         caller = if mode == :ask, do: Task.async(fn -> ask(pid, "go") end)
 
         ref =
-          if mode == :tell do
-            {:ok, ref} = :gen_statem.call(pid, {:tell_with_completion, "go", self(), :queue})
-            ref
+          case mode do
+            :ask ->
+              nil
+
+            :tell ->
+              {:ok, ref} = :gen_statem.call(pid, {:tell_with_completion, "go", self(), :queue})
+              ref
+
+            :pid ->
+              submit_completion(pid)
           end
 
         assert_receive {:retry_gate, :first, task, _}
@@ -207,7 +220,7 @@ defmodule GenAgent.ServerTest do
     end
 
     test "tell stays pending and completion is delivered exactly once", %{task_sup: sup} do
-      for completion? <- [false, true] do
+      for completion? <- [false, true, :pid] do
         pid =
           start_server(sup, [{:error, :first}, retry_gate(self(), :retry, result_events("done"))],
             error_handler: fn _, _, s -> {:prompt, "retry", s} end
@@ -215,10 +228,19 @@ defmodule GenAgent.ServerTest do
 
         observe_retry_telemetry(pid)
 
-        {:ok, ref} =
-          if completion?,
-            do: :gen_statem.call(pid, {:tell_with_completion, "go", self(), :queue}),
-            else: tell(pid, "go")
+        ref =
+          case completion? do
+            :pid ->
+              submit_completion(pid)
+
+            true ->
+              {:ok, ref} = :gen_statem.call(pid, {:tell_with_completion, "go", self(), :queue})
+              ref
+
+            false ->
+              {:ok, ref} = tell(pid, "go")
+              ref
+          end
 
         assert_receive {:retry_gate, :retry, task, "retry"}
         assert {:ok, :pending} = poll(pid, ref)
@@ -363,7 +385,7 @@ defmodule GenAgent.ServerTest do
     end
 
     test "halted pending retries resume, fail, or cancel according to ownership", %{task_sup: sup} do
-      for mode <- [:ask, :tell, :queue, :fail, :cancel] do
+      for mode <- [:ask, :tell, :queue, :fail, :cancel, :pid_queue, :pid_fail, :pid_cancel] do
         pid =
           start_server(
             sup,
@@ -387,6 +409,9 @@ defmodule GenAgent.ServerTest do
               {:ok, ref} = tell(pid, "go")
               ref
 
+            mode when mode in [:pid_queue, :pid_fail, :pid_cancel] ->
+              submit_completion(pid, on_halt: if(mode == :pid_fail, do: :fail, else: :queue))
+
             _ ->
               {:ok, ref} =
                 :gen_statem.call(
@@ -406,11 +431,11 @@ defmodule GenAgent.ServerTest do
         assert status(pid).halted
 
         cond do
-          mode == :fail ->
+          mode in [:fail, :pid_fail] ->
             assert {:error, :halted} = poll(pid, ref)
             assert_receive {:gen_agent, :completion, "test", ^ref, {:error, :halted}}
 
-          mode == :cancel ->
+          mode in [:cancel, :pid_cancel] ->
             assert {:ok, :pending} = poll(pid, ref)
             assert {:ok, :cancelled} = :gen_statem.call(pid, {:cancel_request, ref})
             assert_receive {:gen_agent, :completion, "test", ^ref, {:error, :cancelled}}
@@ -440,14 +465,21 @@ defmodule GenAgent.ServerTest do
             {:skip, :pre_turn_skipped},
             {:halt, :pre_turn_halted},
             {:invalid, :pre_turn_invalid}
-          ] do
+          ],
+          transport <- [:ask, :pid] do
         pid =
           start_server(sup, [{:error, :again}],
             error_handler: fn _, _, s -> {:prompt, "retry", s} end,
             pre_turn: fn p, s -> if p == "retry", do: {decision, s}, else: {:ok, p, s} end
           )
 
-        assert {:error, ^reason} = ask(pid, "go")
+        if transport == :ask do
+          assert {:error, ^reason} = ask(pid, "go")
+        else
+          ref = submit_completion(pid)
+          assert_receive {:gen_agent, :completion, "test", ^ref, {:error, ^reason}}
+          refute_received {:gen_agent, :admission, "test", ^ref, _}
+        end
       end
     end
 

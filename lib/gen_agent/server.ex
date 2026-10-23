@@ -476,30 +476,6 @@ defmodule GenAgent.Server do
 
   defp dispatch_event(
          {:call, from},
-         {:tell_with_completion, _prompt, _recipient},
-         _state,
-         %Data{draining: true} = data
-       ),
-       do: reject_during_drain(data, from)
-
-  defp dispatch_event(
-         {:call, from},
-         {:tell_with_completion, _prompt, _recipient, _on_halt},
-         _state,
-         %Data{draining: true} = data
-       ),
-       do: reject_during_drain(data, from)
-
-  defp dispatch_event(
-         {:call, from},
-         {:tell_with_completion, _prompt, _recipient, _on_halt, _stream_to},
-         _state,
-         %Data{draining: true} = data
-       ),
-       do: reject_during_drain(data, from)
-
-  defp dispatch_event(
-         {:call, from},
          {:notify_ack, _event},
          _state,
          %Data{draining: true} = data
@@ -558,54 +534,10 @@ defmodule GenAgent.Server do
   defp dispatch_event(
          {:call, from},
          {:tell_with_completion, prompt, recipient},
-         :idle,
-         %Data{halted: false} = data
-       ) do
-    request_ref = make_ref()
-
-    case try_dispatch(data, request_ref, {:tell, recipient}, prompt) do
-      {:next_state, :processing, data} ->
-        {:next_state, :processing, data, [{:reply, from, {:ok, request_ref}}]}
-
-      {:keep_state, data, actions} ->
-        {:keep_state, data, [{:reply, from, {:ok, request_ref}} | actions]}
-    end
-  end
-
-  defp dispatch_event(
-         {:call, from},
-         {:tell_with_completion, prompt, recipient},
          state,
          %Data{} = data
-       )
-       when state in [:idle, :processing] do
-    queue_tell(data, from, prompt, recipient)
-  end
-
-  defp dispatch_event(
-         {:call, from},
-         {:tell_with_completion, _prompt, _recipient, :fail},
-         :idle,
-         %Data{halted: true}
        ) do
-    {:keep_state_and_data, [{:reply, from, {:error, :halted}}]}
-  end
-
-  defp dispatch_event(
-         {:call, from},
-         {:tell_with_completion, prompt, recipient, on_halt},
-         :idle,
-         %Data{halted: false} = data
-       ) do
-    request_ref = make_ref()
-
-    case try_dispatch(data, request_ref, {:tell, recipient, on_halt}, prompt) do
-      {:next_state, :processing, data} ->
-        {:next_state, :processing, data, [{:reply, from, {:ok, request_ref}}]}
-
-      {:keep_state, data, actions} ->
-        {:keep_state, data, [{:reply, from, {:ok, request_ref}} | actions]}
-    end
+    completion_call(data, state, from, prompt, {:tell, recipient}, nil)
   end
 
   defp dispatch_event(
@@ -613,37 +545,8 @@ defmodule GenAgent.Server do
          {:tell_with_completion, prompt, recipient, on_halt},
          state,
          %Data{} = data
-       )
-       when state in [:idle, :processing] do
-    queue_tell(data, from, prompt, recipient, on_halt)
-  end
-
-  defp dispatch_event(
-         {:call, from},
-         {:tell_with_completion, _prompt, _recipient, :fail, _stream_to},
-         :idle,
-         %Data{halted: true}
        ) do
-    {:keep_state_and_data, [{:reply, from, {:error, :halted}}]}
-  end
-
-  defp dispatch_event(
-         {:call, from},
-         {:tell_with_completion, prompt, recipient, on_halt, stream_to},
-         :idle,
-         %Data{halted: false} = data
-       ) do
-    request_ref = make_ref()
-    data = put_stream_recipient(data, request_ref, stream_to)
-    kind = tell_kind(recipient, on_halt)
-
-    case try_dispatch(data, request_ref, kind, prompt) do
-      {:next_state, :processing, data} ->
-        {:next_state, :processing, data, [{:reply, from, {:ok, request_ref}}]}
-
-      {:keep_state, data, actions} ->
-        {:keep_state, data, [{:reply, from, {:ok, request_ref}} | actions]}
-    end
+    completion_call(data, state, from, prompt, {:tell, recipient, on_halt}, nil)
   end
 
   defp dispatch_event(
@@ -651,9 +554,23 @@ defmodule GenAgent.Server do
          {:tell_with_completion, prompt, recipient, on_halt, stream_to},
          state,
          %Data{} = data
-       )
-       when state in [:idle, :processing] do
-    queue_tell(data, from, prompt, recipient, on_halt, stream_to)
+       ) do
+    completion_call(data, state, from, prompt, tell_kind(recipient, on_halt), stream_to)
+  end
+
+  defp dispatch_event(
+         :cast,
+         {:submit_with_completion, ref, prompt, recipient, on_halt, stream_to},
+         state,
+         %Data{} = data
+       ) do
+    {transition, outcome} =
+      admit_completion(data, state, ref, prompt, tell_kind(recipient, on_halt), stream_to)
+
+    # record_error/3 can already have sent a terminal outcome during an
+    # immediate idle rejection. Preserve that ordering and all followup actions.
+    send(recipient, {:gen_agent, :admission, data.name, ref, outcome})
+    transition
   end
 
   # poll -- check status of a previously-tell'd request
@@ -1308,17 +1225,65 @@ defmodule GenAgent.Server do
   defp put_stream_recipient(data, ref, pid),
     do: %{data | stream_recipients: Map.put(data.stream_recipients, ref, pid)}
 
-  defp queue_tell(data, from, prompt, recipient \\ nil, on_halt \\ :queue, stream_to \\ nil) do
-    request_ref = make_ref()
-    kind = tell_kind(recipient, on_halt)
+  defp completion_call(data, state, from, prompt, kind, stream_to) do
+    ref = make_ref()
+    {transition, outcome} = admit_completion(data, state, ref, prompt, kind, stream_to)
+    reply = if outcome == :ok, do: {:ok, ref}, else: outcome
+    prepend_reply(transition, {:reply, from, reply})
+  end
 
-    case enqueue_prompt(data, request_ref, kind, prompt) do
+  # Both transports share this admission decision. The caller owns only the
+  # correlation ref and how to report admission; accepted work follows the
+  # existing tell lifecycle, including immediate pre_turn completion.
+  defp admit_completion(%Data{draining: true} = data, _state, _ref, _prompt, _kind, _) do
+    emit_input_rejected(data.name, :draining)
+    {:keep_state_and_data, {:error, :draining}}
+  end
+
+  defp admit_completion(%Data{halted: true}, :idle, _ref, _prompt, {:tell, _, :fail}, _) do
+    {:keep_state_and_data, {:error, :halted}}
+  end
+
+  defp admit_completion(%Data{halted: false} = data, :idle, ref, prompt, kind, stream_to) do
+    data = put_stream_recipient(data, ref, stream_to)
+    {try_dispatch(data, ref, kind, prompt), :ok}
+  end
+
+  defp admit_completion(data, _state, ref, prompt, kind, stream_to) do
+    # Legacy queued tells omit the default halt policy from their kind tuple.
+    kind =
+      case kind do
+        {:tell, recipient, :queue} -> {:tell, recipient}
+        other -> other
+      end
+
+    enqueue_tell(data, ref, prompt, kind, stream_to)
+  end
+
+  defp prepend_reply({:next_state, state, data}, reply),
+    do: {:next_state, state, data, [reply]}
+
+  defp prepend_reply({:keep_state, data, actions}, reply),
+    do: {:keep_state, data, [reply | actions]}
+
+  defp prepend_reply(:keep_state_and_data, reply),
+    do: {:keep_state_and_data, [reply]}
+
+  defp queue_tell(data, from, prompt) do
+    ref = make_ref()
+    {transition, outcome} = enqueue_tell(data, ref, prompt, :tell, nil)
+    reply = if outcome == :ok, do: {:ok, ref}, else: outcome
+    prepend_reply(transition, {:reply, from, reply})
+  end
+
+  defp enqueue_tell(data, ref, prompt, kind, stream_to) do
+    case enqueue_prompt(data, ref, kind, prompt) do
       {:ok, queued} ->
-        queued = put_stream_recipient(queued, request_ref, stream_to)
-        {:keep_state, queued, [{:reply, from, {:ok, request_ref}}]}
+        queued = put_stream_recipient(queued, ref, stream_to)
+        {{:keep_state, queued, []}, :ok}
 
       {:error, reason} ->
-        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+        {:keep_state_and_data, {:error, reason}}
     end
   end
 

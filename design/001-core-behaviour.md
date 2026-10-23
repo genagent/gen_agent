@@ -83,3 +83,12 @@ logged and normalized to `{:noreply, previous_state}`. Follow-up prompts
 must be binaries. See `handle_event/4`, `decision_to_transition/1`,
 `normalize_decision/5`, and the `safely_handle_*` wrappers in
 [GenAgent.Server](../lib/gen_agent/server.ex).
+
+## Correlated submission
+
+The additive local PID client creates a ref before sending one cast; the
+server shares completion-tell admission with the named call transport.
+Named call timing remains unchanged. Admission and terminal completion
+are distinct; immediate gate completion may precede admission. See
+[Design Note 006](006-correlated-submission.md) for the protocol and its
+limits. Consumer orchestration remains outside the core.

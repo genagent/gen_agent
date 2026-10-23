@@ -130,3 +130,13 @@ cleanup for a callback that eventually returns but can hang a supervisor.
   you want.
 - A crashed agent is GONE. There is no auto-restart. This is
   intentional (see `:temporary` above).
+
+## Captured PID observation
+
+`GenAgent.Client` submissions and exact-request controls target only the
+captured local process, with no Registry fallback. Monitor it before
+submission; consume its admission, events, completion and `:DOWN` in
+mailbox order. A known terminal outcome stays known after death, while
+unresolved work remains uncertain. Stop sends no synthetic completion.
+Synchronous PID controls still wait behind callbacks and do not establish
+provider settlement. See [Design Note 006](006-correlated-submission.md).

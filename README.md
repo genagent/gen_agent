@@ -400,6 +400,8 @@ For the tradeoffs between wrappers, GenAgent, and Oban workers, see
 | `tell/3` | Async prompt. Returns a ref for `poll/3`. |
 | `tell_with_completion/4` | Async prompt with a request-scoped completion message. |
 | `poll/3` | Check on a previously-issued `tell/3`. |
+| `GenAgent.Client.submit_with_completion/4` | Send to a captured local PID; return a ref without waiting for admission. |
+| `GenAgent.Client.poll/3`, `cancel_request/3`, `interrupt_request/3` | Synchronous exact-PID request controls. |
 | `notify/2` | Push an external event into `handle_event/2`. |
 | `notify_ack/3` | Wait for an in-memory notification admission result. |
 | `interrupt/1` | Cancel an in-flight turn. |
@@ -416,9 +418,10 @@ For the tradeoffs between wrappers, GenAgent, and Oban workers, see
 | `stop/2` | Terminate an agent under a caller-owned supervisor. |
 | `whereis/1` | Look up an agent's pid. |
 
-Names resolve through a `Registry`, so callers address agents by name
-(any term). Agents use `restart: :temporary`: a crashed or stopped agent
-must be started explicitly, and its previous state is not restored.
+The `GenAgent` functions resolve names through a `Registry` (any term,
+including a PID-valued name). `GenAgent.Client` explicitly targets a local
+PID. Agents use `restart: :temporary`: a crashed or stopped agent must be
+started explicitly, and its previous state is not restored.
 Callbacks can use `GenAgent.current_name()` in both the agent process and
 the prompt task; no duplicate `agent_name` option is needed.
 
@@ -475,6 +478,49 @@ uncertain. Monitor the agent if its death matters; a replacement under
 the same name uses new refs. A crashing decision callback stops the
 agent before completion. Neither a completion nor an agent monitor
 proves that an external provider process has settled.
+
+## Correlated PID submission
+
+For submission that does not wait for admission or an idle `pre_turn/2`,
+use the additive `GenAgent.Client` API:
+
+```elixir
+pid = GenAgent.whereis("my-coder") || raise "agent is absent"
+monitor = Process.monitor(pid)
+{:submitted, ref} = GenAgent.Client.submit_with_completion(pid, "Run the tests")
+```
+
+`{:submitted, ref}` means sent, including for a dead PID. The child later
+sends `{:gen_agent, :admission, name, ref, :ok | {:error, reason}}` to the
+recipient (the caller by default). Rejected admission retains no request
+and sends no completion. Accepted work uses the usual completion, retry,
+stream and cancellation semantics under the same ref; options are
+`on_halt: :queue | :fail` and `stream_to: nil | pid`.
+
+An immediate idle gate rejection can send **completion before admission**.
+Consume admission, events, completion and the monitor's `:DOWN` in mailbox
+order. Early completion proves acceptance and is terminal; a later `:ok`
+must not reopen it. `:DOWN` leaves only unresolved acceptance or outcomes
+uncertain. Release the monitor with `Process.demonitor(monitor, [:flush])`
+when the last obligation for that child ends. Agent stop invents no result.
+Submission does not wait for callbacks, but scheduling can let a callback
+run before the submitting function returns.
+
+The captured PID never retargets a replacement under the same name.
+`GenAgent.Client.poll/3`, `cancel_request/3` and `interrupt_request/3`
+use that PID and default to 5 seconds, with native call timeout/death exits.
+They still wait behind blocked callbacks. A timeout is uncertainty, not
+confirmed cancellation or permission to resubmit; before admission is
+processed, an observation from another caller can report `:not_found`.
+Hold a capacity permit for each unresolved physical submission until
+rejection, terminal completion, confirmed cancellation or `:DOWN`.
+Pending queue limits do not bound casts already in the BEAM mailbox.
+Neither monitoring nor BEAM task cancellation proves provider settlement.
+
+This is a core prerequisite for future Ensemble adoption. It does not by
+itself fix Ensemble #221 or the broader ownership work in #490. Consumers
+must require a published core release containing this API before using it;
+no published minimum version is established by this checkout.
 
 ## Pending input bounds
 
