@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Core compatibility
+
+Ensemble requires GenAgent core `>= 0.9.0 and < 1.0.0` (`~> 0.9`).
+Nonblocking child dispatch uses `GenAgent.Client`, introduced in core 0.9;
+earlier cores cannot supply that module and are incompatible with this code.
+The older synchronous child-admission implementation admitted core 0.7, 0.8,
+and 0.9.
+
 ### Strategy migration: asynchronous child admission
 
 For external strategy authors: synchronous ownership-guard rejection of a

@@ -409,8 +409,23 @@ defmodule GenAgentEnsemble.AdmissionTest do
     assert counters(name) == %{pending_count: 3, pending_bytes: total(prompts)}
     if kind in @queueing, do: assert({:ok, %{queued: 2}} = E.status(name))
 
-    # Every public form is refused without a trace.
-    before = :sys.get_state(pid)
+    # Every public form is refused without a trace. The backend holds responses,
+    # so these fields must stay fixed, even as asynchronous child admission
+    # acknowledgements advance dispatch_contexts from :submitted to :accepted.
+    invariant_fields = [
+      :strategy_state,
+      :pending,
+      :token_contexts,
+      :pending_prompt_bytes,
+      :stream_recipients,
+      :completed,
+      :completed_order,
+      :waiters,
+      :waiter_monitors,
+      :in_flight
+    ]
+
+    before = Map.take(:sys.get_state(pid), invariant_fields)
     full = fn incoming -> overloaded(:count, 3, total(prompts), incoming, 3, @default_bytes) end
 
     assert E.tell(name, "rejected-tell", route) == full.(size("rejected-tell"))
@@ -424,7 +439,7 @@ defmodule GenAgentEnsemble.AdmissionTest do
     assert E.tell_with_completion(name, "rejected-stream", self(), streamed) ==
              full.(size("rejected-stream"))
 
-    assert :sys.get_state(pid) == before
+    assert Map.take(:sys.get_state(pid), invariant_fields) == before
     refute_receive {:gen_agent_ensemble, _, _, _, _}, 0
 
     {done, seen} = serve(tokens, {:result, "ok"})

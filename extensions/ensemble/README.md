@@ -56,7 +56,11 @@ Add a backend from its own installation guide when using Ensemble:
 [Anthropic](https://github.com/genagent/gen_agent/tree/main/integrations/anthropic),
 or [OpenAI](https://github.com/genagent/gen_agent/tree/main/integrations/openai).
 
-The package resolves a compatible GenAgent core version through its dependency.
+Ensemble requires GenAgent core `>= 0.9.0 and < 1.0.0` (`~> 0.9`).
+Nonblocking child dispatch uses `GenAgent.Client`, introduced in core 0.9;
+earlier cores cannot supply that module and are incompatible with this code.
+The older synchronous child-admission implementation admitted core 0.7, 0.8,
+and 0.9.
 
 ```elixir
 def deps do
@@ -244,12 +248,14 @@ original serialized prompts, not a memory limit or a limit on physical work:
 the mailbox, strategy state and options, generated prompts, intermediate
 outputs, backend histories, and completed results are bounded separately.
 
-Child dispatch uses nonblocking PID submission: a token acknowledges Ensemble
+Child dispatch uses nonblocking PID submission, replacing the older
+synchronous child-admission behavior. A token acknowledges Ensemble
 admission, not child admission. A held child `pre_turn` callback does not by
 itself block subsequent submission, status, poll, inbox, or notify processing.
-Child rejection closes the existing token through the usual result paths. An
-immediate `poll` may still return `{:ok, :pending}`; use `await` or poll until
-the terminal result arrives to observe child rejection.
+
+Child rejection closes the existing token through the usual result paths.
+An immediate `poll` may still return `{:ok, :pending}`; use `await` or poll
+until the terminal result arrives to observe child rejection.
 
 For external strategy authors: synchronous ownership-guard rejection of a
 scoped dispatch still ends its operation batch. Child admission rejection is
