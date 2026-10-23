@@ -2,7 +2,7 @@
   ".": "0.9.0",
   "integrations/claude": "0.3.1",
   "integrations/codex": "0.6.1",
-  "integrations/anthropic": "0.5.0",
+  "integrations/anthropic": "0.5.1",
   "integrations/openai": "0.5.0",
   "extensions/ensemble": "0.7.0"
 }
