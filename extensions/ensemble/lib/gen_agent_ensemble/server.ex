@@ -469,31 +469,52 @@ defmodule GenAgentEnsemble.Server do
     extra =
       if state.lifecycle == :running and
            function_exported?(state.strategy_mod, :handle_status, 1) do
-        state.strategy_mod.handle_status(state.strategy_state)
+        strategy_status(state.strategy_mod, state.strategy_state)
       else
-        %{}
+        {:ok, %{}}
       end
 
-    # Merged last so a strategy cannot replace the authoritative fields.
-    admission = %{
-      scope: :outstanding,
-      pending_count: map_size(state.pending),
-      pending_bytes: state.pending_prompt_bytes,
-      max_pending_prompts: state.max_pending_prompts,
-      max_pending_prompt_bytes: state.max_pending_prompt_bytes
-    }
+    case extra do
+      {:ok, fields} ->
+        # Merged last so a strategy cannot replace the authoritative fields.
+        admission = %{
+          scope: :outstanding,
+          pending_count: map_size(state.pending),
+          pending_bytes: state.pending_prompt_bytes,
+          max_pending_prompts: state.max_pending_prompts,
+          max_pending_prompt_bytes: state.max_pending_prompt_bytes
+        }
 
-    status =
-      base
-      |> Map.merge(extra)
-      |> Map.put(:admission, admission)
-      |> Map.put(:lifecycle, state.lifecycle)
-      |> Map.put(
-        :member_names,
-        Map.new(state.agents, fn {bare, _pid} -> {bare, member_name(state, bare)} end)
-      )
+        status =
+          base
+          |> Map.merge(fields)
+          |> Map.put(:admission, admission)
+          |> Map.put(:lifecycle, state.lifecycle)
+          |> Map.put(
+            :member_names,
+            Map.new(state.agents, fn {bare, _pid} -> {bare, member_name(state, bare)} end)
+          )
 
-    {:reply, {:ok, status}, state}
+        {:reply, {:ok, status}, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  defp strategy_status(strategy_mod, strategy_state) do
+    result =
+      try do
+        {:ok, strategy_mod.handle_status(strategy_state)}
+      catch
+        kind, _reason -> {:error, {:strategy_callback_failed, :handle_status, kind}}
+      end
+
+    case result do
+      {:ok, fields} when is_map(fields) -> {:ok, fields}
+      {:ok, _other} -> {:error, {:invalid_strategy_result, :handle_status}}
+      {:error, _reason} = error -> error
+    end
   end
 
   defp handle_cast_impl({:notify, _event}, state) when state.lifecycle == :halted,
