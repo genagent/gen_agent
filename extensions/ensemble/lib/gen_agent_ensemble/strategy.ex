@@ -7,14 +7,16 @@ defmodule GenAgentEnsemble.Strategy do
   lifecycle and message routing; the strategy declares *intent* via a
   list of operations the framework then executes.
 
-  Every callback returns `{:ok, [op], strategy_state}`. The framework
+  Except for `c:init/1` and `c:handle_status/1`, callbacks return
+  `{:ok, [op], strategy_state}`. The framework
   applies the ops in order, updates strategy state, and waits for the
   next event.
 
   Callbacks run synchronously in the Ensemble Server process. A callback that
   blocks delays all calls handled by that server; a callback that raises or
-  returns an unexpected shape stops the session. Optional callbacks and their
-  individual fallbacks are documented below.
+  returns an unexpected shape stops the session, except for `c:handle_status/1`:
+  its failures return a status error and leave framework state and work intact.
+  Optional callbacks and their individual fallbacks are documented below.
 
   See `GenAgentEnsemble.Strategies.Solo` for a minimal reference
   implementation.
@@ -255,7 +257,24 @@ defmodule GenAgentEnsemble.Strategy do
   """
   @callback handle_agent_down(agent_name, term(), strategy_state) :: result
 
-  @doc "Return extra status fields. These are merged over the server's base map and can replace its keys, except `:admission` and `:lifecycle`: the server adds those keys afterwards and replaces any strategy value. Not called once the session has halted. If omitted, no extra fields are added."
+  @doc """
+  Return a map of extra status fields. These are merged over the server's base
+  map and can replace its keys, except `:admission`, `:lifecycle` and
+  `:member_names`: the server adds those authoritative fields afterwards.
+  Not called once the session has halted. If omitted, no extra fields are added.
+
+  A raise, throw or exit returns
+  `{:error, {:strategy_callback_failed, :handle_status, kind}}` to the status
+  caller, where `kind` is `:error`, `:throw` or `:exit`. Any non-map return,
+  including an error tuple, returns
+  `{:error, {:invalid_strategy_result, :handle_status}}`. These errors contain
+  no callback values, exception messages or stacktraces. The Ensemble process,
+  framework state, pending work and retained results survive; a later status
+  call invokes the callback again. No successful status map is returned on failure.
+
+  This callback still runs synchronously in the server. Containment cannot undo
+  side effects performed by the callback.
+  """
   @callback handle_status(strategy_state) :: map()
 
   @optional_callbacks [

@@ -91,6 +91,16 @@ iex> E.drain("name")
 iex> E.status("name")
 ```
 
+The public `GenAgentEnsemble.status/1` returns `{:ok, status_map}` on success.
+A custom strategy status callback that raises, throws or exits returns
+`{:error, {:strategy_callback_failed, :handle_status, kind}}` with `kind` equal
+to `:error`, `:throw` or `:exit`. Any non-map return produces
+`{:error, {:invalid_strategy_result, :handle_status}}`. A failed query has no
+successful status map and leaves the Ensemble process, framework state, pending
+work and retained results intact. Callers can retry status later. The callback
+still runs synchronously and can block the server; containment cannot undo its
+side effects. See `GenAgentEnsemble.status/1` for the full inspection contract.
+
 **Limits on outstanding requests.** Every strategy shares one admission gate.
 A session accepts at most `max_pending_prompts` (default 1_000) calls to
 `ask`/`tell` that have not yet reached a result, and at most

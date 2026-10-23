@@ -403,12 +403,23 @@ defmodule GenAgentEnsemble do
   @doc """
   Inspect the ensemble: running agents, strategy phase, queue depth.
 
+  Returns `{:ok, status_map}` on success. If the strategy's `handle_status/1`
+  raises, throws or exits, returns
+  `{:error, {:strategy_callback_failed, :handle_status, kind}}`, where `kind`
+  is `:error`, `:throw` or `:exit`. A non-map callback return produces
+  `{:error, {:invalid_strategy_result, :handle_status}}`. Neither error includes
+  callback values, exception messages or stacktraces, and no successful map is
+  returned. The Ensemble process, framework state, pending work and retained
+  results survive; a later status call retries the callback. The callback runs
+  synchronously, so it can still block the server, and its side effects cannot
+  be undone.
+
   `:member_names` maps each tracked bare binary member to its canonical
   `member_name/2` key. It is added after strategy fields and cannot be overridden.
   It describes logical slots at a point in time, including a dead child whose
   DOWN has not yet been handled. It is empty immediately after logical halt.
 
-  The result always includes an `:admission` map, added after the strategy's own
+  A successful result always includes an `:admission` map, added after the strategy's own
   fields so a strategy cannot replace it:
 
       %{
