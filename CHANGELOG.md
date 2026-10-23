@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/genagent/gen_agent/compare/v0.8.0...v0.9.0) (2026-10-23)
+
+
+### Features
+
+* **core:** add correlated nonblocking PID submission ([#497](https://github.com/genagent/gen_agent/issues/497)) ([105513d](https://github.com/genagent/gen_agent/commit/105513dcc421726b212389f59a4a97f98a719801))
+
 ## [0.8.0](https://github.com/genagent/gen_agent/compare/v0.7.0...v0.8.0) (2026-10-14)
 
 
