@@ -1,5 +1,31 @@
 # Upgrading GenAgent
 
+## Unreleased: correlated local PID submission
+
+`GenAgent.Client.submit_with_completion/4` is an additive API for a captured
+local PID. It returns `{:submitted, ref}` after sending, with a separate
+`{:gen_agent, :admission, name, ref, outcome}` message. Existing named
+`tell/3`, `tell_with_completion/4` and `ask/3` retain their timing and return
+shapes; PID-valued arguments to those functions remain Registry names.
+
+A submitted ref is not acceptance. An immediate idle hook rejection can
+complete before admission `:ok`; that terminal outcome must survive a later
+admission or `:DOWN`. Monitor the captured PID before sending and consume
+child messages and `:DOWN` in mailbox order. Dead-PID submission still
+returns `:submitted`, with no fabricated acknowledgement or completion.
+
+Use `GenAgent.Client.poll/3`, `cancel_request/3` and `interrupt_request/3`
+for the same incarnation. These controls default to 5 seconds, propagate
+native call exits and still block behind callbacks. Timeout is uncertainty;
+it does not confirm cancellation or justify a replacement submission. Keep
+outstanding submissions bounded until physically resolved. See
+[Correlated PID submission](README.md#correlated-pid-submission).
+
+Ensemble adoption remains separate work; this change alone fixes neither
+#221 nor #490. Consumers must set their actual minimum core dependency to
+a published release containing this API when adopting it. The existing
+published baseline must not be assumed to provide it.
+
 ## Unreleased: common backend errors
 
 The Claude, Codex, Anthropic HTTP, and OpenAI HTTP adapters now pass

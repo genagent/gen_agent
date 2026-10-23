@@ -719,10 +719,14 @@ defmodule GenAgent do
   # Public API
   # ---------------------------------------------------------------------------
 
-  @typedoc "Name under which an agent is registered in `GenAgent.Registry`."
+  @typedoc """
+  Name under which an agent is registered in `GenAgent.Registry`.
+  Existing `GenAgent` APIs interpret even PID-valued terms as names.
+  Use `GenAgent.Client` for explicit local PID targeting.
+  """
   @type name :: term()
 
-  @typedoc "Reference returned for `tell/2` requests."
+  @typedoc "Correlation reference for tell requests and `GenAgent.Client` submissions."
   @type request_ref :: reference()
 
   @default_call_timeout :infinity
@@ -954,6 +958,8 @@ defmodule GenAgent do
   or `runtime_snapshot/2` to tell why it is pending. When a pending queue
   limit is reached, returns `{:error, {:overloaded, info}}` without an
   accepted ref.
+  For submission without waiting for admission or an idle callback, capture
+  the PID and use `GenAgent.Client.submit_with_completion/4`.
   Returns `{:error, :not_found}` if the agent name is not registered.
   """
   @spec tell(name(), String.t(), timeout()) ::
@@ -964,6 +970,12 @@ defmodule GenAgent do
 
   @doc """
   Submit an asynchronous prompt and opt into one completion message.
+
+  This named API waits for admission, including an idle `pre_turn/2`. Use
+  `GenAgent.Client.submit_with_completion/4` with a captured local PID to
+  obtain a correlation ref without waiting for that decision. Its
+  `{:submitted, ref}` return and separate admission message are distinct
+  from this function's `{:ok, ref}` acceptance.
 
   `recipient` is a pid (defaults to the calling process). On an accepted
   request this returns `{:ok, ref}` and sends the recipient
