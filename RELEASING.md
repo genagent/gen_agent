@@ -76,6 +76,20 @@ in `.release-please-manifest.json`, including an exact core pin. This post-publi
 check confirms the intended complete release combination. Both modes use `jq`;
 the default mode also queries the Hex API with `curl`.
 
+The CI, release, and publication recovery workflows set `FORCOLA_BUILD=1`
+to build Forcola locally with Cargo instead of using its precompiled
+downloads, which have failed with
+`{:header_too_long, {:max, 10240}}`. CI explicitly installs stable Rust before
+dependency commands in both package matrices (including Claude quality and
+publish-toolchain checks), minimum-core checks, the Claude repository review
+and app examples, archive packaging, and the published-package consumer check.
+The workflow-level setting also reaches the temporary projects and Hex-mode
+builds launched by those checks. The release integration matrix and publication
+recovery workflow also install stable Rust before package preparation, which
+runs tests and compiles Claude's test-only Forcola dependency. This workaround
+is limited to build workflows; published packages are unchanged, and package
+users still use Forcola's precompiled downloader.
+
 The publishing workflow needs a `HEX_API_KEY` that can publish all six
 packages. `RELEASE_PLEASE_TOKEN`, when configured, lets release PRs trigger
 their normal CI checks; without it, GitHub's workflow token creates the PRs

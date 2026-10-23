@@ -13,6 +13,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Build Forcola locally in CI instead of downloading precompiled artifacts.
+env:
+  FORCOLA_BUILD: "1"
+
 jobs:
   scope:
     name: Change scope
@@ -104,6 +108,11 @@ jobs:
         working-directory: examples/gen_agent_app
     steps:
       - uses: actions/checkout@v7
+
+      - name: Set up Rust for Forcola source builds
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       - uses: erlef/setup-beam@v1
         with:
@@ -258,6 +267,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Set up Rust for Forcola source builds
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: "1.20"
@@ -293,6 +307,11 @@ jobs:
         working-directory: ${{ matrix.package }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Set up Rust for Forcola source builds
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       - uses: erlef/setup-beam@v1
         with:
@@ -332,6 +351,11 @@ jobs:
         working-directory: ${{ matrix.package }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Set up Rust for Forcola source builds
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       - uses: erlef/setup-beam@v1
         with:
@@ -382,6 +406,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Set up Rust for Forcola source builds
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: "1.20"
@@ -396,6 +425,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+
+      - name: Set up Rust for Forcola source builds
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       - uses: erlef/setup-beam@v1
         with:
@@ -415,6 +449,11 @@ jobs:
         package: [claude, codex]
     steps:
       - uses: actions/checkout@v7
+
+      - name: Set up Rust for Forcola source builds
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       - uses: erlef/setup-beam@v1
         with:
