@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.6.0...gen_agent_codex-v0.6.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **deps:** admit core 0.9 in published adapters ([#502](https://github.com/genagent/gen_agent/issues/502)) ([df18e37](https://github.com/genagent/gen_agent/commit/df18e3727a99b91e7d4c2f016a4371da3df2a3ce))
+
 ## [0.6.0](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.5.0...gen_agent_codex-v0.6.0) (2026-10-14)
 
 

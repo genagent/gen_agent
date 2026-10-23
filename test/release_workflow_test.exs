@@ -210,7 +210,7 @@ defmodule GenAgent.ReleaseWorkflowTest do
     end
   end
 
-  test "CI consumer mode queries published Hex versions instead of manifest versions" do
+  test "CI consumer mode leaves core flexible and pins all latest stable siblings exactly" do
     stub_dir =
       Path.join(System.tmp_dir!(), "consumer-check-curl-#{System.unique_integer([:positive])}")
 
@@ -236,11 +236,51 @@ defmodule GenAgent.ReleaseWorkflowTest do
 
     lines = String.split(output, "\n", trim: true)
     assert length(lines) == 6
-    assert Enum.all?(lines, &String.contains?(&1, "== 9.9.9"))
+    assert Enum.any?(lines, &String.contains?(&1, ~s({:gen_agent, ">= 0.0.0"})))
+
+    for sibling <- ~w(claude codex anthropic openai ensemble) do
+      assert Enum.any?(lines, &String.contains?(&1, ~s({:gen_agent_#{sibling}, "== 9.9.9"})))
+    end
 
     requests = File.read!(log)
-    assert length(String.split(requests, "\n", trim: true)) == 6
+    assert length(String.split(requests, "\n", trim: true)) == 5
+    refute "https://hex.pm/api/packages/gen_agent" in String.split(requests, "\n", trim: true)
     assert requests =~ "https://hex.pm/api/packages/gen_agent_claude"
+
+    # A resolver failure must stop the consumer before verification or compilation.
+    File.write!(Path.join(stub_dir, "mix"), """
+    #!/usr/bin/env bash
+    printf '%s\\n' "$*" >> "$CONSUMER_MIX_LOG"
+    exit 42
+    """)
+
+    File.chmod!(Path.join(stub_dir, "mix"), 0o755)
+    mix_log = Path.join(stub_dir, "mix-requests")
+
+    {_output, status} =
+      System.cmd("bash", [Path.join(@root, "scripts/consumer-check.sh")],
+        env: [
+          {"PATH", "#{stub_dir}:#{System.fetch_env!("PATH")}"},
+          {"CONSUMER_CURL_LOG", log},
+          {"CONSUMER_MIX_LOG", mix_log}
+        ]
+      )
+
+    assert status == 42
+    assert File.read!(mix_log) == "deps.get\n"
+
+    # Never fall back to a prerelease when Hex has no stable sibling release.
+    File.write!(Path.join(stub_dir, "curl"), """
+    #!/usr/bin/env bash
+    printf '{"latest_stable_version":null,"latest_version":"10.0.0-rc.1"}\\n'
+    """)
+
+    {_output, status} =
+      System.cmd("bash", [Path.join(@root, "scripts/consumer-check.sh"), "--print-requirements"],
+        env: [{"PATH", "#{stub_dir}:#{System.fetch_env!("PATH")}"}]
+      )
+
+    assert status != 0
   end
 
   test "release guide covers Hex lock refresh and changelogs have no empty tail" do
