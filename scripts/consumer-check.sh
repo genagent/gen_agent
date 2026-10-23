@@ -30,11 +30,15 @@ while IFS=$'\t' read -r path manifest_version; do
 
   if [[ "${mode}" == "manifest" ]]; then
     version="${manifest_version}"
+  elif [[ "${package}" == "gen_agent" ]]; then
+    # A fresh lock lets Hex choose the newest core compatible with all siblings.
+    deps_lines+='        {:gen_agent, ">= 0.0.0"},'$'\n'
+    continue
   else
     package_json="$(curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
       "https://hex.pm/api/packages/${package}")"
-    version="$(jq -er '(.latest_stable_version // .latest_version) |
-      select(type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+([+-][0-9A-Za-z.-]+)?$"))' \
+    version="$(jq -er '.latest_stable_version |
+      select(type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' \
       <<< "${package_json}")"
   fi
 
@@ -72,16 +76,22 @@ EOF
   mix run --no-start --no-compile -e '
     lock = Mix.Dep.Lock.read()
 
-    Enum.each(Mix.Project.config()[:deps], fn {app, "== " <> expected} ->
+    Enum.each(Mix.Project.config()[:deps], fn {app, requirement} ->
       case Map.get(lock, app) do
-        {:hex, _, version, _, _, _, _, _} ->
-          unless version == expected,
-            do: raise("expected #{app} #{expected}, resolved #{version}")
+        {:hex, ^app, version, _, _, _, "hexpm", _} ->
+          matches =
+            case requirement do
+              "== " <> expected -> version == expected
+              flexible -> Version.match?(version, flexible)
+            end
+
+          unless matches,
+            do: raise("expected #{app} #{requirement}, resolved #{version}")
 
           IO.puts("#{app}: #{version}")
 
         other ->
-          raise "expected #{app} #{expected}, resolved #{inspect(other)}"
+          raise "expected Hex #{app} #{requirement}, resolved #{inspect(other)}"
       end
     end)
   '
