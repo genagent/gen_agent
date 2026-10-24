@@ -153,19 +153,16 @@ defmodule GenAgentEnsemble.TelemetryTest do
       ordinal: 0
     })
 
-    assert_event([:dispatch, :start], %{
-      session: name,
-      token: token,
-      agent: "worker-1",
-      ordinal: 1
-    })
+    worker_starts =
+      for _ <- 1..2 do
+        {_, metadata} = assert_event([:dispatch, :start], %{session: name, token: token})
+        {metadata.agent, metadata.ordinal}
+      end
 
-    assert_event([:dispatch, :start], %{
-      session: name,
-      token: token,
-      agent: "worker-2",
-      ordinal: 2
-    })
+    assert Enum.sort(worker_starts) == [{"worker-1", 1}, {"worker-2", 2}]
+
+    refute_received {:telemetry, [:gen_agent_ensemble, :dispatch, :start], _,
+                     %{session: ^name, token: ^token}}
 
     assert_event([:token, :stop], %{session: name, token: token})
   end

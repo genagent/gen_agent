@@ -622,8 +622,16 @@ defmodule GenAgentEnsemble.HaltResultsTest do
     {:ok, waiting} = E.tell(name, "waiting")
     assert {:ok, %{in_flight: 2}} = E.status(name)
 
+    assert_receive {:telemetry, [:gen_agent_ensemble, :dispatch, :start], _,
+                    %{session: ^name, agent: "w", token: ^scoped}},
+                   1_000
+
+    assert_receive {:telemetry, [:gen_agent_ensemble, :dispatch, :start], _,
+                    %{session: ^name, agent: "w", token: nil}},
+                   1_000
+
     starts = drain_telemetry()
-    assert [_, _] = for({[_, :dispatch, :start], _, _} = event <- starts, do: event)
+    assert [] = for({[_, :dispatch, :start], _, _} = event <- starts, do: event)
 
     E.notify(name, {:ops, [{:halt, reason}]})
     assert {:ok, %{lifecycle: :halted}} = E.status(name)

@@ -224,7 +224,7 @@ defmodule GenAgentEnsemble.SubmissionTest do
     :erlang.trace(c.server, true, [:send])
 
     on_exit(fn ->
-      if Process.alive?(c.server), do: :erlang.trace(c.server, false, [:send])
+      stop_send_trace(c.server)
     end)
 
     cancellation = Task.async(fn -> E.cancel(c.name, c.token) end)
@@ -245,6 +245,15 @@ defmodule GenAgentEnsemble.SubmissionTest do
     assert {:error, :cancelled} = E.await(c.name, c.token)
   end
 
+  test "trace cleanup tolerates an already-exited server", c do
+    :erlang.trace(c.server, true, [:send])
+    monitor = Process.monitor(c.server)
+    send(c.child, :release)
+    E.stop(c.name)
+    assert_receive {:DOWN, ^monitor, :process, server, _} when server == c.server
+    assert :ok = stop_send_trace(c.server)
+  end
+
   test "child death before admission emits error without a fabricated start", c do
     Process.exit(c.child, :kill)
     assert {:error, _} = E.await(c.name, c.token)
@@ -256,5 +265,13 @@ defmodule GenAgentEnsemble.SubmissionTest do
     send(c.server, {:gen_agent, :admission, :ignored, c.ref, {:error, :halted}})
     assert :sys.get_state(c.server) == before
     refute_receive {:dispatch, _, _}
+  end
+
+  defp stop_send_trace(server) do
+    :erlang.trace(server, false, [:send])
+  rescue
+    error in ArgumentError ->
+      # The server can exit before or during on_exit cleanup.
+      if Process.alive?(server), do: reraise(error, __STACKTRACE__), else: :ok
   end
 end
