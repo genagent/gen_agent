@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Cancellation control deadline
+
+Exact-PID cancellation and interruption attempts now share one five-second
+absolute deadline for the token, rather than restarting the timeout for each
+control and reference. No new control is sent after expiry; unresolved refs
+retain their capacity leases. Controls now run in monitored workers after all target refs are fenced and
+`handle_cancel/2` removes the token from strategy bookkeeping. Replies are
+deferred; duplicate cancellation returns `{:error, :cancelling}` and caller
+death does not abandon the operation. Reads, results, admissions and other
+cancellations remain available while controls wait. Terminal evidence settles
+ownership during the attempt; worker failure or expiry retains only unresolved
+refs. Strategy callbacks and strategy-generated stop/start operations remain
+synchronous and outside this budget. Full #221 responsiveness remains unfinished.
+
+Strategy replies and token-scoped dispatches cannot reopen a cancelling token.
+Captured-PID death confirms settlement without touching replacement members;
+completion after fencing settles ownership without relaying results or events.
+Halt during controls returns `{:error, {:halted, reason}}`.
+
 ### Cancellation capacity ownership
 
 Unconfirmed cancellation still closes the logical token with `:cancelled`, but
@@ -12,9 +31,8 @@ release capacity. Status reports the retained token/ref counts under admission.
 No prompt or response is stored in these ownership records; status formatting
 redacts the records. Evidence retirement emits no duplicate terminal telemetry.
 
-This is a correctness prerequisite for #221, not responsive cancellation:
-child cancellation controls and strategy-generated child stops remain
-synchronous and can block unrelated Ensemble commands. A control timeout is
+Full #221 responsiveness remains unfinished: strategy-generated stop/start
+operations remain synchronous and can block unrelated Ensemble commands. A control timeout is
 uncertainty, not proof that provider work stopped. Child death likewise does
 not prove remote provider settlement. These leases bound admitted token
 replacement, not custom-strategy fanout or total physical/provider work.

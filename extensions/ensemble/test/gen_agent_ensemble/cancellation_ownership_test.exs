@@ -58,14 +58,15 @@ defmodule GenAgentEnsemble.CancellationOwnershipTest do
     for _ <- 1..count, do: assert_receive({:held, _})
     state = :sys.get_state(server)
     refs = for {ref, {_, ^token}} <- state.in_flight, do: ref
-    :erlang.trace(server, true, [:send])
+    :erlang.trace(server, true, [:send, :set_on_spawn])
     cancellation = Task.async(fn -> E.cancel(name, token) end)
-    assert_receive {:trace, ^server, :send, {:"$gen_call", _, {:cancel_request, ref}}, child}
+    assert_receive {:trace, _worker, :send, {:"$gen_call", _, {:cancel_request, ref}}, child}
     assert ref in refs
     assert elem(state.dispatch_contexts[ref], 2) == child
-    # Exercise the real finite control timeout while the callback stays held.
-    assert Task.await(cancellation, count * 10_000) == {:ok, :cancelled_unconfirmed}
-    :erlang.trace(server, false, [:send])
+    op = :sys.get_state(server).cancellations[token]
+    send(server, {:cancel_deadline, token, op.id})
+    assert Task.await(cancellation, 2_000) == {:ok, :cancelled_unconfirmed}
+    :erlang.trace(server, false, [:send, :set_on_spawn])
     refs
   end
 
@@ -176,12 +177,11 @@ defmodule GenAgentEnsemble.CancellationOwnershipTest do
       state = :sys.get_state(server)
       {^t1, _child1, monitor1} = state.cancelled_refs[ref1]
       [{ref2, {"b", ^t2}}] = Map.to_list(state.in_flight)
-      :erlang.trace(server, true, [:send])
+      :erlang.trace(server, true, [:send, :set_on_spawn])
       cancellation = Task.async(fn -> E.cancel(name, t2) end)
-      assert_receive {:trace, ^server, :send, {:"$gen_call", _, {:cancel_request, ^ref2}}, _}
+      assert_receive {:trace, _worker, :send, {:"$gen_call", _, {:cancel_request, ^ref2}}, _}
 
-      # The control-send trace barriers the pre-drain. The server is now
-      # blocked on b, so this evidence must pass through the post-control drain.
+      # Worker send barriers installation; evidence is handled while b waits.
       message =
         case unquote(evidence) do
           :completion -> {:gen_agent, :completion, :ignored, ref1, {:error, :cancelled}}
@@ -189,8 +189,11 @@ defmodule GenAgentEnsemble.CancellationOwnershipTest do
         end
 
       send(server, message)
-      assert Task.await(cancellation, 12_000) == {:ok, :cancelled_unconfirmed}
-      :erlang.trace(server, false, [:send])
+      assert admission(name).pending_count == 1
+      op = :sys.get_state(server).cancellations[t2]
+      send(server, {:cancel_deadline, t2, op.id})
+      assert Task.await(cancellation, 2_000) == {:ok, :cancelled_unconfirmed}
+      :erlang.trace(server, false, [:send, :set_on_spawn])
       charge = :erlang.external_size("second prompt")
 
       assert %{
@@ -232,12 +235,15 @@ defmodule GenAgentEnsemble.CancellationOwnershipTest do
       )
 
     on_exit(fn -> :telemetry.detach(handler) end)
-    :erlang.trace(server, true, [:send])
+    :erlang.trace(server, true, [:send, :set_on_spawn])
     cancellation = Task.async(fn -> E.cancel(name, cancelling) end)
-    assert_receive {:trace, ^server, :send, {:"$gen_call", _, {:cancel_request, ^cancel_ref}}, _}
+    assert_receive {:trace, _worker, :send, {:"$gen_call", _, {:cancel_request, ^cancel_ref}}, _}
     send(server, {:gen_agent, :admission, :ignored, surviving_ref, :ok})
-    assert Task.await(cancellation, 12_000) == {:ok, :cancelled_unconfirmed}
-    :erlang.trace(server, false, [:send])
+    assert elem(:sys.get_state(server).dispatch_contexts[surviving_ref], 3) == :accepted
+    op = :sys.get_state(server).cancellations[cancelling]
+    send(server, {:cancel_deadline, cancelling, op.id})
+    assert Task.await(cancellation, 2_000) == {:ok, :cancelled_unconfirmed}
+    :erlang.trace(server, false, [:send, :set_on_spawn])
     assert elem(:sys.get_state(server).dispatch_contexts[surviving_ref], 3) == :accepted
     send(server, {:gen_agent, :admission, :ignored, surviving_ref, :ok})
     _ = :sys.get_state(server)

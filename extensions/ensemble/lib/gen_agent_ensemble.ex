@@ -317,7 +317,8 @@ defmodule GenAgentEnsemble do
   @doc """
   Cancel one pending token without stopping the ensemble or unrelated work.
 
-  Returns `{:ok, :cancelled}` when child requests acknowledge cancellation,
+  Returns `{:ok, :cancelled}` when captured requests are settled by confirmed
+  controls or terminal evidence,
   or `{:ok, :cancelled_unconfirmed}` when any child result is uncertain or
   unsupported. Both close the token with `{:error, :cancelled}` through the
   usual ask reply, tell completion, await, and poll/inbox paths. Late child
@@ -327,14 +328,28 @@ defmodule GenAgentEnsemble do
   external provider process. A control timeout is uncertainty about that
   request, not evidence that provider work stopped.
 
-  Currently child controls and strategy-generated child stops run synchronously
-  in the Ensemble server. A held callback can block unrelated commands until
-  those controls return. Responsive cancellation remains follow-up work.
+  Exact-PID controls run in monitored workers, sharing one five-second absolute
+  deadline across all refs and interruption attempts. While they wait, reads,
+  results, admissions, and other cancellations can proceed. All target refs are
+  fenced and removed from strategy bookkeeping before controls start. Duplicate
+  cancellation returns `{:error, :cancelling}` while the operation is pending.
+  Caller death does not abandon the operation. Terminal completion, admission
+  rejection, or captured-PID death can confirm ownership settlement during the
+  wait; expiry or worker failure retains only unresolved refs.
+
+  Strategy callbacks and strategy-generated stop/start operations still run
+  synchronously in the Ensemble server, outside the control budget, and may
+  block commands. Ordered asynchronous strategy operations remain follow-up
+  work; this does not fully resolve issue #221.
 
   Returns `{:error, :already_finished}` for a retained result or a completion
   that wins the race, `{:error, :not_found}` for unknown/consumed/evicted tokens
   (including finished asks), and `{:error, :unsupported}` when the strategy
   lacks `handle_cancel/2`. Unsupported strategies are left unchanged.
+  Halt during cancellation returns `{:error, {:halted, reason}}`. Server
+  termination exits the waiting call. Strategy reply and dispatch operations
+  targeting a cancelling token are rejected as `{:unknown_token, token}`,
+  even while it remains pending for capacity accounting.
   """
   defdelegate cancel(name, token), to: GenAgentEnsemble.Server
 

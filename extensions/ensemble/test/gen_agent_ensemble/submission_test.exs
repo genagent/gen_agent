@@ -219,9 +219,9 @@ defmodule GenAgentEnsemble.SubmissionTest do
     refute_receive {:dispatch, _, _}
   end
 
-  test "known-gap pin: cancellation before admission blocks reads until child control returns",
+  test "cancellation before admission keeps reads responsive while child control waits",
        c do
-    :erlang.trace(c.server, true, [:send])
+    :erlang.trace(c.server, true, [:send, :set_on_spawn])
 
     on_exit(fn ->
       stop_send_trace(c.server)
@@ -232,12 +232,14 @@ defmodule GenAgentEnsemble.SubmissionTest do
     ref = c.ref
     assert_receive {:trace, _, :send, {:"$gen_call", _, {:cancel_request, ^ref}}, ^child}
     status = Task.async(fn -> E.status(c.name) end)
-    assert Task.yield(status, 50) == nil
+    assert {:ok, %{in_flight: 0}} = Task.await(status)
+    assert E.cancel(c.name, c.token) == {:error, :cancelling}
+    assert E.poll(c.name, c.token) == {:ok, :pending}
+    assert E.await(c.name, c.token, 0) == {:error, :timeout}
     send(child, :release)
     assert {:ok, outcome} = Task.await(cancellation)
     assert outcome in [:cancelled, :cancelled_unconfirmed]
-    assert {:ok, %{in_flight: 0}} = Task.await(status)
-    :erlang.trace(c.server, false, [:send])
+    :erlang.trace(c.server, false, [:send, :set_on_spawn])
     before = :sys.get_state(c.server)
     send(c.server, {:gen_agent, :admission, :ignored, c.ref, :ok})
     send(c.server, {:gen_agent, :admission, :ignored, c.ref, {:error, :halted}})
@@ -246,7 +248,7 @@ defmodule GenAgentEnsemble.SubmissionTest do
   end
 
   test "trace cleanup tolerates an already-exited server", c do
-    :erlang.trace(c.server, true, [:send])
+    :erlang.trace(c.server, true, [:send, :set_on_spawn])
     monitor = Process.monitor(c.server)
     send(c.child, :release)
     E.stop(c.name)
@@ -268,7 +270,7 @@ defmodule GenAgentEnsemble.SubmissionTest do
   end
 
   defp stop_send_trace(server) do
-    :erlang.trace(server, false, [:send])
+    :erlang.trace(server, false, [:send, :set_on_spawn])
   rescue
     error in ArgumentError ->
       # The server can exit before or during on_exit cleanup.

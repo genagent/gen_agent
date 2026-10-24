@@ -505,7 +505,7 @@ defmodule GenAgentEnsemble.MemberNamesTest do
     assert_untouched(stop_key, stop_outsider)
   end
 
-  test "replacement cannot acknowledge the old request and cancellation stays unconfirmed", %{
+  test "captured child death confirms cancellation without touching the replacement", %{
     name: name
   } do
     server = start(name, [observed_spec("w")])
@@ -535,7 +535,9 @@ defmodule GenAgentEnsemble.MemberNamesTest do
       assert_receive {:controlled_prompt, "foreign", "foreign turn", foreign_task}
 
       :ok = :sys.resume(server)
-      assert Task.await(cancel) == {:ok, :cancelled_unconfirmed}
+      # DOWN for the captured PID confirms physical settlement even though
+      # cancellation was queued first. The replacement cannot supply that evidence.
+      assert Task.await(cancel) == {:ok, :cancelled}
       assert_receive {:gen_agent_ensemble, :completion, ^name, ^token, {:error, :cancelled}}
       assert GenAgent.status(key).current_request == foreign_ref
       assert Process.alive?(outsider)

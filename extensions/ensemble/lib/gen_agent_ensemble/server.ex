@@ -8,7 +8,7 @@ defmodule GenAgentEnsemble.Server do
 
   # Distinguish our cleanup from a supervisor failure that races a strategy halt.
   @halt_shutdown_reason {:shutdown, :ensemble_halted}
-  @cancel_child_timeout 5_000
+  @cancel_control_budget 5_000
   @default_max_completed_results 100
   @default_max_pending_prompts 1_000
   @default_max_pending_prompt_bytes 1_048_576
@@ -61,7 +61,14 @@ defmodule GenAgentEnsemble.Server do
     # %{token => %{charge: non_neg_integer, refs: MapSet.t()}}
     cancellation_leases: %{},
     # %{monitor_ref => ref}; independent of member name/incarnation monitors
-    cancellation_monitors: %{}
+    cancellation_monitors: %{},
+    # %{token => %{id, from, deadline, timer, refs}}. Pending owns the charge.
+    cancellations: %{},
+    # Active fences; these refs never enter ordinary strategy callbacks.
+    cancelling_refs: %{},
+    # %{monitor => {:worker | :child, captured_pid, token, operation_id, ref}}
+    # Independent of member name/incarnation monitors.
+    control_monitors: %{}
   ]
 
   # --- public API (called via GenAgentEnsemble shim) ---
@@ -156,6 +163,9 @@ defmodule GenAgentEnsemble.Server do
         cancelled_refs: :redacted,
         cancellation_leases: :redacted,
         cancellation_monitors: :redacted,
+        cancellations: :redacted,
+        cancelling_refs: :redacted,
+        control_monitors: :redacted,
         token_contexts: :redacted
     }
   end
@@ -420,8 +430,11 @@ defmodule GenAgentEnsemble.Server do
     end
   end
 
-  defp handle_call_impl({:cancel, token}, _from, state) do
+  defp handle_call_impl({:cancel, token}, from, state) do
     cond do
+      Map.has_key?(state.cancellations, token) ->
+        {:reply, {:error, :cancelling}, state}
+
       Map.has_key?(state.completed, token) ->
         {:reply, {:error, :already_finished}, state}
 
@@ -432,8 +445,14 @@ defmodule GenAgentEnsemble.Server do
         {:reply, {:error, :unsupported}, state}
 
       true ->
-        {result, state} = cancel_token(drain_child_messages(state), token, false, true)
-        {:reply, result, state}
+        deadline = System.monotonic_time(:millisecond) + @cancel_control_budget
+        state = drain_child_messages(state)
+
+        if Map.has_key?(state.pending, token) do
+          {:noreply, begin_cancellation(state, token, from, deadline)}
+        else
+          {:reply, {:error, :already_finished}, state}
+        end
     end
   end
 
@@ -544,6 +563,54 @@ defmodule GenAgentEnsemble.Server do
       end
 
     {:noreply, state}
+  end
+
+  defp handle_info_impl({:cancel_control_result, token, id, ref, worker, outcome}, state) do
+    valid? =
+      Enum.any?(state.control_monitors, fn {_, entry} ->
+        entry == {:worker, worker, token, id, ref}
+      end)
+
+    case Map.fetch(state.cancellations, token) do
+      {:ok, %{id: ^id}} when valid? ->
+        {:noreply, update_cancellation(state, token, ref, outcome == true, true)}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  defp handle_info_impl({:cancel_deadline, token, id}, state) do
+    case Map.fetch(state.cancellations, token) do
+      {:ok, %{id: ^id} = op} -> {:noreply, finish_cancellation(state, token, op)}
+      _ -> {:noreply, state}
+    end
+  end
+
+  defp handle_info_impl({:DOWN, monitor, :process, pid, _}, state)
+       when is_map_key(state.control_monitors, monitor) do
+    {{kind, ^pid, token, id, ref}, monitors} = Map.pop(state.control_monitors, monitor)
+    state = %{state | control_monitors: monitors}
+
+    case Map.fetch(state.cancellations, token) do
+      {:ok, %{id: ^id}} ->
+        {:noreply, update_cancellation(state, token, ref, kind == :child, true)}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  defp handle_info_impl({:gen_agent, kind, _, ref, result}, state)
+       when kind in [:admission, :completion, :event] and is_map_key(state.cancelling_refs, ref) do
+    terminal? = kind == :completion or (kind == :admission and match?({:error, _}, result))
+
+    if terminal? do
+      token = Map.fetch!(state.cancelling_refs, ref)
+      {:noreply, update_cancellation(state, token, ref, true, true)}
+    else
+      {:noreply, state}
+    end
   end
 
   # Logical cancellation has already emitted its terminal result/telemetry.
@@ -817,6 +884,7 @@ defmodule GenAgentEnsemble.Server do
     # registration until it dies, so a same-name restart still waits for it.
     Registry.unregister(GenAgentEnsemble.Registry, state.session_name)
     Enum.each(state.waiter_monitors, fn {mref, _} -> remove_waiter(state, mref, nil) end)
+    Enum.each(state.cancellations, fn {token, op} -> retire_cancellation(state, token, op) end)
     emit_unfinished_work(state)
 
     outcome =
@@ -969,6 +1037,16 @@ defmodule GenAgentEnsemble.Server do
     end
   end
 
+  # Cancellation closes application access immediately; pending retains only
+  # the admission charge until physical ownership has been settled.
+  defp apply_op({:dispatch, _, _, token}, state)
+       when is_map_key(state.cancellations, token),
+       do: {:error, {:unknown_token, token}}
+
+  defp apply_op({tag, token, _}, state)
+       when tag in [:reply, :reply_error] and is_map_key(state.cancellations, token),
+       do: {:error, {:unknown_token, token}}
+
   defp apply_op({:dispatch, name, prompt, token}, state)
        when is_binary(name) and is_binary(prompt) and is_binary(token) do
     if Map.has_key?(state.pending, token) do
@@ -1021,6 +1099,13 @@ defmodule GenAgentEnsemble.Server do
     )
 
     emit_open_dispatches(state, :halted)
+
+    state =
+      Enum.reduce(state.cancellations, state, fn {token, op}, acc ->
+        GenServer.reply(op.from, {:error, {:halted, reason}})
+        retire_cancellation(acc, token, op)
+      end)
+
     state = release_cancellation_leases(state)
     Enum.each(state.monitors, fn {mref, _agent} -> Process.demonitor(mref, [:flush]) end)
 
@@ -1179,73 +1264,157 @@ defmodule GenAgentEnsemble.Server do
     end
   end
 
-  defp cancel_token(state, token, fenced?, confirmed?) do
-    if Map.has_key?(state.pending, token) do
-      cancel_pending_token(state, token, fenced?, confirmed?)
-    else
-      {{:error, :already_finished}, state}
-    end
-  end
+  # Fence the whole snapshot before controls or strategy operations can run.
+  # Pending owns the capacity until finish; only unresolved refs become leases.
+  defp begin_cancellation(state, token, from, deadline) do
+    refs =
+      Map.new(
+        for {ref, {agent, ^token}} <- state.in_flight do
+          {_, _, pid, _} = Map.fetch!(state.dispatch_contexts, ref)
+          {ref, %{pid: pid, agent: agent, settled: false, done: false}}
+        end
+      )
 
-  defp cancel_pending_token(state, token, fenced?, confirmed?) do
-    case Enum.find(state.in_flight, fn {_, {_, current}} -> current == token end) do
-      nil ->
-        finish_cancellation(state, token, confirmed?)
+    id = make_ref()
 
-      {ref, {agent, ^token}} ->
-        cancel_token_ref(state, token, ref, agent, fenced?, confirmed?)
-    end
-  end
+    timer =
+      Process.send_after(
+        self(),
+        {:cancel_deadline, token, id},
+        max(0, deadline - System.monotonic_time(:millisecond))
+      )
 
-  defp finish_cancellation(state, token, confirmed?) do
+    op = %{id: id, from: from, deadline: deadline, timer: timer, refs: refs}
+    state = %{state | cancellations: Map.put(state.cancellations, token, op)}
+
+    state =
+      Enum.reduce(refs, state, fn {ref, target}, acc ->
+        monitor = Process.monitor(target.pid)
+
+        acc = %{
+          acc
+          | cancelling_refs: Map.put(acc.cancelling_refs, ref, token),
+            control_monitors:
+              Map.put(acc.control_monitors, monitor, {:child, target.pid, token, id, ref})
+        }
+
+        fence_cancelled_ref(acc, ref, target.agent, token)
+      end)
+
     {ops, strategy_state} =
       call_strategy(state.strategy_mod, :handle_cancel, [token, state.strategy_state])
 
-    {:ok, state} =
-      reply_to_token(%{state | strategy_state: strategy_state}, token, {:error, :cancelled})
+    state = %{state | strategy_state: strategy_state}
+    server = self()
 
-    outcome = if confirmed?, do: :cancelled, else: :cancelled_unconfirmed
-    {{:ok, outcome}, apply_ops(state, ops)}
+    state =
+      Enum.reduce(refs, state, fn {ref, target}, acc ->
+        {worker, monitor} =
+          spawn_monitor(fn ->
+            outcome = cancel_child(target.pid, ref, deadline)
+            send(server, {:cancel_control_result, token, id, ref, self(), outcome})
+          end)
+
+        %{
+          acc
+          | control_monitors:
+              Map.put(acc.control_monitors, monitor, {:worker, worker, token, id, ref})
+        }
+      end)
+
+    # Strategy-generated stops/starts remain synchronous in this slice.
+    state |> apply_ops(ops) |> maybe_finish_cancellation(token)
   end
 
-  defp cancel_token_ref(state, token, ref, agent, fenced?, confirmed?) do
-    acknowledged? = cancel_child(state, agent, ref)
-    # A negative acknowledgement can race an already-sent completion.
-    # Once cancellation has begun, never feed partial run results into
-    # strategy state; cancellation owns the terminal result from here.
-    next = if not fenced? and not acknowledged?, do: drain_child_messages(state), else: state
-
-    if next.in_flight != state.in_flight or next.pending != state.pending do
-      cancel_token(next, token, fenced?, confirmed?)
-    else
-      state =
-        if acknowledged?, do: next, else: retain_cancelled_ref(next, ref, token)
-
-      state = fence_cancelled_ref(state, ref, agent, token)
-      cancel_token(state, token, true, confirmed? and acknowledged?)
-    end
-  end
-
-  defp cancel_child(state, _agent, ref) do
-    {_started_at, _ordinal, pid, _admission} = Map.fetch!(state.dispatch_contexts, ref)
-
-    case GenAgent.Client.cancel_request(pid, ref, @cancel_child_timeout) do
+  defp cancel_child(pid, ref, deadline) do
+    case cancel_control(pid, ref, :cancel_request, deadline) do
       {:ok, :cancelled} ->
         true
 
       {:error, :current} ->
-        GenAgent.Client.interrupt_request(pid, ref, @cancel_child_timeout) ==
-          {:ok, :accepted}
+        cancel_control(pid, ref, :interrupt_request, deadline) == {:ok, :accepted}
 
       _ ->
         false
     end
-  catch
-    :exit, _ -> false
   end
 
-  defp retain_cancelled_ref(state, ref, token) do
-    {_, _, pid, _} = Map.fetch!(state.dispatch_contexts, ref)
+  defp update_cancellation(state, token, ref, settled?, done?) do
+    op = Map.fetch!(state.cancellations, token)
+    target = Map.fetch!(op.refs, ref)
+    target = %{target | settled: target.settled or settled?, done: target.done or done?}
+    op = %{op | refs: Map.put(op.refs, ref, target)}
+
+    %{state | cancellations: Map.put(state.cancellations, token, op)}
+    |> maybe_finish_cancellation(token)
+  end
+
+  defp maybe_finish_cancellation(state, token) do
+    case Map.fetch(state.cancellations, token) do
+      {:ok, op} ->
+        if Enum.all?(op.refs, fn {_, t} -> t.settled or t.done end),
+          do: finish_cancellation(state, token, op),
+          else: state
+
+      :error ->
+        state
+    end
+  end
+
+  defp finish_cancellation(state, token, op) do
+    state = retire_cancellation(state, token, op)
+
+    state =
+      Enum.reduce(op.refs, state, fn {ref, target}, acc ->
+        if target.settled, do: acc, else: retain_cancelled_ref(acc, ref, token, target.pid)
+      end)
+
+    state =
+      case reply_to_token(state, token, {:error, :cancelled}) do
+        {:ok, next} -> next
+        {:error, {:unknown_token, ^token}} -> state
+      end
+
+    confirmed? = Enum.all?(op.refs, fn {_, target} -> target.settled end)
+    GenServer.reply(op.from, {:ok, if(confirmed?, do: :cancelled, else: :cancelled_unconfirmed)})
+    state
+  end
+
+  defp retire_cancellation(state, token, op) do
+    Process.cancel_timer(op.timer)
+
+    monitors =
+      Enum.reduce(state.control_monitors, state.control_monitors, fn
+        {monitor, {kind, pid, current, id, _}}, acc when current == token and id == op.id ->
+          if kind == :worker, do: Process.exit(pid, :kill)
+          Process.demonitor(monitor, [:flush])
+          Map.delete(acc, monitor)
+
+        _, acc ->
+          acc
+      end)
+
+    %{
+      state
+      | cancellations: Map.delete(state.cancellations, token),
+        cancelling_refs: Map.drop(state.cancelling_refs, Map.keys(op.refs)),
+        control_monitors: monitors
+    }
+  end
+
+  defp cancel_control(pid, ref, operation, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining > 0 do
+      apply(GenAgent.Client, operation, [pid, ref, remaining])
+    else
+      {:error, :timeout}
+    end
+  catch
+    :exit, _ -> {:error, :unconfirmed}
+  end
+
+  defp retain_cancelled_ref(state, ref, token, pid) do
     monitor = Process.monitor(pid)
     charge = Map.fetch!(state.token_contexts, token).charge
     lease = Map.get(state.cancellation_leases, token, %{charge: charge, refs: MapSet.new()})
