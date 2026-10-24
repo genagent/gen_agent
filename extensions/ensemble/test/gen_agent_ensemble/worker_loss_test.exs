@@ -83,6 +83,25 @@ defmodule GenAgentEnsemble.WorkerLossTest do
     end
   end
 
+  defp await_worker_cleanup(name, worker, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+    {:ok, status} = Ensemble.status(name)
+
+    if status.agents == ["coordinator"] and not Process.alive?(worker) do
+      status
+    else
+      if System.monotonic_time(:millisecond) < deadline do
+        Process.sleep(10)
+        await_worker_cleanup(name, worker, deadline)
+      else
+        flunk(
+          "worker cleanup did not finish; agents: #{inspect(status.agents)}, " <>
+            "old worker alive: #{Process.alive?(worker)}"
+        )
+      end
+    end
+  end
+
   test "worker death fails the current and queued tokens once, then permits fresh work", %{
     name: name
   } do
@@ -104,6 +123,10 @@ defmodule GenAgentEnsemble.WorkerLossTest do
     [{worker1, _}] =
       Registry.lookup(GenAgent.Registry, GenAgentEnsemble.member_name(name, "worker-1"))
 
+    [{worker2, _}] =
+      Registry.lookup(GenAgent.Registry, GenAgentEnsemble.member_name(name, "worker-2"))
+
+    worker2_monitor = Process.monitor(worker2)
     Process.exit(worker1, :kill)
 
     failure = {:worker_down, "worker-1", :killed}
@@ -124,7 +147,10 @@ defmodule GenAgentEnsemble.WorkerLossTest do
        {:error, :stale}}
     )
 
-    assert {:ok, status} = Ensemble.status(name)
+    # Token errors precede asynchronous sibling shutdown. Require both member
+    # retirement and termination of the original PID before checking cleanup.
+    status = await_worker_cleanup(name, worker2)
+    assert_receive {:DOWN, ^worker2_monitor, :process, ^worker2, _}, 2_000
     assert status.phase == :idle
     assert status.queued == 0
     assert status.in_flight == 0
@@ -155,10 +181,27 @@ defmodule GenAgentEnsemble.WorkerLossTest do
     [{worker1, _}] =
       Registry.lookup(GenAgent.Registry, GenAgentEnsemble.member_name(name, "worker-1"))
 
+    [{worker2, _}] =
+      Registry.lookup(GenAgent.Registry, GenAgentEnsemble.member_name(name, "worker-2"))
+
+    worker2_monitor = Process.monitor(worker2)
+    {:ok, queued} = Ensemble.tell(name, "queued")
     Process.exit(worker1, :kill)
 
     assert {:error, {:worker_down, "worker-1", :killed}} = await_poll(name, token)
+    assert {:error, {:worker_down, "worker-1", :killed}} = await_poll(name, queued)
     assert {:error, :not_found} = Ensemble.poll(name, token)
-    assert {:ok, %{phase: :idle, agents: ["coordinator"]}} = Ensemble.status(name)
+    assert {:error, :not_found} = Ensemble.poll(name, queued)
+    assert %{phase: :idle, queued: 0, in_flight: 0} = await_worker_cleanup(name, worker2)
+    assert_receive {:DOWN, ^worker2_monitor, :process, ^worker2, _}, 2_000
+    refute_received {:controlled_prompt, "coordinator", "queued", _}
+
+    {:ok, fresh} = Ensemble.tell(name, "fresh")
+    assert_receive {:controlled_prompt, "coordinator", "fresh", coordinator2}, 2_000
+    send(coordinator2, {:result, "new"})
+    assert_receive {:controlled_prompt, "worker", "new", fresh_worker}, 2_000
+    send(fresh_worker, {:result, "FRESH_RESULT"})
+    assert {:ok, :completed, response} = await_poll(name, fresh)
+    assert response.text == "### new\n\nFRESH_RESULT"
   end
 end

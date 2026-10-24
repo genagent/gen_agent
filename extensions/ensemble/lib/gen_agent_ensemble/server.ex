@@ -1662,6 +1662,14 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp finish_cancellation(state, token, op) do
+    # A failed control result (or the deadline) can precede the child monitor's
+    # DOWN. Confirm only the captured PID, never a name that may now be reused.
+    refs =
+      Map.new(op.refs, fn {ref, target} ->
+        {ref, %{target | settled: target.settled or not Process.alive?(target.pid)}}
+      end)
+
+    op = %{op | refs: refs}
     state = retire_cancellation(state, token, op)
 
     state =

@@ -558,6 +558,81 @@ defmodule GenAgentEnsemble.MemberNamesTest do
     end
   end
 
+  for evidence <- [:control_result, :worker_down, :deadline] do
+    @tag evidence: evidence
+    test "#{evidence} before captured child DOWN confirms only the dead PID", %{
+      name: name,
+      evidence: evidence
+    } do
+      server = start(name, [observed_spec("w")])
+      assert_receive {:member_started, "w", old}
+      {:ok, token} = E.tell_with_completion(name, "old turn")
+      assert_receive {:controlled_prompt, "w", "old turn", _}
+      state = :sys.get_state(server)
+      [{ref, {"w", ^token}}] = Map.to_list(state.in_flight)
+      :ok = :sys.suspend(server)
+
+      try do
+        watch = Process.monitor(old)
+        Process.exit(old, :kill)
+        assert_receive {:DOWN, ^watch, :process, ^old, :killed}
+        key = E.member_name(name, "w")
+        outsider = foreign(key)
+        id = make_ref()
+        reply = make_ref()
+        worker = spawn(fn -> receive do: (:stop -> :ok) end)
+        worker_monitor = Process.monitor(worker)
+        child_monitor = Process.monitor(old)
+        timer = Process.send_after(self(), :unused_cancel_deadline, 60_000)
+
+        op = %{
+          id: id,
+          from: {self(), reply},
+          deadline: System.monotonic_time(:millisecond) + 5_000,
+          timer: timer,
+          refs: %{ref => %{pid: old, agent: "w", settled: false, done: false}}
+        }
+
+        # Drive the real callback with control/deadline evidence first, withholding
+        # the child DOWN so scheduler order cannot mask the regression.
+        state = %{
+          state
+          | in_flight: Map.delete(state.in_flight, ref),
+            dispatch_contexts: Map.delete(state.dispatch_contexts, ref),
+            cancellations: %{token => op},
+            cancelling_refs: %{ref => token},
+            control_monitors: %{
+              worker_monitor => {:worker, worker, token, id, ref},
+              child_monitor => {:child, old, token, id, ref}
+            }
+        }
+
+        message =
+          case evidence do
+            :control_result ->
+              {:cancel_control_result, token, id, ref, worker, false}
+
+            :worker_down ->
+              send(worker, :stop)
+              assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :normal}
+              {:DOWN, worker_monitor, :process, worker, :normal}
+
+            :deadline ->
+              {:cancel_deadline, token, id}
+          end
+
+        assert {:noreply, settled} = GenAgentEnsemble.Server.handle_info(message, state)
+        assert_receive {^reply, {:ok, :cancelled}}
+        assert settled.cancellations == %{}
+        assert settled.cancelled_refs == %{}
+        assert settled.cancellation_leases == %{}
+        assert_untouched(key, outsider)
+      after
+        :sys.resume(server)
+      end
+    end
+  end
+
   test "explicit stop demonitoring, same-batch restart and stop failure preserve ownership", %{
     name: name
   } do
