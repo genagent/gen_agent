@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+* **deps:** admit GenAgent core 0.10.x while retaining existing supported core ranges.
+
 ## [0.5.1](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.5.0...gen_agent_openai-v0.5.1) (2026-10-24)
 
 
