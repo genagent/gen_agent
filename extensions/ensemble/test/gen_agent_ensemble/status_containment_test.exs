@@ -95,6 +95,22 @@ defmodule GenAgentEnsemble.StatusContainmentTest do
     task
   end
 
+  defp assert_work_preserved(actual, before) do
+    # Admission may advance independently; retain every ref and all tuple metadata.
+    contexts =
+      Map.new(actual.dispatch_contexts, fn {ref, context} ->
+        case {Map.get(before.dispatch_contexts, ref), context} do
+          {{started_at, ordinal, pid, :submitted}, {started_at, ordinal, pid, :accepted}} ->
+            {ref, {started_at, ordinal, pid, :submitted}}
+
+          _ ->
+            {ref, context}
+        end
+      end)
+
+    assert %{actual | dispatch_contexts: contexts} == before
+  end
+
   @secret "status-private-sentinel"
   @invalid_error {:error, {:invalid_strategy_result, :handle_status}}
   @failures [
@@ -144,7 +160,7 @@ defmodule GenAgentEnsemble.StatusContainmentTest do
           for _ <- 1..2 do
             assert E.status(name) == unquote(Macro.escape(error))
             assert_receive :status_callback
-            assert :sys.get_state(server) == before
+            assert_work_preserved(:sys.get_state(server), before)
           end
         end)
 
@@ -169,7 +185,7 @@ defmodule GenAgentEnsemble.StatusContainmentTest do
       assert_receive :status_callback
       # Only notify changed the strategy's mode; the framework's work is intact.
       after_recovery = :sys.get_state(server)
-      assert %{after_recovery | strategy_state: before.strategy_state} == before
+      assert_work_preserved(%{after_recovery | strategy_state: before.strategy_state}, before)
 
       send(backend, {:result, "active-result"})
       assert {:ok, %Response{text: "active-result"}} = Task.await(waiting)
