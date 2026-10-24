@@ -212,6 +212,10 @@ set up by the repo's `.iex.exs`.
 | `E.start_link(opts)`       | Start an ad-hoc ensemble imperatively (same shape  |
 |                            | as a config entry).                                |
 
+Tokens are opaque strings with a `tok-` prefix. Keep the returned value intact;
+do not parse it or infer ordering. The Ensemble API assumes a trusted host:
+token randomness does not authorize callers or isolate users.
+
 Completed tell results are retained per ensemble with a top-level
 `max_completed_results: 100` default, matching core's default tell result
 limit. Set a non-negative integer (including `0` to disable retention), or

@@ -102,6 +102,48 @@ defmodule GenAgentEnsemble.CompletedResultsTest do
     task
   end
 
+  defp assert_opaque_token("tok-" <> opaque) do
+    assert byte_size(opaque) == 43
+    assert opaque =~ ~r/\A[A-Za-z0-9_-]+\z/
+    assert {:ok, bytes} = Base.url_decode64(opaque, padding: false)
+    assert byte_size(bytes) == 32
+  end
+
+  test "opaque tell tokens round-trip through repeatable await and destructive reads", %{
+    name: name
+  } do
+    start(name)
+
+    for result <- [{:ok, :answer}, {:error, :boom}] do
+      {:ok, token} = E.tell(name, :prompt)
+      assert_opaque_token(token)
+      assert_receive {:accepted, :prompt, ^token}
+      assert E.poll(name, token) == {:ok, :pending}
+      complete(name, token, result)
+      assert E.await(name, token, 0) == result
+      assert E.await(name, token, 0) == result
+
+      expected_poll =
+        case result do
+          {:ok, value} -> {:ok, :completed, value}
+          error -> error
+        end
+
+      assert E.poll(name, token) == expected_poll
+      assert E.poll(name, token) == {:error, :not_found}
+      assert E.await(name, token, 0) == {:error, :not_found}
+
+      {:ok, drained} = E.tell_with_completion(name, :drain)
+      assert_opaque_token(drained)
+      complete(name, drained, result)
+      assert_receive {:gen_agent_ensemble, :completion, ^name, ^drained, ^result}
+      assert E.inbox(name) == {:ok, [{drained, result}]}
+      assert E.inbox(name) == {:ok, []}
+      assert E.await(name, drained, 0) == {:error, :not_found}
+      assert E.poll(name, drained) == {:error, :not_found}
+    end
+  end
+
   test "invalid limits precede strategy initialization and owned tree startup", %{name: name} do
     for value <- [-1, 1.5, nil, true, "100", :unlimited] do
       assert {:error, {:invalid_option, :max_completed_results, ^value}} =
@@ -157,7 +199,7 @@ defmodule GenAgentEnsemble.CompletedResultsTest do
         token
       end
 
-    # Reverse lexical order fails lexical eviction regardless of digit widths.
+    # Reverse lexical order fails lexical eviction regardless of token encoding.
     order = Enum.sort(tokens, :desc)
     for token <- order, do: complete(name, token, {:ok, token})
     retained = Enum.take(order, -3)
@@ -225,6 +267,7 @@ defmodule GenAgentEnsemble.CompletedResultsTest do
     for result <- [{:ok, :answer}, {:error, :boom}] do
       task = Task.async(fn -> E.ask(name, :ask) end)
       assert_receive {:accepted, :ask, token}
+      assert_opaque_token(token)
       complete(name, token, result)
       assert Task.await(task) == result
       assert_cache(pid, [tell])
