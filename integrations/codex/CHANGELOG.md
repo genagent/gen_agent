@@ -4,6 +4,13 @@
 
 * **deps:** admit GenAgent core 0.10.x while retaining existing supported core ranges.
 
+## [0.6.2](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.6.1...gen_agent_codex-v0.6.2) (2026-10-24)
+
+
+### Bug Fixes
+
+* **adapters:** admit core 0.10.0 ([e4ec64b](https://github.com/genagent/gen_agent/commit/e4ec64b9ae09f8b4ab776b16df36a55c1265a233))
+
 ## [0.6.1](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.6.0...gen_agent_codex-v0.6.1) (2026-10-23)
 
 
