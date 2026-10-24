@@ -61,7 +61,7 @@ defmodule GenAgentEnsemble.Strategy do
       Ownership is retired only after confirmed termination or absence;
       unexpected stop failures leave the slot tracked.
     * `{:dispatch, agent_name, prompt, token}` -- send a prompt to an existing
-      sub-agent via `GenAgent.tell_with_completion/3`. The framework calls `handle_response/3`
+      sub-agent via nonblocking PID submission. The framework calls `handle_response/3`
       only while `token` remains pending, so late results from an aborted run
       cannot enter a later run. If dispatch is rejected, the framework calls
       `handle_dispatch_rejected/4` and closes the token if the callback does not.
@@ -81,12 +81,17 @@ defmodule GenAgentEnsemble.Strategy do
   forward require a tracked member whose canonical key resolves to its owned
   PID; otherwise they fail with `{:agent_not_running, name}`. An unscoped
   dispatch or forward failure is logged; scoped dispatch uses the callback
-  and terminal-token fallback below. The guard and named core call are not
-  atomic: replacement between check and send remains possible.
+  and terminal-token fallback below. Dispatch submits to the captured owned PID.
+  Forward still uses a named core call: replacement between check and send
+  remains possible.
 
-  Ops are applied sequentially. A rejected scoped dispatch ends the current
-  op batch after notifying the strategy; other op failures are logged and
-  processing continues. A failed start also ends its op batch when the
+  Ops are applied sequentially. A synchronous ownership-guard rejection of a
+  scoped dispatch ends the current op batch after notifying the strategy.
+  Child admission rejection is asynchronous: later operations in the original
+  batch, including sibling starts and dispatches, may already have run before
+  `handle_dispatch_rejected/4` is called. Strategies must tolerate and clean up
+  that submitted work; rejection does not roll it back. Other op failures are
+  logged and processing continues. A failed start also ends its op batch when the
   strategy implements `handle_start_rejected/3`, so a following dispatch
   cannot target the absent agent. Strategies that record token state before
   dispatch should implement `handle_dispatch_rejected/4` to remove that token
@@ -237,7 +242,7 @@ defmodule GenAgentEnsemble.Strategy do
   @doc "Handle a rejected child start. Defining this callback ends the current operation batch; if omitted, remaining operations continue."
   @callback handle_start_rejected(agent_name, term(), strategy_state) :: result
 
-  @doc "Handle a rejected token-scoped dispatch. This ends the current operation batch. If omitted, the server closes its token with a dispatch error; a callback that does not close the token also gets that fallback."
+  @doc "Handle a rejected token-scoped dispatch. Only synchronous ownership-guard rejection ends the current operation batch; asynchronous child admission rejection may follow later operations in that batch. If omitted, the server closes its token with a dispatch error; a callback that does not close the token also gets that fallback."
   @callback handle_dispatch_rejected(agent_name, token, term(), strategy_state) :: result
   @doc """
   Remove a cancelled token and advance queued work. Return operations for

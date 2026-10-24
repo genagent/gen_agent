@@ -30,7 +30,8 @@ defmodule GenAgentEnsemble.Telemetry do
   never part of the metadata.
 
   `:kind` is `:ask` or `:tell`. `:ordinal` starts at zero for each
-  token. Combined with `:agent`, it identifies Pipeline stage order and
+  token and is reserved at submission, including child-rejected submissions.
+  Combined with `:agent`, it identifies Pipeline stage order and
   Supervisor branches. External strategies using unscoped dispatches have
   `nil` token and ordinal. `:ref` is the corresponding core GenAgent turn
   reference, so dispatches can be joined to `GenAgent.Telemetry` events.
@@ -41,6 +42,14 @@ defmodule GenAgentEnsemble.Telemetry do
   Core completion/stream messages and agent listings also expose the tuple.
   Consumers of handwritten slash keys must migrate; this does not promise
   compatibility with third-party serializers or telemetry exporters.
+
+  A submitted dispatch starts only on child admission `:ok` or a completion
+  that proves acceptance. Completion before admission emits start then stop/error;
+  duplicate or late decisions never reopen a retired ref. Child admission
+  rejection emits one `:rejected` with its ref and reserved ordinal, and no
+  start or stop/error. Unscoped dispatches retain a nil ordinal. Local cancellation, halt, or cleanup can emit an error for a submitted
+  ref without inventing acceptance or a start. Dispatch durations include time
+  spent awaiting child admission.
 
   A failed ownership guard emits exactly one `:dispatch, :rejected` event,
   with `reason_kind: :agent_not_running`, nil ref/ordinal and no dispatch start.

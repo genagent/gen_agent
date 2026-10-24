@@ -56,7 +56,11 @@ Add a backend from its own installation guide when using Ensemble:
 [Anthropic](https://github.com/genagent/gen_agent/tree/main/integrations/anthropic),
 or [OpenAI](https://github.com/genagent/gen_agent/tree/main/integrations/openai).
 
-The package resolves a compatible GenAgent core version through its dependency.
+Ensemble requires GenAgent core `>= 0.9.0 and < 1.0.0` (`~> 0.9`).
+Nonblocking child dispatch uses `GenAgent.Client`, introduced in core 0.9;
+earlier cores cannot supply that module and are incompatible with this code.
+The older synchronous child-admission implementation admitted core 0.7, 0.8,
+and 0.9.
 
 ```elixir
 def deps do
@@ -243,6 +247,33 @@ emits `[:gen_agent_ensemble, :admission, :rejected]`. This is a budget for the
 original serialized prompts, not a memory limit or a limit on physical work:
 the mailbox, strategy state and options, generated prompts, intermediate
 outputs, backend histories, and completed results are bounded separately.
+
+Child dispatch uses nonblocking PID submission, replacing the older
+synchronous child-admission behavior. A token acknowledges Ensemble
+admission, not child admission. A held child `pre_turn` callback does not by
+itself block subsequent submission, status, poll, inbox, or notify processing.
+
+Child rejection closes the existing token through the usual result paths.
+An immediate `poll` may still return `{:ok, :pending}`; use `await` or poll
+until the terminal result arrives to observe child rejection.
+
+For external strategy authors: synchronous ownership-guard rejection of a
+scoped dispatch still ends its operation batch. Child admission rejection is
+asynchronous; later operations in the batch, including sibling starts and
+dispatches, may already have run before `handle_dispatch_rejected/4` is called.
+Strategies must tolerate and clean up that work; rejection does not roll it
+back. Unscoped rejection is logged without calling that token-scoped callback.
+Submission reserves a per-token ordinal even when the child rejects it; the
+`:dispatch, :rejected` event carries that ordinal and ref. Guard-time rejection
+has neither. Accepted dispatch ordinals can therefore have gaps.
+
+Cancellation still performs synchronous child controls, including before child
+admission. A held callback can block the Ensemble server for a five-second
+control timeout (and a further five seconds if interruption is needed), per
+reference. Reads and other commands queue behind that cancellation. Moving
+these controls off the server requires a follow-up cancellation state machine;
+this change does not fully resolve command responsiveness. Strategy callbacks
+and child stop operations can also block the server.
 
 ### Halting
 
