@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+* **deps:** admit GenAgent core 0.10.x while retaining existing supported core ranges.
+
 ## [0.3.1](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.3.0...gen_agent_claude-v0.3.1) (2026-10-23)
 
 
