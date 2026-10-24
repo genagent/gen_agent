@@ -92,8 +92,9 @@ defmodule GenAgentEnsemble.Strategy do
       the response.
     * `{:reply_error, token, reason}` -- complete a pending `tell`/`ask`
       with an error. Callers see `{:error, reason}`.
-    * `{:forward, agent_name, event}` -- call `GenAgent.notify/2` on
-      the named sub-agent.
+    * `{:forward, agent_name, event}` -- send `event` with
+      `GenAgent.Client.notify/2` to the member PID captured by the ownership
+      check. Delivery is best effort; the name is not resolved again.
     * `{:halt, reason}` -- end the session logically. See "Halt" below.
 
   Member names in operations and callbacks remain bare binaries. Registry
@@ -102,8 +103,10 @@ defmodule GenAgentEnsemble.Strategy do
   PID; otherwise they fail with `{:agent_not_running, name}`. An unscoped
   dispatch or forward failure is logged; scoped dispatch uses the callback
   and terminal-token fallback below. Dispatch submits to the captured owned PID.
-  Forward still uses a named core call: replacement between check and send
-  remains possible.
+  Forward also targets the captured owned PID, never a replacement. If that PID
+  is already dead at the liveness check, unscoped forwarding logs `:not_alive`,
+  distinct from the ownership mismatch `{:agent_not_running, name}`. If it dies
+  after the liveness check, the event may be silently dropped.
 
   Ops are applied sequentially within each batch. A synchronous ownership-guard rejection of a
   scoped dispatch ends the current op batch after notifying the strategy.
