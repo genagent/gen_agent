@@ -353,7 +353,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
         state = %{state | phase: :idle, partial: [], subtasks: []}
 
         {ops, state} =
-          maybe_append_next(state, stop_ops ++ [{:reply_error, token, reason}])
+          maybe_append_next(state, [{:reply_error, token, reason} | stop_ops])
 
         {:ok, ops, state}
 
@@ -429,7 +429,7 @@ defmodule GenAgentEnsemble.Strategies.Supervisor do
       stop_ops = for {worker, _} <- progress, worker != agent, do: {:stop, worker}
       fail_ops = [{:reply_error, token, failure} | queued_fail_ops(state.queue, failure)]
       state = %{state | phase: :idle, partial: [], subtasks: [], queue: Queue.new()}
-      {:ok, stop_ops ++ fail_ops, state}
+      {:ok, fail_ops ++ stop_ops, state}
     else
       {:ok, [], state}
     end

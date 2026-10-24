@@ -288,14 +288,25 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
     assert {:ok, ops, state} = SupStrat.handle_agent_down("w-2", :killed, state)
     failure = {:worker_down, "w-2", :killed}
 
-    assert Enum.sort(ops) ==
-             Enum.sort([
-               {:stop, "w-1"},
-               {:reply_error, :t1, failure},
-               {:reply_error, :t2, failure}
-             ])
+    assert ops == [
+             {:reply_error, :t1, failure},
+             {:reply_error, :t2, failure},
+             {:stop, "w-1"}
+           ]
 
     assert state.phase == :idle
+    assert Queue.len(state.queue) == 0
+  end
+
+  test "terminal error replies before stops and keeps the queued next dispatch last" do
+    state = fanned_out_state()
+    {:ok, ops, state} = SupStrat.handle_error("w-1", :failed, state)
+
+    assert [{:reply_error, :t1, _}, stop_a, stop_b, {:dispatch, "coord", "second", :t2}] = ops
+    assert Enum.sort([stop_a, stop_b]) == [{:stop, "w-1"}, {:stop, "w-2"}]
+    assert state.phase == {:decomposing, :t2}
+    assert state.partial == []
+    assert state.subtasks == []
     assert Queue.len(state.queue) == 0
   end
 

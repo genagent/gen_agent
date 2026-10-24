@@ -5,6 +5,39 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
   alias GenAgentEnsemble.{ControlledAgent, ControlledBackend}
   alias GenAgentEnsemble.Strategies.{Consensus, Pipeline, Pool, Solo, Switchboard}
 
+  defmodule BarrierMember do
+    use GenAgent
+
+    @impl true
+    def init_agent(opts) do
+      send(opts[:observer], {:member_initialized, opts[:tag], self()})
+
+      if opts[:hold_start] do
+        receive do
+          :release_start -> :ok
+        end
+      end
+
+      {:ok, Keyword.take(opts, [:observer, :tag]), Map.new(opts)}
+    end
+
+    @impl true
+    def handle_response(_, _, state), do: {:noreply, state}
+
+    @impl true
+    def terminate_agent(_, %{tag: "held", observer: observer}) do
+      send(observer, {:shutdown_held, self()})
+
+      receive do
+        :release_shutdown -> :ok
+      after
+        5_000 -> :ok
+      end
+    end
+
+    def terminate_agent(_, _), do: :ok
+  end
+
   defmodule MissingAgentStrategy do
     @behaviour GenAgentEnsemble.Strategy
 
@@ -28,6 +61,119 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
       agent = Keyword.get(opts, :agent, "missing")
       {:ok, [{:dispatch, agent, prompt, token}], %{state | token: token}}
     end
+  end
+
+  defmodule FinalizerStrategy do
+    @behaviour GenAgentEnsemble.Strategy
+
+    @impl true
+    def init(opts),
+      do:
+        {:ok,
+         %{
+           mode: Keyword.fetch!(opts, :mode),
+           token: nil,
+           observer: Keyword.get(opts, :observer),
+           barrier: Keyword.get(opts, :barrier)
+         }, Keyword.get(opts, :agents, [])}
+
+    @impl true
+    def handle_tell("idle", _opts, _token, state), do: {:ok, [], state}
+
+    def handle_tell("successor", _opts, token, state) do
+      {:ok,
+       [
+         {:start,
+          {"successor", BarrierMember,
+           [backend: ControlledBackend, observer: state.observer, tag: "successor"]}},
+         {:dispatch, "successor", "must not run", token}
+       ], state}
+    end
+
+    def handle_tell(prompt, _opts, token, state) do
+      {:ok, [{:dispatch, "missing", prompt, token}, {:reply, token, "abandoned tail"}],
+       %{state | token: token}}
+    end
+
+    @impl true
+    def handle_ask(prompt, opts, token, state), do: handle_tell(prompt, opts, token, state)
+
+    @impl true
+    def handle_response(_agent, _response, state), do: {:ok, [], state}
+
+    @impl true
+    def handle_dispatch_rejected("missing", token, _reason, state) do
+      {:ok, rejection_ops(state.mode, token, state), state}
+    end
+
+    def handle_dispatch_rejected("also-missing", token, _reason, state),
+      do: {:ok, [{:reply, token, "nested reply"}], state}
+
+    defp rejection_ops(mode, token, state)
+         when mode in [
+                :held_reply,
+                :held_fallback,
+                :held_nested_start,
+                :held_nested_dispatch,
+                :held_halt
+              ] do
+      case mode do
+        mode when mode in [:held_reply, :held_fallback] ->
+          [
+            state.barrier
+            | if(mode == :held_reply, do: [{:reply, token, "callback reply"}], else: [])
+          ]
+
+        :held_nested_start ->
+          [state.barrier, {:start, {"invalid"}}, {:reply, token, "abandoned"}]
+
+        :held_nested_dispatch ->
+          [
+            state.barrier,
+            {:dispatch, "also-missing", "nested", token},
+            {:reply, token, "abandoned"}
+          ]
+
+        :held_halt ->
+          [state.barrier, {:halt, :callback_halt}, {:reply, token, "abandoned"}]
+      end
+    end
+
+    defp rejection_ops(mode, token, _state) do
+      case mode do
+        :reply ->
+          [{:stop, "absent"}, {:reply, token, "callback reply"}]
+
+        :nested_start ->
+          [{:start, {"invalid"}}, {:reply, token, "abandoned callback tail"}]
+
+        :nested_dispatch ->
+          [{:dispatch, "also-missing", "nested", token}, {:reply, token, "abandoned tail"}]
+
+        :halt ->
+          [{:halt, :callback_halt}, {:reply, token, "abandoned tail"}]
+
+        :fallback ->
+          [{:stop, "absent"}]
+      end
+    end
+
+    @impl true
+    def handle_cancel(token, state) do
+      send(state.observer, {:cancel_installed, token})
+
+      {:ok,
+       [
+         {:stop, "held"},
+         {:start,
+          {"cleanup-" <> token, BarrierMember,
+           [backend: ControlledBackend, observer: state.observer, tag: "cleanup"]}}
+       ], state}
+    end
+
+    @impl true
+    def handle_start_rejected("invalid", _reason, state),
+      do: {:ok, [{:reply, state.token, "start rejection reply"}], state}
   end
 
   setup do
@@ -80,6 +226,175 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
       result ->
         result
     end
+  end
+
+  for {mode, expected} <- [
+        reply: {:ok, :completed, "callback reply"},
+        nested_start: {:ok, :completed, "start rejection reply"},
+        nested_dispatch: {:ok, :completed, "nested reply"},
+        halt: {:error, {:halted, :callback_halt}},
+        fallback: {:error, {:dispatch_rejected, "missing", {:agent_not_running, "missing"}}}
+      ] do
+    test "rejection batch finalizes after #{mode} callback operations", %{name: name} do
+      {:ok, _server} =
+        Ensemble.start_link(name: name, strategy: FinalizerStrategy, opts: [mode: unquote(mode)])
+
+      {:ok, token} = Ensemble.tell(name, "rejected")
+      assert Ensemble.poll(name, token) == unquote(Macro.escape(expected))
+      assert {:ok, %{pending_tokens: []}} = Ensemble.status(name)
+      assert Ensemble.poll(name, token) == {:error, :not_found}
+    end
+  end
+
+  for kind <- [:start, :stop], reply? <- [true, false], cancel? <- [true, false] do
+    test "held #{kind} rejection reply=#{reply?} cancellation=#{cancel?}", %{name: name} do
+      kind = unquote(kind)
+      reply? = unquote(reply?)
+      cancel? = unquote(cancel?)
+
+      spec =
+        {"held", BarrierMember,
+         [backend: ControlledBackend, observer: self(), tag: "held", hold_start: kind == :start]}
+
+      barrier = if kind == :start, do: {:start, spec}, else: {:stop, "held"}
+
+      {:ok, server} =
+        Ensemble.start_link(
+          name: name,
+          strategy: FinalizerStrategy,
+          opts: [
+            mode: if(reply?, do: :held_reply, else: :held_fallback),
+            observer: self(),
+            barrier: barrier,
+            agents: if(kind == :stop, do: [spec], else: [])
+          ]
+        )
+
+      if kind == :stop, do: assert_receive({:member_initialized, "held", _})
+      {:ok, token} = Ensemble.tell(name, "rejected")
+
+      held =
+        if kind == :start do
+          assert_receive {:member_initialized, "held", pid}
+          pid
+        else
+          assert_receive {:shutdown_held, pid}
+          pid
+        end
+
+      on_exit(fn ->
+        send(held, :release_start)
+        send(held, :release_shutdown)
+      end)
+
+      assert {:ok, :pending} = Ensemble.poll(name, token)
+
+      cancellation =
+        if cancel? do
+          task = Task.async(fn -> Ensemble.cancel(name, token) end)
+          assert_receive {:cancel_installed, ^token}
+          assert Map.has_key?(:sys.get_state(server).cancellations, token)
+          task
+        end
+
+      send(held, if(kind == :start, do: :release_start, else: :release_shutdown))
+
+      if kind == :start and cancel? do
+        assert_receive {:shutdown_held, ^held}
+        send(held, :release_shutdown)
+      end
+
+      expected =
+        cond do
+          cancel? -> {:error, :cancelled}
+          reply? -> {:ok, "callback reply"}
+          true -> {:error, {:dispatch_rejected, "missing", {:agent_not_running, "missing"}}}
+        end
+
+      assert Ensemble.await(name, token, 2_000) == expected
+      if cancellation, do: assert(Task.await(cancellation) == {:ok, :cancelled})
+      assert {:ok, %{pending_tokens: []}} = Ensemble.status(name)
+
+      assert Ensemble.poll(name, token) != {:ok, :pending}
+      assert {:error, :not_found} = Ensemble.poll(name, token)
+      state = :sys.get_state(server)
+      assert state.pending_prompt_bytes == 0
+      assert state.cancellation_leases == %{}
+      assert state.cancellations == %{}
+    end
+  end
+
+  for {mode, expected} <- [
+        held_nested_start: {:ok, "start rejection reply"},
+        held_nested_dispatch: {:ok, "nested reply"},
+        held_halt: {:error, {:halted, :callback_halt}}
+      ] do
+    test "#{mode} finalizes after held start and abandons original tails", %{name: name} do
+      spec =
+        {"held", BarrierMember,
+         [backend: ControlledBackend, observer: self(), tag: "held", hold_start: true]}
+
+      {:ok, _} =
+        Ensemble.start_link(
+          name: name,
+          strategy: FinalizerStrategy,
+          opts: [mode: unquote(mode), barrier: {:start, spec}]
+        )
+
+      {:ok, token} = Ensemble.tell(name, "rejected")
+      assert_receive {:member_initialized, "held", held}
+
+      on_exit(fn ->
+        send(held, :release_start)
+        send(held, :release_shutdown)
+      end)
+
+      assert {:ok, :pending} = Ensemble.poll(name, token)
+      send(held, :release_start)
+      send(held, :release_shutdown)
+      assert Ensemble.await(name, token, 2_000) == unquote(Macro.escape(expected))
+      assert Ensemble.poll(name, token) != {:ok, :pending}
+      assert {:error, :not_found} = Ensemble.poll(name, token)
+    end
+  end
+
+  test "cancellation with suspended strategy stop fences a queued successor once", %{name: name} do
+    spec = {"held", BarrierMember, [backend: ControlledBackend, observer: self(), tag: "held"]}
+
+    {:ok, server} =
+      Ensemble.start_link(
+        name: name,
+        strategy: FinalizerStrategy,
+        opts: [mode: :fallback, observer: self(), agents: [spec]]
+      )
+
+    assert_receive {:member_initialized, "held", held}
+    on_exit(fn -> send(held, :release_shutdown) end)
+    {:ok, first} = Ensemble.tell(name, "idle")
+    cancel_first = Task.async(fn -> Ensemble.cancel(name, first) end)
+    assert_receive {:cancel_installed, ^first}
+    assert_receive {:shutdown_held, ^held}
+    {:ok, successor} = Ensemble.tell(name, "successor")
+    cancel_next = Task.async(fn -> Ensemble.cancel(name, successor) end)
+    assert_receive {:cancel_installed, ^successor}
+    assert {:error, :cancelling} = Ensemble.cancel(name, successor)
+    assert {:ok, :pending} = Ensemble.poll(name, successor)
+    assert :sys.get_state(server).runtime.active.kind == :stop
+    send(held, :release_shutdown)
+    assert {:ok, :cancelled} = Task.await(cancel_first)
+    assert {:ok, :cancelled} = Task.await(cancel_next)
+    assert {:error, :cancelled} = Ensemble.poll(name, first)
+    assert {:error, :cancelled} = Ensemble.poll(name, successor)
+    assert {:error, :not_found} = Ensemble.poll(name, successor)
+    assert_receive {:member_initialized, "successor", _}
+    refute_received {:member_initialized, "successor", _}
+    refute_received {:controlled_prompt, "successor", _, _}
+    refute_received {:cancel_installed, _}
+    state = :sys.get_state(server)
+    assert state.pending_prompt_bytes == 0
+    assert state.pending == %{}
+    assert state.cancellation_leases == %{}
+    assert state.cancellations == %{}
   end
 
   test "Solo closes rejected tell, retains earlier ask, and serves a later ask", %{name: name} do

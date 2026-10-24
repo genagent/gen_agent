@@ -18,7 +18,6 @@ defmodule GenAgentEnsemble.Server do
     :strategy_mod,
     :strategy_state,
     :session_name,
-    :session_started_at,
     # :running | :halted. A halted session stays alive as a read-only façade.
     :lifecycle,
     # Set once, by the first applied {:halt, reason}; nil and false are valid.
@@ -68,7 +67,14 @@ defmodule GenAgentEnsemble.Server do
     cancelling_refs: %{},
     # %{monitor => {:worker | :child, captured_pid, token, operation_id, ref}}
     # Independent of member name/incarnation monitors.
-    control_monitors: %{}
+    control_monitors: %{},
+    runtime: %{
+      active: nil,
+      queue: :queue.new(),
+      starting: %{},
+      stopping: %{},
+      session_started_at: nil
+    }
   ]
 
   # --- public API (called via GenAgentEnsemble shim) ---
@@ -149,6 +155,7 @@ defmodule GenAgentEnsemble.Server do
     %__MODULE__{
       state
       | strategy_state: :redacted,
+        runtime: :redacted,
         halt_reason: :redacted,
         completed: :redacted,
         completed_order: :redacted,
@@ -245,7 +252,6 @@ defmodule GenAgentEnsemble.Server do
         strategy_mod: strategy_mod,
         strategy_state: strategy_state,
         session_name: session_name,
-        session_started_at: nil,
         lifecycle: :running,
         halt_reason: nil,
         agent_tree: agent_tree,
@@ -270,7 +276,7 @@ defmodule GenAgentEnsemble.Server do
 
       case apply_start_specs(state, start_specs) do
         {:ok, state} ->
-          state = %{state | session_started_at: System.monotonic_time()}
+          state = put_in(state.runtime.session_started_at, System.monotonic_time())
           emit(:session, :start, %{system_time: System.system_time()}, session_meta(state))
           {:ok, state}
 
@@ -565,6 +571,56 @@ defmodule GenAgentEnsemble.Server do
     {:noreply, state}
   end
 
+  defp handle_info_impl({:lifecycle_result, id, worker, supervisor, argument, outcome}, state) do
+    case state.runtime.active do
+      %{id: ^id, worker: ^worker, supervisor: ^supervisor, argument: ^argument} = active
+      when state.lifecycle != :halted and supervisor == state.agent_supervisor ->
+        Process.unlink(worker)
+
+        receive do
+          {:EXIT, ^worker, _} -> :ok
+        after
+          0 -> :ok
+        end
+
+        Process.demonitor(active.monitor, [:flush])
+        state = put_in(state.runtime.active, nil)
+        state = release_lifecycle(state, active)
+        state = reconcile_stopped_member(state, active, outcome)
+
+        state =
+          case complete_op(
+                 lifecycle_outcome(state, active, outcome),
+                 active.op,
+                 state,
+                 active.finalizer
+               ) do
+            {:cont, next} -> apply_ops(next, active.tail, active.finalizer)
+            {:halt, next} -> next
+          end
+
+        {:noreply, advance_lifecycle(state)}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  defp handle_info_impl(
+         {:DOWN, monitor, :process, worker, _reason},
+         %{runtime: %{active: %{monitor: monitor, worker: worker}}} = state
+       ) do
+    {:stop, :lifecycle_worker_failed, state}
+  end
+
+  # A linked worker can deliver EXIT before DOWN. Neither proves that a
+  # supervisor request completed; only its correlated result can resume a tail.
+  defp handle_info_impl(
+         {:EXIT, worker, _reason},
+         %{runtime: %{active: %{worker: worker}}} = state
+       ),
+       do: {:stop, :lifecycle_worker_failed, state}
+
   defp handle_info_impl({:cancel_control_result, token, id, ref, worker, outcome}, state) do
     valid? =
       Enum.any?(state.control_monitors, fn {_, entry} ->
@@ -751,38 +807,21 @@ defmodule GenAgentEnsemble.Server do
 
   defp handle_info_impl({:DOWN, mref, :process, pid, reason}, state) do
     case Map.fetch(state.monitors, mref) do
-      {:ok, agent}
-      when is_map_key(state.agents, agent) and :erlang.map_get(agent, state.agents) === pid ->
-        affected_tokens =
-          for {_ref, {name, token}} <- state.in_flight, name == agent, do: token
+      {:ok, agent} ->
+        case {Map.get(state.runtime.stopping, agent), Map.fetch(state.agents, agent)} do
+          # Only the captured member monitor and fenced PID are intentional.
+          # Worker, cancellation/control and waiter DOWNs are routed earlier.
+          {%{pid: ^pid}, _} ->
+            {:noreply, state}
 
-        emit_dropped_dispatches(state, agent, :agent_down)
+          {_, {:ok, ^pid}} ->
+            handle_member_down(state, agent, mref, reason)
 
-        state = %{
-          state
-          | monitors: Map.delete(state.monitors, mref),
-            agents: Map.delete(state.agents, agent),
-            in_flight: drop_in_flight_for(state.in_flight, agent),
-            dispatch_contexts: drop_dispatch_contexts_for(state, agent)
-        }
+          _ ->
+            {:noreply, state}
+        end
 
-        state =
-          if function_exported?(state.strategy_mod, :handle_agent_down, 3) do
-            {ops, strategy_state} =
-              call_strategy(state.strategy_mod, :handle_agent_down, [
-                agent,
-                reason,
-                state.strategy_state
-              ])
-
-            %{state | strategy_state: strategy_state} |> apply_ops(ops)
-          else
-            fail_unhandled_tokens(state, affected_tokens, {:agent_down, agent, reason})
-          end
-
-        {:noreply, state}
-
-      _ ->
+      :error ->
         {:noreply, state}
     end
   end
@@ -803,6 +842,37 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp handle_info_impl(_msg, state), do: {:noreply, state}
+
+  defp handle_member_down(state, agent, mref, reason) do
+    affected_tokens =
+      for {_ref, {name, token}} <- state.in_flight, name == agent, do: token
+
+    emit_dropped_dispatches(state, agent, :agent_down)
+
+    state = %{
+      state
+      | monitors: Map.delete(state.monitors, mref),
+        agents: Map.delete(state.agents, agent),
+        in_flight: drop_in_flight_for(state.in_flight, agent),
+        dispatch_contexts: drop_dispatch_contexts_for(state, agent)
+    }
+
+    state =
+      if function_exported?(state.strategy_mod, :handle_agent_down, 3) do
+        {ops, strategy_state} =
+          call_strategy(state.strategy_mod, :handle_agent_down, [
+            agent,
+            reason,
+            state.strategy_state
+          ])
+
+        %{state | strategy_state: strategy_state} |> apply_ops(ops)
+      else
+        fail_unhandled_tokens(state, affected_tokens, {:agent_down, agent, reason})
+      end
+
+    {:noreply, state}
+  end
 
   defp handle_prompt_response(state, bare_agent, token, response) do
     if active_dispatch?(state, token) do
@@ -882,6 +952,7 @@ defmodule GenAgentEnsemble.Server do
   def terminate(reason, state) do
     # Stop admitting callers while cleanup runs. The AgentTree keeps its own
     # registration until it dies, so a same-name restart still waits for it.
+    state = retire_lifecycle(state)
     Registry.unregister(GenAgentEnsemble.Registry, state.session_name)
     Enum.each(state.waiter_monitors, fn {mref, _} -> remove_waiter(state, mref, nil) end)
     Enum.each(state.cancellations, fn {token, op} -> retire_cancellation(state, token, op) end)
@@ -895,7 +966,7 @@ defmodule GenAgentEnsemble.Server do
     emit(
       :session,
       :stop,
-      %{duration_ms: elapsed_ms(state.session_started_at)},
+      %{duration_ms: elapsed_ms(state.runtime.session_started_at)},
       session_meta(state)
       |> Map.put(:outcome, outcome)
       |> Map.put(:reason_kind, reason_kind(reason))
@@ -911,16 +982,247 @@ defmodule GenAgentEnsemble.Server do
 
   # A halt ends every batch, including those a nested rejection callback
   # returns, so nothing runs in a terminal session.
-  defp apply_ops(%{lifecycle: :halted} = state, _ops), do: state
+  defp apply_ops(state, ops, finalizer \\ :none)
 
-  defp apply_ops(state, ops) do
-    Enum.reduce_while(ops, state, &apply_op_safe/2)
+  defp apply_ops(%{lifecycle: :halted} = state, _ops, finalizer),
+    do: finish_batch(state, finalizer)
+
+  defp apply_ops(state, [], finalizer), do: finish_batch(state, finalizer)
+
+  defp apply_ops(state, [op | _tail] = ops, finalizer) do
+    if reserved_target?(op, state.runtime) do
+      entry = {:deferred, ops, finalizer}
+      put_in(state.runtime.queue, :queue.in(entry, state.runtime.queue))
+    else
+      apply_ready_ops(state, ops, finalizer)
+    end
   end
 
-  defp apply_op_safe(op, state) do
-    case apply_op(op, state) do
+  defp reserved_target?(op, runtime) do
+    name =
+      case op do
+        {:start, {name, _, _}} -> name
+        {:stop, name} -> name
+        {:dispatch, name, _} -> name
+        {:dispatch, name, _, _} -> name
+        {:forward, name, _} -> name
+        _ -> nil
+      end
+
+    Map.has_key?(runtime.starting, name) or Map.has_key?(runtime.stopping, name)
+  end
+
+  defp apply_ready_ops(state, [op | tail], finalizer) do
+    case prepare_lifecycle(op, state) do
+      {:call, kind, name, argument} ->
+        entry = {make_ref(), op, kind, name, argument, tail, finalizer}
+        state = reserve_lifecycle(state, entry)
+
+        if state.runtime.active do
+          put_in(state.runtime.queue, :queue.in(entry, state.runtime.queue))
+        else
+          launch_lifecycle(state, entry)
+        end
+
+      :ordinary ->
+        case apply_op_safe(op, state, finalizer) do
+          {:cont, next} -> apply_ops(next, tail, finalizer)
+          {:halt, next} -> next
+        end
+    end
+  end
+
+  defp prepare_lifecycle({:start, spec}, state) do
+    with {:ok, {name, module, opts}} <- validate_start_spec(spec),
+         {:ok, child_spec} <- build_child_spec(state, name, module, opts),
+         false <- Map.has_key?(state.agents, name) or Map.has_key?(state.runtime.starting, name) do
+      {:call, :start, name, child_spec}
+    else
+      _ -> :ordinary
+    end
+  end
+
+  defp prepare_lifecycle({:stop, name}, state) when is_binary(name) do
+    case Map.fetch(state.agents, name) do
+      {:ok, pid} when not is_map_key(state.runtime.stopping, name) -> {:call, :stop, name, pid}
+      {:ok, _pid} -> :ordinary
+      :error -> :ordinary
+    end
+  end
+
+  defp prepare_lifecycle(_, _), do: :ordinary
+
+  defp launch_lifecycle(state, {id, op, kind, name, argument, tail, finalizer}) do
+    parent = self()
+    supervisor = state.agent_supervisor
+
+    {worker, monitor} =
+      :erlang.spawn_opt(
+        fn ->
+          outcome =
+            try do
+              case kind do
+                :start -> DynamicSupervisor.start_child(supervisor, argument)
+                :stop -> DynamicSupervisor.terminate_child(supervisor, argument)
+              end
+            catch
+              # A missing target never accepted the call. Other exits (including
+              # timeout) leave its execution uncertain and must fail the session.
+              :exit, {:noproc, _} ->
+                case kind do
+                  :start -> {:error, {:start_exception, :exit}}
+                  :stop -> {:error, :agent_stop_failed}
+                end
+            end
+
+          send(parent, {:lifecycle_result, id, self(), supervisor, argument, outcome})
+        end,
+        [:link, :monitor]
+      )
+
+    active = %{
+      id: id,
+      op: op,
+      kind: kind,
+      name: name,
+      argument: argument,
+      tail: tail,
+      finalizer: finalizer,
+      worker: worker,
+      monitor: monitor,
+      supervisor: supervisor
+    }
+
+    put_in(state.runtime.active, active)
+  end
+
+  defp retire_lifecycle(state) do
+    if active = state.runtime.active do
+      # Unlink before killing: the retired worker must not fail a halted façade.
+      # The supervisor may still be processing its request; tree shutdown is
+      # responsible for draining that work, never a resumed continuation.
+      Process.unlink(active.worker)
+      Process.exit(active.worker, :kill)
+      Process.demonitor(active.monitor, [:flush])
+      worker = active.worker
+
+      receive do
+        {:EXIT, ^worker, _} -> :ok
+      after
+        0 -> :ok
+      end
+    end
+
+    %{
+      state
+      | runtime: %{state.runtime | active: nil, queue: :queue.new(), starting: %{}, stopping: %{}}
+    }
+  end
+
+  defp advance_lifecycle(%{lifecycle: :halted} = state), do: state
+
+  defp advance_lifecycle(state),
+    do: advance_lifecycle(state, :queue.len(state.runtime.queue))
+
+  # Bound each drain to the entries present at entry. A deferred batch can
+  # yield again, but must never spin the mailbox while no worker is active.
+  defp advance_lifecycle(state, 0), do: state
+
+  defp advance_lifecycle(state, remaining) do
+    if state.runtime.active do
+      state
+    else
+      case :queue.out(state.runtime.queue) do
+        {{:value, {:deferred, ops, finalizer}}, queue} ->
+          state
+          |> put_in([Access.key(:runtime), Access.key(:queue)], queue)
+          |> apply_ops(ops, finalizer)
+          |> advance_lifecycle(remaining - 1)
+
+        {{:value, entry}, queue} ->
+          state = put_in(state.runtime.queue, queue)
+          launch_lifecycle(state, entry)
+
+        {:empty, _} ->
+          state
+      end
+    end
+  end
+
+  defp lifecycle_outcome(state, %{kind: :start, name: name}, {:ok, pid}) do
+    monitor = Process.monitor(pid)
+
+    {:ok,
+     %{
+       state
+       | agents: Map.put(state.agents, name, pid),
+         monitors: Map.put(state.monitors, monitor, name)
+     }}
+  end
+
+  defp lifecycle_outcome(_state, %{kind: :start, name: name}, {:error, {:already_started, _}}),
+    do: {:error, {:member_name_conflict, name}}
+
+  defp lifecycle_outcome(state, %{kind: :stop, name: name, argument: pid}, result) do
+    cond do
+      result == :ok -> {:ok, state}
+      result == {:error, :not_found} and not Process.alive?(pid) -> {:ok, state}
+      result == {:error, :not_found} -> {:error, {:agent_not_running, name}}
+      true -> result
+    end
+  end
+
+  defp lifecycle_outcome(_state, _active, error), do: error
+
+  defp reserve_lifecycle(state, {id, _, :start, name, _, _, _}),
+    do: put_in(state.runtime.starting[name], id)
+
+  defp reserve_lifecycle(state, {id, _, :stop, name, pid, _, _}),
+    do: put_in(state.runtime.stopping[name], %{id: id, pid: pid})
+
+  defp release_lifecycle(state, %{kind: :start, name: name}),
+    do: update_in(state.runtime.starting, &Map.delete(&1, name))
+
+  defp release_lifecycle(state, %{kind: :stop, name: name}),
+    do: update_in(state.runtime.stopping, &Map.delete(&1, name))
+
+  defp reconcile_stopped_member(state, %{kind: :stop, name: name, argument: pid}, result) do
+    if state.agents[name] === pid and (result == :ok or not Process.alive?(pid)),
+      do: retire_agent(state, name),
+      else: state
+  end
+
+  defp reconcile_stopped_member(state, _, _), do: state
+
+  # Completion belongs to the batch, including when a nested rejection
+  # abandons its tail. Keep these actions at the executor boundary so a future
+  # suspended batch can carry them rather than running them when it yields.
+  defp finish_batch(state, {:then, first, rest}),
+    do: state |> finish_batch(first) |> finish_batch(rest)
+
+  defp finish_batch(state, :none), do: state
+
+  defp finish_batch(state, {:cancellation, token}),
+    do: maybe_finish_cancellation(state, token)
+
+  defp finish_batch(state, {:dispatch_rejected, agent, token, reason}) do
+    # Consult current ownership: replies, halt and installed cancellation win.
+    if Map.has_key?(state.pending, token) and not Map.has_key?(state.cancellations, token) do
+      {:ok, state} = reply_to_token(state, token, {:error, {:dispatch_rejected, agent, reason}})
+      state
+    else
+      state
+    end
+  end
+
+  defp apply_op_safe(op, state, finalizer) do
+    complete_op(apply_op(op, state), op, state, finalizer)
+  end
+
+  defp complete_op(result, op, state, finalizer) do
+    case result do
       {:ok, %{lifecycle: :halted} = next} ->
-        {:halt, next}
+        {:halt, finish_batch(next, finalizer)}
 
       {:ok, next} ->
         {:cont, next}
@@ -936,7 +1238,7 @@ defmodule GenAgentEnsemble.Server do
             "#{reason_kind(reason)}#{reason_detail(reason)}"
         )
 
-        handle_op_failure(op, reason, state)
+        handle_op_failure(op, reason, state, finalizer)
     end
   end
 
@@ -963,15 +1265,15 @@ defmodule GenAgentEnsemble.Server do
   # Child admission rejection arrives asynchronously after later ops may run. A malformed
   # operation was never a dispatch attempt, so it is skipped like any other
   # logged failure.
-  defp handle_op_failure(_op, :invalid_operation, state), do: {:cont, state}
+  defp handle_op_failure(_op, :invalid_operation, state, _finalizer), do: {:cont, state}
 
-  defp handle_op_failure({:dispatch, agent, _prompt, token}, reason, state) do
-    {:halt, reject_dispatch(state, agent, token, reason)}
+  defp handle_op_failure({:dispatch, agent, _prompt, token}, reason, state, finalizer) do
+    {:halt, reject_dispatch(state, agent, token, reason, finalizer)}
   end
 
   # Even a tuple with the wrong arity can identify the rejected child by its
   # first field. Non-tuples, empty tuples and non-string names are skipped.
-  defp handle_op_failure({:start, spec}, reason, state)
+  defp handle_op_failure({:start, spec}, reason, state, finalizer)
        when is_tuple(spec) and tuple_size(spec) > 0 and is_binary(elem(spec, 0)) do
     agent = elem(spec, 0)
 
@@ -983,16 +1285,16 @@ defmodule GenAgentEnsemble.Server do
           state.strategy_state
         ])
 
-      {:halt, %{state | strategy_state: strategy_state} |> apply_ops(ops)}
+      {:halt, %{state | strategy_state: strategy_state} |> apply_ops(ops, finalizer)}
     else
       {:cont, state}
     end
   end
 
-  defp handle_op_failure(_op, _reason, state), do: {:cont, state}
+  defp handle_op_failure(_op, _reason, state, _finalizer), do: {:cont, state}
 
-  defp reject_dispatch(state, agent, token, reason) do
-    state =
+  defp reject_dispatch(state, agent, token, reason, finalizer \\ :none) do
+    {ops, state} =
       if function_exported?(state.strategy_mod, :handle_dispatch_rejected, 4) do
         {ops, strategy_state} =
           call_strategy(state.strategy_mod, :handle_dispatch_rejected, [
@@ -1002,19 +1304,12 @@ defmodule GenAgentEnsemble.Server do
             state.strategy_state
           ])
 
-        %{state | strategy_state: strategy_state} |> apply_ops(ops)
+        {ops, %{state | strategy_state: strategy_state}}
       else
-        state
+        {[], state}
       end
 
-    # External strategies without the callback still get a terminal result.
-    # reply_to_token is conditional, so a strategy's own reply wins.
-    if Map.has_key?(state.pending, token) do
-      {:ok, state} = reply_to_token(state, token, {:error, {:dispatch_rejected, agent, reason}})
-      state
-    else
-      state
-    end
+    apply_ops(state, ops, {:then, {:dispatch_rejected, agent, token, reason}, finalizer})
   end
 
   # Operations are strategy output, so their shape is checked here rather than
@@ -1026,6 +1321,9 @@ defmodule GenAgentEnsemble.Server do
       start_agent(state, name, child_spec)
     end
   end
+
+  defp apply_op({:stop, name}, state) when is_map_key(state.runtime.stopping, name),
+    do: {:error, {:agent_not_running, name}}
 
   defp apply_op({:stop, name}, state) when is_binary(name) do
     case Map.fetch(state.agents, name) do
@@ -1092,7 +1390,7 @@ defmodule GenAgentEnsemble.Server do
     emit(
       :session,
       :halt,
-      %{duration_ms: elapsed_ms(state.session_started_at)},
+      %{duration_ms: elapsed_ms(state.runtime.session_started_at)},
       session_meta(state)
       |> Map.put(:outcome, :halted)
       |> Map.put(:reason_kind, :strategy_halt)
@@ -1106,6 +1404,7 @@ defmodule GenAgentEnsemble.Server do
         retire_cancellation(acc, token, op)
       end)
 
+    state = retire_lifecycle(state)
     state = release_cancellation_leases(state)
     Enum.each(state.monitors, fn {mref, _agent} -> Process.demonitor(mref, [:flush]) end)
 
@@ -1186,8 +1485,9 @@ defmodule GenAgentEnsemble.Server do
     kind, _reason -> {:error, {:start_exception, kind}}
   end
 
-  defp start_agent(state, name, _child_spec) when is_map_key(state.agents, name),
-    do: {:error, {:duplicate_sub_agent, name}}
+  defp start_agent(state, name, _child_spec)
+       when is_map_key(state.agents, name) or is_map_key(state.runtime.starting, name),
+       do: {:error, {:duplicate_sub_agent, name}}
 
   defp start_agent(state, name, child_spec) do
     case start_child(state.agent_supervisor, child_spec) do
@@ -1322,8 +1622,8 @@ defmodule GenAgentEnsemble.Server do
         }
       end)
 
-    # Strategy-generated stops/starts remain synchronous in this slice.
-    state |> apply_ops(ops) |> maybe_finish_cancellation(token)
+    # Cleanup may suspend; cancellation settlement uses captured request ownership.
+    apply_ops(state, ops, {:cancellation, token})
   end
 
   defp cancel_child(pid, ref, deadline) do
@@ -1826,6 +2126,9 @@ defmodule GenAgentEnsemble.Server do
 
   # Dispatch submits to the captured owned PID without a second lookup.
   # Named forwarding still has a lookup/send race (the separate #490 fence).
+  defp owned_member(state, name) when is_map_key(state.runtime.stopping, name),
+    do: {:error, {:agent_not_running, name}}
+
   defp owned_member(state, name) do
     case Map.fetch(state.agents, name) do
       {:ok, pid} ->

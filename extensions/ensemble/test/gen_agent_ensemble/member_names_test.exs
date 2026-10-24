@@ -426,7 +426,10 @@ defmodule GenAgentEnsemble.MemberNamesTest do
     assert {:ok, %{member_names: names}} = E.status(name)
     assert names == %{}
 
-    E.notify(name, {:ops, [{:start, spec}]})
+    {:ok, replacement_token} =
+      E.tell(name, "replace", ops: fn token -> [{:start, spec}, {:reply, token, :installed}] end)
+
+    assert E.await(name, replacement_token) == {:ok, :installed}
     assert {:ok, %{agents: ["w"]}} = E.status(name)
     replacement = GenAgent.whereis(E.member_name(name, "w"))
     assert is_pid(replacement) and replacement != old
@@ -562,7 +565,15 @@ defmodule GenAgentEnsemble.MemberNamesTest do
     before = :sys.get_state(server)
     old = before.agents["w"]
     [{mref, "w"}] = Map.to_list(before.monitors)
-    E.notify(name, {:ops, [{:stop, "w"}, {:start, echo_spec("w")}]})
+
+    {:ok, restarted} =
+      E.tell(name, "restart",
+        ops: fn token ->
+          [{:stop, "w"}, {:start, echo_spec("w")}, {:reply, token, :installed}]
+        end
+      )
+
+    assert E.await(name, restarted) == {:ok, :installed}
     assert {:ok, %{agents: ["w"]}} = E.status(name)
     state = :sys.get_state(server)
     new = state.agents["w"]
@@ -583,7 +594,14 @@ defmodule GenAgentEnsemble.MemberNamesTest do
     try do
       log =
         capture_log(fn ->
-          E.notify(name, {:ops, [{:stop, "w"}]})
+          {:ok, stopped} =
+            E.tell(name, "failed stop",
+              ops: fn token ->
+                [{:stop, "w"}, {:reply, token, :resolved}]
+              end
+            )
+
+          assert E.await(name, stopped) == {:ok, :resolved}
           assert {:ok, %{agents: ["w"]}} = E.status(name)
         end)
 

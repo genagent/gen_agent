@@ -9,8 +9,17 @@ defmodule GenAgentEnsemble.Strategy do
 
   Except for `c:init/1` and `c:handle_status/1`, callbacks return
   `{:ok, [op], strategy_state}`. The framework
-  applies the ops in order, updates strategy state, and waits for the
-  next event.
+  installs the returned strategy state once and applies the ops in batch order.
+  Runtime child start/shutdown supervisor waits suspend that batch in a lifecycle
+  worker. Other callbacks may run meanwhile; their independent operations can
+  interleave, while runtime starts and stops share one ordered lane. A start,
+  stop, dispatch or forward targeting a member currently reserved by a start or
+  stop waits, along with its remaining batch tail, until that reservation clears. Members named only
+  later in an unexecuted batch tail are not reserved. Custom strategies with
+  cross-batch dependencies on those future targets must sequence the operations
+  themselves. Resuming a batch uses current state and rechecks token and member
+  fences. Custom child-spec
+  construction remains synchronous, as do initialization and graceful shutdown.
 
   Callbacks run synchronously in the Ensemble Server process. A callback that
   blocks delays all calls handled by that server; a callback that raises or
@@ -85,7 +94,7 @@ defmodule GenAgentEnsemble.Strategy do
   Forward still uses a named core call: replacement between check and send
   remains possible.
 
-  Ops are applied sequentially. A synchronous ownership-guard rejection of a
+  Ops are applied sequentially within each batch. A synchronous ownership-guard rejection of a
   scoped dispatch ends the current op batch after notifying the strategy.
   Child admission rejection is asynchronous: later operations in the original
   batch, including sibling starts and dispatches, may already have run before
@@ -96,7 +105,11 @@ defmodule GenAgentEnsemble.Strategy do
   cannot target the absent agent. Strategies that record token state before
   dispatch should implement `handle_dispatch_rejected/4` to remove that token
   and advance any queued work. The framework guarantees a terminal error for
-  the token even when the callback is absent.
+  the token even when the callback is absent. This fallback runs after the
+  rejection callback batch completes or is abandoned, including nested rejection
+  and lifecycle waits. A callback reply or halt wins; installed cancellation
+  retains terminal ownership. Cancellation confirmation concerns captured request
+  ownership and does not promise that strategy cleanup has completed.
 
   If `handle_error/3` is absent, a failed turn closes its token with the
   backend error. If `handle_agent_down/3` is absent, each pending token

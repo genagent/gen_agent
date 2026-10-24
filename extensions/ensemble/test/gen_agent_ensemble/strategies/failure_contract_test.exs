@@ -85,7 +85,7 @@ defmodule GenAgentEnsemble.Strategies.FailureContractTest do
     assert {:ok, [{:reply_error, :first, :boom}], _} = Sup.handle_error("c", :boom, state)
     {:ok, _, state} = response(Sup, "c", "plan", state)
     {:ok, ops, _} = Sup.handle_error("w-2", :boom, state)
-    assert List.last(ops) == {:reply_error, :first, {"w-2", :boom}}
+    assert hd(ops) == {:reply_error, :first, {"w-2", :boom}}
   end
 
   test "Debate retains completed turns before backend failure and isolates successor" do
@@ -232,7 +232,7 @@ defmodule GenAgentEnsemble.Strategies.FailureContractTest do
              entry("w-10", :worker, 10, "ten")
            ]
 
-    assert Enum.all?(Enum.drop(ops, -1), &match?({:stop, _}, &1))
+    assert Enum.all?(tl(ops), &match?({:stop, _}, &1))
     assert state.partial == []
   end
 
