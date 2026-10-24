@@ -6,6 +6,20 @@
 
 * **core:** add `GenAgent.Client.notify/2` for best-effort notification to a captured local PID, rejecting an already dead PID without Registry lookup or replacement delivery.
 
+## [0.10.0](https://github.com/genagent/gen_agent/compare/v0.9.0...v0.10.0) (2026-10-24)
+
+
+### Features
+
+* **core:** add PID-targeted notification ([#522](https://github.com/genagent/gen_agent/issues/522)) ([7912bc7](https://github.com/genagent/gen_agent/commit/7912bc769c52f817c646b46735971df54eca26f2))
+
+
+### Bug Fixes
+
+* **ci:** build Forcola shim from source ([#513](https://github.com/genagent/gen_agent/issues/513)) ([b83dc7a](https://github.com/genagent/gen_agent/commit/b83dc7a04050180ba3919d59db420d49add0faef))
+* **ci:** invalidate stale path dependency build caches ([#510](https://github.com/genagent/gen_agent/issues/510)) ([6702fdb](https://github.com/genagent/gen_agent/commit/6702fdbcfffa260e3f44d0b51c62a9633511ec3b))
+* **ci:** resolve compatible published consumer set ([#508](https://github.com/genagent/gen_agent/issues/508)) ([e2c4351](https://github.com/genagent/gen_agent/commit/e2c435134a79d500dbed897059c51c48b12c2e80))
+
 ## [0.9.0](https://github.com/genagent/gen_agent/compare/v0.8.0...v0.9.0) (2026-10-23)
 
 
