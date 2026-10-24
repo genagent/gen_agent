@@ -287,10 +287,31 @@ while its pending entry retains capacity. Halt during the wait returns
 Terminal completion, admission rejection and captured-PID death settle physical
 ownership. Timeout or worker failure returns `:cancelled_unconfirmed` and
 transfers only unresolved refs into retained capacity leases. Consuming the
-cancelled result does not release those leases. Strategy callbacks and
-strategy-generated stop/start operations remain synchronous and can still block
-the server, outside the control deadline. Ordered asynchronous strategy
-operations are a subsequent slice; issue #221 remains unfinished.
+cancelled result does not release those leases.
+
+Runtime strategy-generated child start and shutdown supervisor waits run in
+lifecycle workers. Status, poll, inbox, await timers, admission, result evidence
+and unrelated cancellation controls remain responsive while those waits are held.
+Each callback batch retains operation order; independent batches can interleave.
+Runtime starts and stops share one ordered lane. A start, stop, dispatch or
+forward targeting a member currently reserved by a start or stop waits, along
+with its remaining batch tail, until that reservation clears. Members named only later in an unexecuted
+batch tail are not reserved. Custom strategies with cross-batch dependencies on
+those future targets must sequence the operations themselves. Rejection fallback
+runs after its callback batch finishes; a callback reply wins, and installed
+cancellation keeps ownership of its terminal result.
+
+Strategy callbacks, custom child-spec construction and telemetry handlers remain
+synchronous and can block the server. Initialization and graceful session shutdown
+still wait for owned children. Cancellation confirmation describes captured request
+ownership, not completion of strategy cleanup or settlement of remote work.
+
+Runtime `tell` and `notify` returns, and a subsequent `status`, may observe a
+pending lifecycle operation. Completions from a member being stopped may still
+reach the strategy before retirement. When cancellation has no in-flight refs,
+its reply can wait for the `handle_cancel` cleanup batch to finish or the
+five-second cancellation deadline, even though confirmation only describes
+captured request ownership. Cleanup can continue after that deadline.
 
 ### Halting
 

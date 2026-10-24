@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Runtime lifecycle continuations
+
+Runtime strategy-generated child start/shutdown supervisor waits now use lifecycle
+workers. Reads, await timers, admission, result evidence and unrelated cancellation
+controls remain responsive. Batch order is preserved; independent callback batches
+may interleave, with lifecycle work sharing one ordered lane. Rejection fallback
+waits for nested callback operations and respects installed cancellation.
+Only the member currently being started or stopped is reserved; custom strategies
+must sequence dependencies on members named later in an unexecuted batch tail.
+
+Strategy callbacks, custom child-spec construction and telemetry handlers remain
+synchronous. Initialization and graceful shutdown still wait for owned children.
+Cancellation confirmation covers captured request ownership, not strategy cleanup
+completion or remote provider settlement.
+
+Runtime `tell` and `notify` returns, and a subsequent `status`, may observe a
+pending lifecycle operation. Completions from a member being stopped may still
+reach the strategy before retirement. When cancellation has no in-flight refs,
+its reply can wait for the `handle_cancel` cleanup batch to finish or the
+five-second cancellation deadline, even though confirmation only describes
+captured request ownership. Cleanup can continue after that deadline.
+
 ### Cancellation control deadline
 
 Exact-PID cancellation and interruption attempts now share one five-second
@@ -13,8 +35,7 @@ deferred; duplicate cancellation returns `{:error, :cancelling}` and caller
 death does not abandon the operation. Reads, results, admissions and other
 cancellations remain available while controls wait. Terminal evidence settles
 ownership during the attempt; worker failure or expiry retains only unresolved
-refs. Strategy callbacks and strategy-generated stop/start operations remain
-synchronous and outside this budget. Full #221 responsiveness remains unfinished.
+refs. Strategy callbacks remain synchronous and outside this budget.
 
 Strategy replies and token-scoped dispatches cannot reopen a cancelling token.
 Captured-PID death confirms settlement without touching replacement members;
@@ -31,8 +52,7 @@ release capacity. Status reports the retained token/ref counts under admission.
 No prompt or response is stored in these ownership records; status formatting
 redacts the records. Evidence retirement emits no duplicate terminal telemetry.
 
-Full #221 responsiveness remains unfinished: strategy-generated stop/start
-operations remain synchronous and can block unrelated Ensemble commands. A control timeout is
+A control timeout is
 uncertainty, not proof that provider work stopped. Child death likewise does
 not prove remote provider settlement. These leases bound admitted token
 replacement, not custom-strategy fanout or total physical/provider work.

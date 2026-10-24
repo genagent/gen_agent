@@ -27,6 +27,15 @@ defmodule GenAgentEnsemble do
 
   See `GenAgentEnsemble.Strategy` for how to implement your own strategy.
 
+  Runtime child starts and stops use asynchronous lifecycle workers and retain
+  operation order within each callback batch. Independent batches may interleave.
+  A start, stop, dispatch or forward targeting a member currently reserved by a
+  start or stop waits, along with its remaining batch tail, until the reservation
+  clears. Members named only later in an unexecuted batch tail are not reserved.
+  Custom strategies with
+  cross-batch dependencies on those future targets must sequence the operations
+  themselves. See `cancel/2` for responsiveness and cleanup boundaries.
+
   ## Admission limits
 
   One gate in the session server covers every public `ask`, `tell` and
@@ -337,10 +346,20 @@ defmodule GenAgentEnsemble do
   rejection, or captured-PID death can confirm ownership settlement during the
   wait; expiry or worker failure retains only unresolved refs.
 
-  Strategy callbacks and strategy-generated stop/start operations still run
-  synchronously in the Ensemble server, outside the control budget, and may
-  block commands. Ordered asynchronous strategy operations remain follow-up
-  work; this does not fully resolve issue #221.
+  Runtime strategy-generated child starts and stops wait on the supervisor in
+  lifecycle workers. Reads, await timers, admission, result evidence and unrelated
+  cancellation controls remain responsive during those waits. Operations retain
+  their order within each callback batch; independent batches may interleave.
+  Runtime starts and stops share one ordered lane. A start, stop, dispatch or
+  forward targeting a member currently reserved by a start or stop waits, along
+  with its remaining batch tail, until that reservation clears. Members named only
+  later in an unexecuted batch tail are not reserved. Custom strategies with cross-batch
+  dependencies on those future targets must sequence the operations themselves.
+
+  Strategy callbacks, custom child-spec construction and telemetry handlers still
+  run synchronously and can block the server. Initialization and graceful session
+  shutdown still wait for the owned children. Cancellation confirmation concerns
+  captured request ownership, not completion of strategy cleanup or remote work.
 
   Returns `{:error, :already_finished}` for a retained result or a completion
   that wins the race, `{:error, :not_found}` for unknown/consumed/evicted tokens

@@ -108,9 +108,22 @@ A session accepts at most `max_pending_prompts` (default 1_000) calls to
 prompts, counting active and queued requests together. A call beyond either
 limit returns `{:error, {:overloaded, info}}` and does nothing else, so a
 batch submit larger than the limit must check each `tell` result or raise the
-limit. Capacity returns when each request finishes, fails, or is cancelled.
+limit. Unconfirmed cancellation retains capacity until the captured requests
+have terminal evidence; consuming the cancelled result does not release it.
 The `:admission` key of `E.status("name")` shows the current counters. See
 `GenAgentEnsemble` for the full contract and what it does not bound.
+
+Runtime child start/shutdown supervisor waits suspend only their operation batch.
+Status, poll, inbox, await timers and unrelated cancellation controls remain
+responsive. Independent callback batches may interleave; runtime starts and stops
+share one ordered lane. A start, stop, dispatch or forward targeting a member
+currently reserved by a start or stop waits, along with its remaining batch tail,
+until that reservation clears. Members named only later in an unexecuted batch tail are not reserved.
+Custom strategies with cross-batch dependencies on those future targets must
+sequence the operations themselves. Strategy callbacks and custom child-spec
+construction still run synchronously. Initialization and graceful shutdown still wait for owned children.
+Cancellation confirmation covers captured request ownership, not completion of
+strategy cleanup.
 
 **Peek at all sessions:**
 
