@@ -51,11 +51,12 @@ defmodule GenAgentEnsemble do
 
   A call is charged once, at admission, with `:erlang.external_size/1` of the
   original prompt (prompt options are not counted, since built-in strategies do
-  not retain them). The charge stays until the logical token reaches its
-  terminal result: success, error, cancellation (including
-  `{:ok, :cancelled_unconfirmed}`), dispatch rejection, or halt. Pipeline
-  stages, Debate and Consensus rounds, and Supervisor or Consensus fanout do not
-  change the charge, and capacity stays charged while a cancellation executes.
+  not retain them). The charge normally stays until the logical token reaches
+  a terminal result. An uncertain cancellation closes the logical token but
+  retains its count and byte charge until every unresolved captured request has
+  terminal completion, admission rejection, or captured-PID death evidence.
+  Admission acknowledgement alone does not release it. Pipeline stages, rounds
+  and fanout do not change the original charge.
   A caller's `ask/3` timeout does not release the work. Completed-result
   retention (`:max_completed_results`), `poll/2` and `inbox/1` do not affect it.
   Accepted requests are never evicted.
@@ -66,7 +67,9 @@ defmodule GenAgentEnsemble do
   outputs, fanout, child backend histories, and completed results are bounded
   separately or not at all.
 
-  `status/1` reports the live counters under `:admission`, and each rejection
+  `status/1` reports the charged counters under `:admission`, including
+  `:unresolved_cancelled_tokens` and `:unresolved_cancelled_refs` counts.
+  `:pending_tokens` lists only logically pending tokens. Each rejection
   emits `[:gen_agent_ensemble, :admission, :rejected]`; see
   `GenAgentEnsemble.Telemetry`.
 
@@ -318,8 +321,15 @@ defmodule GenAgentEnsemble do
   or `{:ok, :cancelled_unconfirmed}` when any child result is uncertain or
   unsupported. Both close the token with `{:error, :cancelled}` through the
   usual ask reply, tell completion, await, and poll/inbox paths. Late child
-  events are fenced. Acknowledgement covers BEAM/request cancellation, not
-  settlement of an external provider process.
+  events are fenced. Uncertain cancellation retains admission capacity until
+  terminal child evidence arrives; consuming its result does not release it.
+  Acknowledgement covers BEAM/request cancellation, not settlement of an
+  external provider process. A control timeout is uncertainty about that
+  request, not evidence that provider work stopped.
+
+  Currently child controls and strategy-generated child stops run synchronously
+  in the Ensemble server. A held callback can block unrelated commands until
+  those controls return. Responsive cancellation remains follow-up work.
 
   Returns `{:error, :already_finished}` for a retained result or a completion
   that wins the race, `{:error, :not_found}` for unknown/consumed/evicted tokens

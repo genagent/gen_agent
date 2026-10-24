@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Cancellation capacity ownership
+
+Unconfirmed cancellation still closes the logical token with `:cancelled`, but
+retains its original admission count/byte charge until all unresolved captured
+requests have terminal completion, admission rejection, or captured-PID death
+evidence. Admission alone and consuming/evicting the cancelled result do not
+release capacity. Status reports the retained token/ref counts under admission.
+No prompt or response is stored in these ownership records; status formatting
+redacts the records. Evidence retirement emits no duplicate terminal telemetry.
+
+This is a correctness prerequisite for #221, not responsive cancellation:
+child cancellation controls and strategy-generated child stops remain
+synchronous and can block unrelated Ensemble commands. A control timeout is
+uncertainty, not proof that provider work stopped. Child death likewise does
+not prove remote provider settlement. These leases bound admitted token
+replacement, not custom-strategy fanout or total physical/provider work.
+
 ### Core compatibility
 
 Ensemble requires GenAgent core `>= 0.9.0 and < 1.0.0` (`~> 0.9`).
