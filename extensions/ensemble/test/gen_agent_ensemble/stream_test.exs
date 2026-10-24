@@ -344,7 +344,7 @@ defmodule GenAgentEnsemble.StreamTest do
     assert_fenced(pid, name, old_refs)
   end
 
-  test "negative child cancellation acknowledgement drains a racing stream before completion" do
+  test "completion after the worker control barrier settles ownership without relaying a stream" do
     {name, pid} = start()
     {:ok, token} = E.tell_with_completion(name, "first", self(), stream_to: self())
     assert_receive {:stream_gate, "w", _task}
@@ -366,11 +366,13 @@ defmodule GenAgentEnsemble.StreamTest do
 
     child = GenAgent.whereis(GenAgentEnsemble.member_name(name, "w"))
     :ok = :sys.suspend(child)
-    :erlang.trace(pid, true, [:send])
+    :erlang.trace(pid, true, [:send, :set_on_spawn])
     tag = make_ref()
     send(pid, {:"$gen_call", {self(), tag}, {:cancel, token}})
-    assert_receive {:trace, ^pid, :send, {:"$gen_call", _, {:cancel_request, ^fake}}, ^child}
-    :erlang.trace(pid, false, [:send])
+    assert_receive {:trace, worker, :send, {:"$gen_call", _, {:cancel_request, ^fake}}, ^child}
+    assert worker != pid
+    assert :sys.get_state(pid).in_flight == %{}
+    :erlang.trace(pid, false, [:send, :set_on_spawn])
 
     send(
       pid,
@@ -385,9 +387,17 @@ defmodule GenAgentEnsemble.StreamTest do
     )
 
     :ok = :sys.resume(child)
-    assert_receive {^tag, {:error, :already_finished}}
-    event(name, token, "w", 0, :text, "racing")
-    assert {:ok, %Response{text: "won"}} = completion(name, token)
+    assert_receive {^tag, {:ok, :cancelled}}
+    assert completion(name, token) == {:error, :cancelled}
+    state = :sys.get_state(pid)
+    assert state.cancellation_leases == %{}
+    assert state.cancelled_refs == %{}
+    assert state.pending_prompt_bytes == 0
+    assert E.await(name, token) == {:error, :cancelled}
+    assert E.poll(name, token) == {:error, :cancelled}
+    assert E.poll(name, token) == {:error, :not_found}
+    refute_received {:gen_agent_ensemble, :event, ^name, ^token, _}
+    refute_received {:gen_agent_ensemble, :completion, ^name, ^token, _}
     assert_fenced(pid, name, %{fake => {member, token}, ref => {member, token}})
   end
 

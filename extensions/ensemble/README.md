@@ -273,13 +273,24 @@ Submission reserves a per-token ordinal even when the child rejects it; the
 `:dispatch, :rejected` event carries that ordinal and ref. Guard-time rejection
 has neither. Accepted dispatch ordinals can therefore have gaps.
 
-Cancellation still performs synchronous child controls, including before child
-admission. A held callback can block the Ensemble server for a five-second
-control timeout (and a further five seconds if interruption is needed), per
-reference. Reads and other commands queue behind that cancellation. Moving
-these controls off the server requires a follow-up cancellation state machine;
-this change does not fully resolve command responsiveness. Strategy callbacks
-and child stop operations can also block the server.
+Cancellation runs exact-PID/ref controls in monitored workers, including before
+child admission. All refs are fenced together and `handle_cancel/2` runs once
+before controls start, removing the token from strategy FIFO bookkeeping.
+Controls share one five-second absolute deadline across all references and any
+required interruption. Reads, results, admissions and other cancellations can
+proceed while controls wait. Duplicate cancellation returns
+`{:error, :cancelling}`; caller death does not abandon cancellation. Strategy replies and token-scoped
+dispatches for a cancelling token are rejected as unknown-token operations,
+while its pending entry retains capacity. Halt during the wait returns
+`{:error, {:halted, reason}}`; server termination exits the waiting call.
+
+Terminal completion, admission rejection and captured-PID death settle physical
+ownership. Timeout or worker failure returns `:cancelled_unconfirmed` and
+transfers only unresolved refs into retained capacity leases. Consuming the
+cancelled result does not release those leases. Strategy callbacks and
+strategy-generated stop/start operations remain synchronous and can still block
+the server, outside the control deadline. Ordered asynchronous strategy
+operations are a subsequent slice; issue #221 remains unfinished.
 
 ### Halting
 

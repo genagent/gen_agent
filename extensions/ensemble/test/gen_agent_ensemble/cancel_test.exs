@@ -12,6 +12,25 @@ defmodule GenAgentEnsemble.CancelTest do
     defdelegate handle_response(agent, response, state), to: Solo
   end
 
+  defmodule HeldBackend do
+    @behaviour GenAgent.Backend
+
+    @impl true
+    defdelegate start_session(opts), to: ControlledBackend
+
+    @impl true
+    defdelegate terminate_session(session), to: ControlledBackend
+
+    @impl true
+    def prompt(session, prompt) do
+      send(session[:observer], {:controlled_prompt, session[:tag], prompt, self()})
+
+      receive do
+        {:result, text} -> {:ok, [GenAgent.Event.new(:result, %{text: text})], session}
+      end
+    end
+  end
+
   defp spec(name) do
     {name, ControlledAgent, backend: ControlledBackend, observer: self(), tag: name}
   end
@@ -178,6 +197,90 @@ defmodule GenAgentEnsemble.CancelTest do
     send(next_b, {:result, "B"})
     assert_receive {:gen_agent_ensemble, :completion, ^name, ^next, {:ok, %Response{}}}
     refute_receive {:controlled_prompt, _, "removed", _}, 0
+    refute_receive {:gen_agent_ensemble, :completion, ^name, ^token, _}, 0
+  end
+
+  @tag timeout: 10_000
+  test "fanout controls share one deadline and preserve unresolved ownership" do
+    agents =
+      for agent <- ["a", "b"] do
+        {agent, ControlledAgent, backend: HeldBackend, observer: self(), tag: agent}
+      end
+
+    {name, pid} =
+      start(Consensus,
+        agents: agents,
+        verdict_parser: fn text -> {:ok, :yes, text} end
+      )
+
+    {:ok, token} = E.tell_with_completion(name, "held", self())
+    assert_receive {:controlled_prompt, "a", "held", a}
+    assert_receive {:controlled_prompt, "b", "held", b}
+    captured_refs = refs(pid, token)
+    assert length(captured_refs) == 2
+    observer = self()
+
+    # The protocol peer's mailbox is the barrier. Hold interruption past the
+    # real deadline, without sleeps or timing-dependent child callbacks.
+    :sys.replace_state(pid, fn state ->
+      contexts =
+        Map.new(state.dispatch_contexts, fn {ref, {started, ordinal, _, admission}} ->
+          {ref, {started, ordinal, observer, admission}}
+        end)
+
+      %{state | dispatch_contexts: contexts}
+    end)
+
+    cancel = Task.async(fn -> E.cancel(name, token) end)
+    assert_receive {:"$gen_call", from, {:cancel_request, first_ref}}
+    assert Enum.any?(captured_refs, fn {ref, _} -> ref == first_ref end)
+    assert_receive {:"$gen_call", second_from, {:cancel_request, second_ref}}
+    assert first_ref != second_ref
+    assert Enum.any?(captured_refs, fn {ref, _} -> ref == second_ref end)
+    op = :sys.get_state(pid).cancellations[token]
+    assert op.deadline > System.monotonic_time(:millisecond)
+    assert E.cancel(name, token) == {:error, :cancelling}
+    :gen_statem.reply(from, {:error, :current})
+    assert_receive {:"$gen_call", _from, {:interrupt_request, ^first_ref}}
+    # Both controls share the correlated absolute deadline.
+    assert :sys.get_state(pid).cancellations[token].deadline == op.deadline
+    send(pid, {:cancel_deadline, token, make_ref()})
+    assert E.poll(name, token) == {:ok, :pending}
+    assert Task.await(cancel, 6_000) == {:ok, :cancelled_unconfirmed}
+    :gen_statem.reply(second_from, {:ok, :cancelled})
+    refute_receive {:"$gen_call", _, {:cancel_request, _}}, 0
+    refute_receive {:"$gen_call", _, {:interrupt_request, _}}, 0
+
+    assert_receive {:gen_agent_ensemble, :completion, ^name, ^token, {:error, :cancelled}}
+    assert E.await(name, token, 0) == {:error, :cancelled}
+    assert {:ok, status} = E.status(name)
+    assert status.admission.unresolved_cancelled_refs == 2
+    assert status.admission.pending_count == 1
+    assert status.admission.pending_bytes == :erlang.external_size("held")
+    assert E.poll(name, token) == {:error, :cancelled}
+
+    # Release real children only after checking retained ownership. Trace each
+    # completion send so the following status call observes both late results.
+    for {agent, backend} <- [{"a", a}, {"b", b}] do
+      member = GenAgentEnsemble.member_name(name, agent)
+      [{child, _}] = Registry.lookup(GenAgent.Registry, member)
+      :erlang.trace(child, true, [:send])
+      send(backend, {:result, "late"})
+      assert_receive {:trace, ^child, :send, {:gen_agent, :completion, ^member, _, _}, ^pid}
+      :erlang.trace(child, false, [:send])
+    end
+
+    assert {:ok, status} = E.status(name)
+    assert status.admission.unresolved_cancelled_refs == 0
+    assert status.admission.pending_count == 0
+    assert status.admission.pending_bytes == 0
+
+    # Duplicate terminal events must not release capacity twice or notify again.
+    late(pid, name, captured_refs)
+    assert {:ok, status} = E.status(name)
+    assert status.admission.unresolved_cancelled_refs == 0
+    assert status.admission.pending_count == 0
+    assert status.admission.pending_bytes == 0
     refute_receive {:gen_agent_ensemble, :completion, ^name, ^token, _}, 0
   end
 
