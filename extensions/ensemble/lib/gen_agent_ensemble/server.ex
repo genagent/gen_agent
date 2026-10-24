@@ -366,15 +366,14 @@ defmodule GenAgentEnsemble.Server do
             do: %{state | stream_recipients: Map.put(state.stream_recipients, token, stream_to)},
             else: state
 
-        {ops, strategy_state} =
-          call_strategy(state.strategy_mod, :handle_tell, [
+        state =
+          run_strategy(state, :handle_tell, [
             prompt,
             opts,
             token,
             state.strategy_state
           ])
 
-        state = %{state | strategy_state: strategy_state} |> apply_ops(ops)
         {:reply, {:ok, token}, state}
 
       {:error, reason} ->
@@ -391,15 +390,14 @@ defmodule GenAgentEnsemble.Server do
         token = mint_token()
         state = start_token(state, token, :ask, {:ask, from}, charge)
 
-        {ops, strategy_state} =
-          call_strategy(state.strategy_mod, :handle_ask, [
+        state =
+          run_strategy(state, :handle_ask, [
             prompt,
             opts,
             token,
             state.strategy_state
           ])
 
-        state = %{state | strategy_state: strategy_state} |> apply_ops(ops)
         {:noreply, state}
 
       {:error, reason} ->
@@ -560,10 +558,7 @@ defmodule GenAgentEnsemble.Server do
   defp handle_cast_impl({:notify, event}, state) do
     state =
       if function_exported?(state.strategy_mod, :handle_notify, 2) do
-        {ops, strategy_state} =
-          call_strategy(state.strategy_mod, :handle_notify, [event, state.strategy_state])
-
-        %{state | strategy_state: strategy_state} |> apply_ops(ops)
+        run_strategy(state, :handle_notify, [event, state.strategy_state])
       else
         state
       end
@@ -859,14 +854,11 @@ defmodule GenAgentEnsemble.Server do
 
     state =
       if function_exported?(state.strategy_mod, :handle_agent_down, 3) do
-        {ops, strategy_state} =
-          call_strategy(state.strategy_mod, :handle_agent_down, [
-            agent,
-            reason,
-            state.strategy_state
-          ])
-
-        %{state | strategy_state: strategy_state} |> apply_ops(ops)
+        run_strategy(state, :handle_agent_down, [
+          agent,
+          reason,
+          state.strategy_state
+        ])
       else
         fail_unhandled_tokens(state, affected_tokens, {:agent_down, agent, reason})
       end
@@ -876,14 +868,11 @@ defmodule GenAgentEnsemble.Server do
 
   defp handle_prompt_response(state, bare_agent, token, response) do
     if active_dispatch?(state, token) do
-      {ops, strategy_state} =
-        call_strategy(state.strategy_mod, :handle_response, [
-          bare_agent,
-          response,
-          state.strategy_state
-        ])
-
-      %{state | strategy_state: strategy_state} |> apply_ops(ops)
+      run_strategy(state, :handle_response, [
+        bare_agent,
+        response,
+        state.strategy_state
+      ])
     else
       state
     end
@@ -895,14 +884,11 @@ defmodule GenAgentEnsemble.Server do
         state
 
       function_exported?(state.strategy_mod, :handle_error, 3) ->
-        {ops, strategy_state} =
-          call_strategy(state.strategy_mod, :handle_error, [
-            bare_agent,
-            reason,
-            state.strategy_state
-          ])
-
-        %{state | strategy_state: strategy_state} |> apply_ops(ops)
+        run_strategy(state, :handle_error, [
+          bare_agent,
+          reason,
+          state.strategy_state
+        ])
 
       true ->
         Logger.warning(
@@ -982,7 +968,7 @@ defmodule GenAgentEnsemble.Server do
 
   # A halt ends every batch, including those a nested rejection callback
   # returns, so nothing runs in a terminal session.
-  defp apply_ops(state, ops, finalizer \\ :none)
+  defp apply_ops(state, ops, finalizer)
 
   defp apply_ops(%{lifecycle: :halted} = state, _ops, finalizer),
     do: finish_batch(state, finalizer)
@@ -1278,14 +1264,17 @@ defmodule GenAgentEnsemble.Server do
     agent = elem(spec, 0)
 
     if function_exported?(state.strategy_mod, :handle_start_rejected, 3) do
-      {ops, strategy_state} =
-        call_strategy(state.strategy_mod, :handle_start_rejected, [
-          agent,
-          reason,
-          state.strategy_state
-        ])
-
-      {:halt, %{state | strategy_state: strategy_state} |> apply_ops(ops, finalizer)}
+      {:halt,
+       run_strategy(
+         state,
+         :handle_start_rejected,
+         [
+           agent,
+           reason,
+           state.strategy_state
+         ],
+         finalizer
+       )}
     else
       {:cont, state}
     end
@@ -1294,22 +1283,18 @@ defmodule GenAgentEnsemble.Server do
   defp handle_op_failure(_op, _reason, state, _finalizer), do: {:cont, state}
 
   defp reject_dispatch(state, agent, token, reason, finalizer \\ :none) do
-    {ops, state} =
-      if function_exported?(state.strategy_mod, :handle_dispatch_rejected, 4) do
-        {ops, strategy_state} =
-          call_strategy(state.strategy_mod, :handle_dispatch_rejected, [
-            agent,
-            token,
-            reason,
-            state.strategy_state
-          ])
+    finalizer = {:then, {:dispatch_rejected, agent, token, reason}, finalizer}
 
-        {ops, %{state | strategy_state: strategy_state}}
-      else
-        {[], state}
-      end
-
-    apply_ops(state, ops, {:then, {:dispatch_rejected, agent, token, reason}, finalizer})
+    if function_exported?(state.strategy_mod, :handle_dispatch_rejected, 4) do
+      run_strategy(
+        state,
+        :handle_dispatch_rejected,
+        [agent, token, reason, state.strategy_state],
+        finalizer
+      )
+    else
+      apply_ops(state, [], finalizer)
+    end
   end
 
   # Operations are strategy output, so their shape is checked here rather than
@@ -1384,16 +1369,18 @@ defmodule GenAgentEnsemble.Server do
   # state that routed work to children is dropped. Results already stored stay
   # as they are. The process stays up so those results can be read; only the
   # owned tree is told to shut down.
-  defp halt_session(%{lifecycle: :halted} = state, _reason), do: state
+  defp halt_session(state, reason, reason_kind \\ :strategy_halt)
 
-  defp halt_session(state, reason) do
+  defp halt_session(%{lifecycle: :halted} = state, _reason, _reason_kind), do: state
+
+  defp halt_session(state, reason, reason_kind) do
     emit(
       :session,
       :halt,
       %{duration_ms: elapsed_ms(state.runtime.session_started_at)},
       session_meta(state)
       |> Map.put(:outcome, :halted)
-      |> Map.put(:reason_kind, :strategy_halt)
+      |> Map.put(:reason_kind, reason_kind)
     )
 
     emit_open_dispatches(state, :halted)
@@ -1601,10 +1588,23 @@ defmodule GenAgentEnsemble.Server do
         fence_cancelled_ref(acc, ref, target.agent, token)
       end)
 
-    {ops, strategy_state} =
-      call_strategy(state.strategy_mod, :handle_cancel, [token, state.strategy_state])
+    case invoke_strategy(state.strategy_mod, :handle_cancel, [token, state.strategy_state]) do
+      {:error, reason} ->
+        halt_callback_failure(state, reason)
 
-    state = %{state | strategy_state: strategy_state}
+      {:ok, ops, strategy_state} ->
+        continue_cancellation(
+          %{state | strategy_state: strategy_state},
+          ops,
+          refs,
+          token,
+          id,
+          deadline
+        )
+    end
+  end
+
+  defp continue_cancellation(state, ops, refs, token, id, deadline) do
     server = self()
 
     state =
@@ -2124,9 +2124,52 @@ defmodule GenAgentEnsemble.Server do
 
   # --- helpers ---
 
-  defp call_strategy(mod, fun, args) do
-    {:ok, ops, strategy_state} = apply(mod, fun, args)
-    {ops, strategy_state}
+  # Only custom code is caught. Validation and framework operations remain under
+  # the outer fatal guard so internal bugs cannot be mistaken for callback faults.
+  defp invoke_strategy(mod, callback, args) do
+    outcome =
+      try do
+        {:returned, apply(mod, callback, args)}
+      catch
+        kind, _reason -> {:failed, kind}
+      end
+
+    case outcome do
+      {:returned, {:ok, ops, strategy_state}} ->
+        if proper_ops?(ops),
+          do: {:ok, ops, strategy_state},
+          else: {:error, {:invalid_strategy_result, callback}}
+
+      {:returned, _} ->
+        {:error, {:invalid_strategy_result, callback}}
+
+      {:failed, kind} ->
+        {:error, {:strategy_callback_failed, callback, kind}}
+    end
+  end
+
+  defp proper_ops?([]), do: true
+  defp proper_ops?([_ | tail]), do: proper_ops?(tail)
+  defp proper_ops?(_), do: false
+
+  defp run_strategy(state, callback, args, finalizer \\ :none) do
+    case invoke_strategy(state.strategy_mod, callback, args) do
+      {:ok, ops, strategy_state} ->
+        apply_ops(%{state | strategy_state: strategy_state}, ops, finalizer)
+
+      {:error, reason} ->
+        halt_callback_failure(state, reason)
+    end
+  end
+
+  defp halt_callback_failure(state, {:strategy_callback_failed, callback, kind} = reason) do
+    Logger.error("[gen_agent_ensemble] strategy #{callback} failed (#{kind})")
+    halt_session(state, reason, :strategy_callback_failed)
+  end
+
+  defp halt_callback_failure(state, {:invalid_strategy_result, callback} = reason) do
+    Logger.error("[gen_agent_ensemble] strategy #{callback} failed (invalid_strategy_result)")
+    halt_session(state, reason, :invalid_strategy_result)
   end
 
   defp member_name(%__MODULE__{session_name: session}, bare_name),

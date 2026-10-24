@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Fixed
+
+- Runtime mutating strategy callback raises, throws, exits and malformed results
+  now halt through normal reply ownership while keeping the session readable.
+  Reasons are redacted. Session halt telemetry distinguishes deliberate halts,
+  callback failures and invalid results; callback error logs expose only the
+  callback atom and kind/category. Proper operation-list validation runs before installing
+  strategy state or applying any prefix. Completed results retain existing limits;
+  internal framework failures remain fatal.
+
 ### Runtime lifecycle continuations
 
 Runtime strategy-generated child start/shutdown supervisor waits now use lifecycle

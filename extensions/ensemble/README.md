@@ -319,7 +319,22 @@ A strategy's first `{:halt, reason}` ends the session logically and
 immediately: the rest of its operation batch is skipped, every pending token
 finishes with `{:error, {:halted, reason}}` (asks, completion recipients and
 registered `await/3` callers included), and the strategy is never called
-again. Results stored earlier are kept.
+again. Results stored earlier are kept under the retention limit below.
+
+Runtime mutating strategy callbacks also use this halt path when they raise,
+throw, exit, or return an invalid envelope or improper operation list. Reasons
+are `{:strategy_callback_failed, callback, kind}` (`:error`, `:throw`, `:exit`)
+or `{:invalid_strategy_result, callback}`, without the failure value. The
+session halt telemetry distinguishes deliberate `:strategy_halt` from
+`:strategy_callback_failed` and `:invalid_strategy_result`. Failure logs contain
+only the callback atom and kind/category. The full list spine is checked before
+installing returned strategy state or running any operation. Individual malformed
+operations retain their skip/log behavior.
+An admitted tell still returns its token; an ask receives the halt error.
+Strategy state is discarded. This provides no rollback of callback side effects,
+recovery from blocking callbacks or untrappable kills, or containment of internal
+framework failures. Initialization and read-only status have separate boundaries;
+see `GenAgentEnsemble.Strategy`.
 
 The ensemble process stays alive under the same PID and name so those results
 can be collected. `await/3`, `poll/2`, `inbox/1`, `cancel/2` and `status/1`

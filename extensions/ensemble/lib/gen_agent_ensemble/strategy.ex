@@ -22,9 +22,20 @@ defmodule GenAgentEnsemble.Strategy do
   construction remains synchronous, as do initialization and graceful shutdown.
 
   Callbacks run synchronously in the Ensemble Server process. A callback that
-  blocks delays all calls handled by that server; a callback that raises or
-  returns an unexpected shape stops the session, except for `c:handle_status/1`:
-  its failures return a status error and leave framework state and work intact.
+  blocks delays all calls handled by that server. Runtime mutating callbacks
+  that raise, throw, or exit halt the session with
+  `{:strategy_callback_failed, callback, kind}` (`:error`, `:throw`, or `:exit`).
+  An invalid return envelope or improper operation list halts it with
+  `{:invalid_strategy_result, callback}`. Failure values are never included.
+  The complete list spine is validated before installing strategy state or
+  applying any operation. The strategy state is discarded, never resumed.
+  The existing halt path retains completed results under `:max_completed_results`
+  and closes pending requests with `{:error, {:halted, reason}}`. A tell still
+  returns its admitted token; an ask receives the terminal error directly.
+  Initialization is a separate startup boundary. `c:handle_status/1` failures
+  return a status error and leave framework state and work intact.
+  This does not roll back callback side effects, contain untrappable kills,
+  or recover from blocking callbacks. Internal framework failures remain fatal.
   Optional callbacks and their individual fallbacks are documented below.
 
   See `GenAgentEnsemble.Strategies.Solo` for a minimal reference
@@ -150,8 +161,9 @@ defmodule GenAgentEnsemble.Strategy do
   names and tokens, the name or token. Skipping completes nothing on the
   strategy's behalf: a token the strategy meant to close stays pending until a
   later valid `:reply`, `:reply_error`, or rejected dispatch closes it. The
-  operation list must still be a list and callbacks must still return
-  `{:ok, ops, state}`; other shapes stop the session.
+  operation list must be a proper list and callbacks must return
+  `{:ok, ops, state}`; other shapes halt the session before any returned operation
+  runs, including valid prefixes of improper lists.
 
   ## Rejected starts
 

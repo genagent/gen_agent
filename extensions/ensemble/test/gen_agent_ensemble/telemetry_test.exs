@@ -1,6 +1,8 @@
 defmodule GenAgentEnsemble.TelemetryTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias GenAgent.Backends.Mock
   alias GenAgent.Event
   alias GenAgentEnsemble.{ControlledAgent, ControlledBackend}
@@ -21,6 +23,80 @@ defmodule GenAgentEnsemble.TelemetryTest do
 
     @impl true
     def handle_response(_agent, _response, state), do: {:ok, [], state}
+  end
+
+  defmodule FailingStrategy do
+    @behaviour GenAgentEnsemble.Strategy
+
+    def init(opts), do: {:ok, Map.new(opts), []}
+    def handle_ask(prompt, _opts, _token, state), do: fail(prompt, state)
+    def handle_tell(_prompt, _opts, _token, state), do: {:ok, [], state}
+    def handle_response(_agent, response, state), do: fail(response, state)
+    def handle_cancel(_token, state), do: fail(state.secret, state)
+
+    defp fail(secret, state) do
+      case state.mode do
+        :error -> raise secret
+        :throw -> throw(secret)
+        :exit -> exit(secret)
+        :invalid -> {:invalid, secret, state}
+      end
+    end
+  end
+
+  for callback <- [:handle_ask, :handle_cancel], mode <- [:error, :throw, :exit, :invalid] do
+    test "#{callback} #{mode} emits bounded failure diagnostics", %{name: name} do
+      assert_failure_diagnostics(name, unquote(callback), unquote(mode))
+    end
+  end
+
+  defp assert_failure_diagnostics(name, callback, mode) do
+    secret = "telemetry-callback-secret-sentinel"
+
+    category =
+      if mode == :invalid, do: :invalid_strategy_result, else: :strategy_callback_failed
+
+    reason =
+      if mode == :invalid,
+        do: {:invalid_strategy_result, callback},
+        else: {:strategy_callback_failed, callback, mode}
+
+    {:ok, _} =
+      GenAgentEnsemble.start_link(
+        name: name,
+        strategy: FailingStrategy,
+        opts: [mode: mode, secret: secret]
+      )
+
+    log =
+      capture_log(fn ->
+        if callback == :handle_ask do
+          assert {:error, {:halted, ^reason}} = GenAgentEnsemble.ask(name, secret)
+        else
+          assert {:ok, token} = GenAgentEnsemble.tell(name, secret)
+          assert {:error, {:halted, ^reason}} = GenAgentEnsemble.cancel(name, token)
+          assert {:error, {:halted, ^reason}} = GenAgentEnsemble.await(name, token)
+        end
+      end)
+
+    detail = if mode == :invalid, do: :invalid_strategy_result, else: mode
+    assert log =~ "[error]"
+    assert log =~ "[gen_agent_ensemble] strategy #{callback} failed (#{detail})"
+    refute log =~ secret
+    refute log =~ "FailingStrategy"
+    refute log =~ "telemetry_test.exs"
+
+    {_, metadata} =
+      assert_event([:session, :halt], %{
+        session: name,
+        outcome: :halted,
+        reason_kind: category
+      })
+
+    assert Map.keys(metadata) |> Enum.sort() == [:outcome, :reason_kind, :session, :strategy]
+    refute inspect(metadata) =~ secret
+    assert_event([:token, :error], %{session: name, reason_kind: :halted})
+    refute_received {:telemetry, [:gen_agent_ensemble, :session, :halt], _, _}
   end
 
   @events for scope <- [:session, :token, :dispatch],

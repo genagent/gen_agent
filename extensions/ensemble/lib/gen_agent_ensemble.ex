@@ -7,6 +7,14 @@ defmodule GenAgentEnsemble do
   is `GenAgentEnsemble.Strategies.Solo`, multi-agent patterns like
   Supervisor or Pool are other strategies.
 
+  Runtime mutating custom-strategy callback failures logically halt the session.
+  Catchable raises, throws and exits use `{:strategy_callback_failed, callback, kind}`;
+  invalid envelopes or improper operation lists use `{:invalid_strategy_result, callback}`.
+  Pending results become `{:error, {:halted, reason}}`; completed results remain
+  readable under the configured retention limit. Strategy state is discarded.
+  An admitted tell returns its token, while an ask receives the halt error.
+  See `GenAgentEnsemble.Strategy` for the callback boundary and limitations.
+
   ## Public API
 
       {:ok, pid} = GenAgentEnsemble.start_link(

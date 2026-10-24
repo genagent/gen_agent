@@ -18,10 +18,15 @@ defmodule GenAgentEnsemble.Telemetry do
   token, ref, prompt, or options. The measurements are numbers, and the two
   maximums are non-negative integers or `:infinity`.
 
-  A strategy halt emits exactly one `[:gen_agent_ensemble, :session, :halt]`
+  A deliberate strategy `{:halt, reason}` emits exactly one
+  `[:gen_agent_ensemble, :session, :halt]`
   (`outcome: :halted`, `reason_kind: :strategy_halt`), at the moment the halt
-  is applied. In that same step every open dispatch and every still-pending
-  token ends with one `:error` event whose `reason_kind` is `:halted`; work
+  is applied. Contained callback raises, throws and exits use
+  `reason_kind: :strategy_callback_failed`; malformed callback results use
+  `reason_kind: :invalid_strategy_result`. These failures also produce an error
+  log containing only the callback atom and failure kind/category, never the
+  failure value or stacktrace. Every halt closes each open dispatch and pending
+  token with one `:error` event whose `reason_kind` is `:halted`; work
   that already finished keeps its original event. Because a halted session
   stays alive, `[:gen_agent_ensemble, :session, :stop]` is not emitted until it
   is actually stopped or its owner exits, and it then reports no further
