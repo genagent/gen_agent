@@ -39,6 +39,13 @@ Submission reserves a per-token ordinal even when the child rejects it; the
 `:dispatch, :rejected` event carries that ordinal and ref. Guard-time rejection
 has neither. Accepted dispatch ordinals can therefore have gaps.
 
+## [0.7.3](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.7.2...gen_agent_ensemble-v0.7.3) (2026-10-24)
+
+
+### Bug Fixes
+
+* **ensemble:** retain capacity after uncertain cancellation ([#516](https://github.com/genagent/gen_agent/issues/516)) ([e931e11](https://github.com/genagent/gen_agent/commit/e931e11b090ff4113c6b66dc265bec3beb40fb80))
+
 ## [0.7.2](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.7.1...gen_agent_ensemble-v0.7.2) (2026-10-24)
 
 

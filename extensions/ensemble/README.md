@@ -64,7 +64,7 @@ and 0.9.
 
 ```elixir
 def deps do
-  [{:gen_agent_ensemble, "~> 0.7.2"}] # x-release-please-version
+  [{:gen_agent_ensemble, "~> 0.7.3"}] # x-release-please-version
 end
 ```
 
