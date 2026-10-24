@@ -508,6 +508,82 @@ defmodule GenAgentEnsemble.MemberNamesTest do
     assert_untouched(stop_key, stop_outsider)
   end
 
+  test "normal forward delivers to the owned member", %{name: name} do
+    start(name, [observed_spec("w")])
+    assert_receive {:member_started, "w", child}
+    assert :ok = E.notify(name, {:ops, [{:forward, "w", :normal_event}]})
+    assert_receive {:member_event, ^child, :normal_event}
+    assert GenAgent.status(E.member_name(name, "w")).agent_state.events == [:normal_event]
+  end
+
+  test "forward rejects a replacement present before validation", %{name: name} do
+    server = start(name, [echo_spec("w")])
+    %{agents: %{"w" => old}, monitors: monitors} = :sys.get_state(server)
+    [{mref, "w"}] = Map.to_list(monitors)
+
+    log =
+      capture_log(fn ->
+        attempt =
+          Task.async(fn ->
+            E.tell(name, "unused",
+              park: true,
+              ops: fn token ->
+                [{:forward, "w", :private_event}, {:reply, token, :finished}]
+              end
+            )
+          end)
+
+        assert_receive {:parked, ^server}
+        kill_while_parked(server, old, mref)
+        key = E.member_name(name, "w")
+        eventually(fn -> GenAgent.whereis(key) == nil end)
+        outsider = foreign(key)
+        send(server, :release_member_callback)
+        {:ok, token} = Task.await(attempt)
+        assert E.await(name, token) == {:ok, :finished}
+        assert_untouched(key, outsider)
+      end)
+
+    assert log =~ ~s(op {:forward, "w"} failed: agent_not_running)
+    refute log =~ "private_event"
+    refute log =~ inspect(old)
+  end
+
+  test "forward never retargets after successful ownership validation", %{name: name} do
+    server = start(name, [observed_spec("w")])
+    assert_receive {:member_started, "w", old}
+    %{monitors: monitors} = :sys.get_state(server)
+    [{mref, "w"}] = Map.to_list(monitors)
+    observer = self()
+
+    :sys.replace_state(server, fn state ->
+      Process.put(GenAgentEnsemble.ForwardBoundary, observer)
+      state
+    end)
+
+    log =
+      capture_log(fn ->
+        assert :ok = E.notify(name, {:ops, [{:forward, "w", :private_event}]})
+        assert_receive {:forward_validated, ^server, ^old, boundary}, 2_000
+
+        try do
+          kill_while_parked(server, old, mref)
+          key = E.member_name(name, "w")
+          eventually(fn -> GenAgent.whereis(key) == nil end)
+          outsider = foreign(key)
+          send(server, {:release_forward, boundary})
+          assert {:ok, %{agents: []}} = E.status(name)
+          assert_untouched(key, outsider)
+        after
+          send(server, {:release_forward, boundary})
+        end
+      end)
+
+    assert log =~ ~s(op {:forward, "w"} failed: not_alive)
+    refute log =~ "private_event"
+    refute log =~ inspect(old)
+  end
+
   test "captured child death confirms cancellation without touching the replacement", %{
     name: name
   } do

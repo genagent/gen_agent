@@ -169,10 +169,11 @@ defmodule GenAgentEnsemble do
   helper or `status/1`'s `:member_names` map. Ordinary standalone string names
   may coexist. The tuple family is reserved by convention, not access control.
 
-  Names address the current registration and are replacement-sensitive.
+  Public core name APIs address the current registration and are replacement-sensitive.
   Ensemble checks tracked ownership and Registry PID equality before dispatch
-  or forward, but that check and the subsequent named core call are **not
-  atomic**. A replacement between check and send remains possible. Stopping a
+  or forward, then sends only to the captured tracked owned PID without resolving
+  the name again. If that PID dies after the check, delivery is best effort;
+  no replacement receives the operation. Stopping a
   member targets its tracked PID through its owned supervisor. The helper and
   status map are not liveness certificates or immutable incarnation handles.
   Third-party JSON/exporter compatibility is not implied.

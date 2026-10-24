@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Forward operations now send through `GenAgent.Client.notify/2` to the owned
+  PID captured during validation, preventing delivery to a replacement registered
+  under the same member key. A dead captured target reports bounded `:not_alive`;
+  later death remains best effort. Dispatch uses the same captured-PID helper
+  while preserving asynchronous admission and exact-ref cancellation.
+
 - Runtime mutating strategy callback raises, throws, exits and malformed results
   now halt through normal reply ownership while keeping the session readable.
   Reasons are redacted. Session halt telemetry distinguishes deliberate halts,
@@ -69,9 +75,9 @@ replacement, not custom-strategy fanout or total physical/provider work.
 
 ### Core compatibility
 
-Ensemble requires GenAgent core `>= 0.9.0 and < 1.0.0` (`~> 0.9`).
-Nonblocking child dispatch uses `GenAgent.Client`, introduced in core 0.9;
-earlier cores cannot supply that module and are incompatible with this code.
+Ensemble requires GenAgent core `>= 0.10.0 and < 0.11.0` (`~> 0.10.0`).
+Forward operations use `GenAgent.Client.notify/2`, introduced in core 0.10.0;
+earlier cores cannot supply that function and are incompatible with this code.
 The older synchronous child-admission implementation admitted core 0.7, 0.8,
 and 0.9.
 
