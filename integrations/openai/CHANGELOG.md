@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.5.0...gen_agent_openai-v0.5.1) (2026-10-24)
+
+
+### Bug Fixes
+
+* **deps:** admit core 0.9 in published adapters ([#502](https://github.com/genagent/gen_agent/issues/502)) ([df18e37](https://github.com/genagent/gen_agent/commit/df18e3727a99b91e7d4c2f016a4371da3df2a3ce))
+
 ## [0.5.0](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.4.1...gen_agent_openai-v0.5.0) (2026-10-14)
 
 
