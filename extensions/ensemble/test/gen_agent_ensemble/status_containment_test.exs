@@ -241,6 +241,8 @@ defmodule GenAgentEnsemble.StatusContainmentTest do
         |> Map.merge(fields)
         |> Map.put(:admission, %{
           scope: :outstanding,
+          unresolved_cancelled_tokens: 0,
+          unresolved_cancelled_refs: 0,
           pending_count: 0,
           pending_bytes: 0,
           max_pending_prompts: state.max_pending_prompts,

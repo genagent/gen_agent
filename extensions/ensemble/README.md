@@ -241,9 +241,15 @@ pending and incoming numbers, and both maximums. Zero rejects every new call.
 Each accepted call is charged once with the `:erlang.external_size/1` of its
 original prompt and keeps that charge, through pipeline stages, rounds and
 fanout, until it reaches a terminal result (success, error, cancellation,
-rejection, or halt). A caller's `ask` timeout does not release it.
-`E.status(name)` reports the counters under `:admission`, and each rejection
-emits `[:gen_agent_ensemble, :admission, :rejected]`. This is a budget for the
+rejection, or halt). An uncertain cancellation closes the logical token but
+retains its count and byte charge until every unresolved captured request has
+terminal completion, admission rejection, or captured-PID death evidence.
+Admission acknowledgement alone, result consumption, and result eviction do
+not release this charge. A caller's `ask` timeout does not release it.
+`E.status(name)` reports charged `pending_count` and `pending_bytes` under
+`:admission`, including `unresolved_cancelled_tokens` and
+`unresolved_cancelled_refs` counts. `pending_tokens` lists only logically pending
+tokens. Each rejection emits `[:gen_agent_ensemble, :admission, :rejected]`. This is a budget for the
 original serialized prompts, not a memory limit or a limit on physical work:
 the mailbox, strategy state and options, generated prompts, intermediate
 outputs, backend histories, and completed results are bounded separately.

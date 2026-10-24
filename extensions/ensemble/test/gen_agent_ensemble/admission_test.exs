@@ -211,6 +211,8 @@ defmodule GenAgentEnsemble.AdmissionTest do
 
     assert admission(name) == %{
              scope: :outstanding,
+             unresolved_cancelled_tokens: 0,
+             unresolved_cancelled_refs: 0,
              pending_count: 0,
              pending_bytes: 0,
              max_pending_prompts: 1_000,
@@ -359,6 +361,8 @@ defmodule GenAgentEnsemble.AdmissionTest do
 
     assert status.admission == %{
              scope: :outstanding,
+             unresolved_cancelled_tokens: 0,
+             unresolved_cancelled_refs: 0,
              pending_count: 2,
              pending_bytes: total(["alpha", "beta"]),
              max_pending_prompts: 4,
@@ -723,7 +727,7 @@ defmodule GenAgentEnsemble.AdmissionTest do
     assert counters(name) == zero()
   end
 
-  test "an unconfirmed cancellation still closes the token and returns its charge" do
+  test "an unconfirmed cancellation closes the token but retains its charge until terminal evidence" do
     {name, pid} = start(Solo, [agent: spec("w")], max_pending_prompts: 1)
     {:ok, token} = E.tell_with_completion(name, "active")
     assert_receive {:controlled_prompt, "w", "active", backend}
@@ -744,12 +748,17 @@ defmodule GenAgentEnsemble.AdmissionTest do
     assert counters(name) == %{pending_count: 1, pending_bytes: size("active")}
     assert E.cancel(name, token) == {:ok, :cancelled_unconfirmed}
     assert_receive {:gen_agent_ensemble, :completion, ^name, ^token, {:error, :cancelled}}
-    assert counters(name) == zero()
+    assert counters(name) == %{pending_count: 1, pending_bytes: size("active")}
+    assert {:error, :cancelled} = E.poll(name, token)
+    for _ <- 1..3, do: assert({:error, {:overloaded, _}} = E.tell(name, "replacement"))
 
+    send(pid, {:gen_agent, :admission, :ignored, fake, :ok})
+    assert counters(name) == %{pending_count: 1, pending_bytes: size("active")}
+    late(pid, name, [{fake, agent}, {ref, agent}])
+    assert counters(name) == zero()
     {:ok, next} = E.tell_with_completion(name, "next")
     send(backend, {:result, "late real result"})
     assert_receive {:controlled_prompt, "w", "next", next_backend}
-    late(pid, name, [{fake, agent}, {ref, agent}])
     assert counters(name) == %{pending_count: 1, pending_bytes: size("next")}
 
     send(next_backend, {:result, "ok"})

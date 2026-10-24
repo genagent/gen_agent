@@ -54,7 +54,14 @@ defmodule GenAgentEnsemble.Server do
     # %{gen_agent_ref => {agent_name, run_token}}
     :in_flight,
     # %{gen_agent_ref => {started_at, ordinal, captured_pid, admission}}
-    :dispatch_contexts
+    :dispatch_contexts,
+    # Minimal ownership retained after an uncertain logical cancellation.
+    # %{ref => {token, captured_pid, monitor_ref}}
+    cancelled_refs: %{},
+    # %{token => %{charge: non_neg_integer, refs: MapSet.t()}}
+    cancellation_leases: %{},
+    # %{monitor_ref => ref}; independent of member name/incarnation monitors
+    cancellation_monitors: %{}
   ]
 
   # --- public API (called via GenAgentEnsemble shim) ---
@@ -146,6 +153,9 @@ defmodule GenAgentEnsemble.Server do
         agents: :redacted,
         monitors: :redacted,
         stream_recipients: :redacted,
+        cancelled_refs: :redacted,
+        cancellation_leases: :redacted,
+        cancellation_monitors: :redacted,
         token_contexts: :redacted
     }
   end
@@ -479,7 +489,9 @@ defmodule GenAgentEnsemble.Server do
         # Merged last so a strategy cannot replace the authoritative fields.
         admission = %{
           scope: :outstanding,
-          pending_count: map_size(state.pending),
+          pending_count: charged_count(state),
+          unresolved_cancelled_tokens: map_size(state.cancellation_leases),
+          unresolved_cancelled_refs: map_size(state.cancelled_refs),
           pending_bytes: state.pending_prompt_bytes,
           max_pending_prompts: state.max_pending_prompts,
           max_pending_prompt_bytes: state.max_pending_prompt_bytes
@@ -532,6 +544,25 @@ defmodule GenAgentEnsemble.Server do
       end
 
     {:noreply, state}
+  end
+
+  # Logical cancellation has already emitted its terminal result/telemetry.
+  # Only terminal evidence retires this ownership; admission alone does not.
+  defp handle_info_impl({:gen_agent, :completion, _name, ref, _result}, state)
+       when is_map_key(state.cancelled_refs, ref) do
+    {:noreply, settle_cancelled_ref(state, ref)}
+  end
+
+  defp handle_info_impl({:gen_agent, :admission, _name, ref, {:error, _reason}}, state)
+       when is_map_key(state.cancelled_refs, ref) do
+    {:noreply, settle_cancelled_ref(state, ref)}
+  end
+
+  defp handle_info_impl({:DOWN, mref, :process, pid, _reason}, state)
+       when is_map_key(state.cancellation_monitors, mref) do
+    ref = Map.fetch!(state.cancellation_monitors, mref)
+    {_token, ^pid, ^mref} = Map.fetch!(state.cancelled_refs, ref)
+    {:noreply, settle_cancelled_ref(state, ref)}
   end
 
   # A terminal ref cannot be reopened by a later admission decision.
@@ -990,6 +1021,7 @@ defmodule GenAgentEnsemble.Server do
     )
 
     emit_open_dispatches(state, :halted)
+    state = release_cancellation_leases(state)
     Enum.each(state.monitors, fn {mref, _agent} -> Process.demonitor(mref, [:flush]) end)
 
     state = %{
@@ -1186,6 +1218,9 @@ defmodule GenAgentEnsemble.Server do
     if next.in_flight != state.in_flight or next.pending != state.pending do
       cancel_token(next, token, fenced?, confirmed?)
     else
+      state =
+        if acknowledged?, do: next, else: retain_cancelled_ref(next, ref, token)
+
       state = fence_cancelled_ref(state, ref, agent, token)
       cancel_token(state, token, true, confirmed? and acknowledged?)
     end
@@ -1207,6 +1242,61 @@ defmodule GenAgentEnsemble.Server do
     end
   catch
     :exit, _ -> false
+  end
+
+  defp retain_cancelled_ref(state, ref, token) do
+    {_, _, pid, _} = Map.fetch!(state.dispatch_contexts, ref)
+    monitor = Process.monitor(pid)
+    charge = Map.fetch!(state.token_contexts, token).charge
+    lease = Map.get(state.cancellation_leases, token, %{charge: charge, refs: MapSet.new()})
+    lease = %{lease | refs: MapSet.put(lease.refs, ref)}
+
+    %{
+      state
+      | cancelled_refs: Map.put(state.cancelled_refs, ref, {token, pid, monitor}),
+        cancellation_leases: Map.put(state.cancellation_leases, token, lease),
+        cancellation_monitors: Map.put(state.cancellation_monitors, monitor, ref)
+    }
+  end
+
+  defp settle_cancelled_ref(state, ref) do
+    {{token, _pid, monitor}, refs} = Map.pop(state.cancelled_refs, ref)
+    Process.demonitor(monitor, [:flush])
+    lease = Map.fetch!(state.cancellation_leases, token)
+    remaining = MapSet.delete(lease.refs, ref)
+    settled? = MapSet.size(remaining) == 0
+
+    leases =
+      if settled?,
+        do: Map.delete(state.cancellation_leases, token),
+        else: Map.put(state.cancellation_leases, token, %{lease | refs: remaining})
+
+    %{
+      state
+      | cancelled_refs: refs,
+        cancellation_monitors: Map.delete(state.cancellation_monitors, monitor),
+        cancellation_leases: leases,
+        pending_prompt_bytes: state.pending_prompt_bytes - if(settled?, do: lease.charge, else: 0)
+    }
+  end
+
+  # Halt closes admission and hands remaining physical ownership to the dying
+  # owned tree. No lease can admit replacement work in a halted session.
+  defp release_cancellation_leases(state) do
+    Enum.each(state.cancellation_monitors, fn {monitor, _} ->
+      Process.demonitor(monitor, [:flush])
+    end)
+
+    charge =
+      Enum.reduce(state.cancellation_leases, 0, fn {_, lease}, sum -> sum + lease.charge end)
+
+    %{
+      state
+      | cancelled_refs: %{},
+        cancellation_leases: %{},
+        cancellation_monitors: %{},
+        pending_prompt_bytes: state.pending_prompt_bytes - charge
+    }
   end
 
   defp fence_cancelled_ref(state, ref, agent, token) do
@@ -1356,9 +1446,11 @@ defmodule GenAgentEnsemble.Server do
   # One gate for every outstanding public tell/ask, active or waiting. It runs
   # before a token exists, so a rejection leaves strategy state, children and
   # recipients untouched. The charge is the original prompt's serialized size,
-  # taken once here and returned when the token reaches a terminal result.
+  # taken once here and retained beyond uncertain cancellation until settlement.
+  defp charged_count(state), do: map_size(state.pending) + map_size(state.cancellation_leases)
+
   defp admit(state, kind, prompt) do
-    count = map_size(state.pending)
+    count = charged_count(state)
     bytes = state.pending_prompt_bytes
     incoming = :erlang.external_size(prompt)
     max_count = state.max_pending_prompts
@@ -1435,14 +1527,16 @@ defmodule GenAgentEnsemble.Server do
 
     emit(:token, event, %{duration_ms: elapsed_ms(context.started_at)}, metadata)
 
-    # The only place a token's capacity is returned. Callers reach it through
-    # reply_to_token, which pops the pending entry first, so a duplicate or
-    # late reply never gets here a second time.
+    # An uncertain cancellation transfers its charge to a minimal lease.
+    # Result consumption/eviction must not return that capacity.
+    retained? = Map.has_key?(state.cancellation_leases, token)
+
     %{
       state
       | token_contexts: Map.delete(state.token_contexts, token),
         stream_recipients: Map.delete(state.stream_recipients, token),
-        pending_prompt_bytes: state.pending_prompt_bytes - context.charge
+        pending_prompt_bytes:
+          state.pending_prompt_bytes - if(retained?, do: 0, else: context.charge)
     }
   end
 
