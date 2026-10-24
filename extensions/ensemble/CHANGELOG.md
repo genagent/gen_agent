@@ -93,6 +93,16 @@ Submission reserves a per-token ordinal even when the child rejects it; the
 `:dispatch, :rejected` event carries that ordinal and ref. Guard-time rejection
 has neither. Accepted dispatch ordinals can therefore have gaps.
 
+## [0.7.4](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.7.3...gen_agent_ensemble-v0.7.4) (2026-10-24)
+
+
+### Bug Fixes
+
+* **ensemble:** contain runtime strategy callback failures ([#521](https://github.com/genagent/gen_agent/issues/521)) ([0839cfe](https://github.com/genagent/gen_agent/commit/0839cfe55aa2d772669ab9a8a2edc68b1dc35108))
+* **ensemble:** keep cancellation responsive during child controls ([#518](https://github.com/genagent/gen_agent/issues/518)) ([4429296](https://github.com/genagent/gen_agent/commit/44292966d87d3edc2e09a53bbcac2ee76cd67b47))
+* **ensemble:** keep lifecycle waits off the server ([#519](https://github.com/genagent/gen_agent/issues/519)) ([29fdd57](https://github.com/genagent/gen_agent/commit/29fdd57cd78f336ceb0194085f60778e8c12f14b))
+* **ensemble:** pin forwarded events to owned PID ([657b724](https://github.com/genagent/gen_agent/commit/657b724896d3aedfadfad7ece05e6c96e4295172))
+
 ## [0.7.3](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.7.2...gen_agent_ensemble-v0.7.3) (2026-10-24)
 
 
