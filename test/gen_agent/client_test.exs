@@ -67,6 +67,11 @@ defmodule GenAgent.ClientTest do
     @impl true
     def handle_event(:halt, state), do: {:halt, state}
 
+    def handle_event(event, state) do
+      send(state.observer, {:notification, self(), event})
+      {:noreply, state}
+    end
+
     @impl true
     def post_turn(outcome, ref, state) do
       send(state.observer, {:post_turn, ref, outcome})
@@ -510,6 +515,43 @@ defmodule GenAgent.ClientTest do
     refute_received {:gen_agent, _, ^name, ^ref, _}
   end
 
+  test "notify delivers to the captured live PID without waiting for callbacks" do
+    {_name, pid} = start_agent(gate_pre_run: true)
+    assert_receive {:gate, :pre_run, ^pid}
+    caller = Task.async(fn -> Client.notify(pid, {:event, 1}) end)
+    assert :ok = Task.await(caller, 1_000)
+    send(pid, :release)
+    assert_receive {:notification, ^pid, {:event, 1}}
+  end
+
+  test "notify rejects a dead captured PID without delivering to its named replacement" do
+    {name, old} = start_agent()
+    assert :ok = Client.notify(old, :original)
+    assert_receive {:notification, ^old, :original}
+    monitor = Process.monitor(old)
+    assert :ok = GenAgent.stop(name)
+    assert_receive {:DOWN, ^monitor, :process, ^old, _}
+    {^name, replacement} = start_agent(name: name)
+    assert GenAgent.whereis(name) == replacement
+
+    caller = Task.async(fn -> Client.notify(old, :lost) end)
+    assert {:error, :not_alive} = Task.await(caller, 1_000)
+    # Same-sender barrier proves the replacement processed all preceding casts.
+    assert :ok = Client.notify(replacement, :barrier)
+    assert_receive {:notification, ^replacement, :barrier}
+    refute_received {:notification, ^replacement, :lost}
+  end
+
+  test "named notify still resolves a PID-valued Registry name" do
+    name = self()
+    {^name, pid} = start_agent(name: name)
+    assert :ok = GenAgent.notify(name, :named)
+    assert_receive {:notification, ^pid, :named}
+    refute_received {:"$gen_cast", {:notify, :named}}
+    assert :ok = Client.notify(name, :direct)
+    assert_received {:"$gen_cast", {:notify, :direct}}
+  end
+
   test "dead PID submission and controls never retarget a replacement under the same name" do
     {name, old} = start_agent()
     monitor = Process.monitor(old)
@@ -574,6 +616,14 @@ defmodule GenAgent.ClientTest do
 
     assert is_pid(remote) and node(remote) != node()
     assert_raise ArgumentError, fn -> Client.submit_with_completion(remote, "go") end
+
+    for target <- [:name, "name", {:pid, self()}, nil, 42, remote] do
+      assert_raise ArgumentError, "expected a local agent pid", fn ->
+        Client.notify(target, :event)
+      end
+    end
+
+    refute_received {:"$gen_cast", {:notify, _}}
 
     for operation <- [&Client.poll/2, &Client.cancel_request/2, &Client.interrupt_request/2] do
       assert_raise ArgumentError, fn -> operation.(remote, make_ref()) end

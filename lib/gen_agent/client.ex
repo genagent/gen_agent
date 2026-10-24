@@ -1,6 +1,6 @@
 defmodule GenAgent.Client do
   @moduledoc """
-  Correlated submission and exact-request controls for a captured local agent PID.
+  Notifications, correlated submission and exact-request controls for a captured local agent PID.
 
   `submit_with_completion/4` creates a request ref and sends once without
   waiting for the agent's callbacks or admission decision. `{:submitted, ref}`
@@ -24,7 +24,7 @@ defmodule GenAgent.Client do
   repeatedly replacing unresolved work. Do not retry a missing admission with
   a fresh submission; each invocation sends new work with a new ref.
 
-  PID controls are synchronous and retain native `:gen_statem.call/3` timeout
+  Exact-request PID controls are synchronous and retain native `:gen_statem.call/3` timeout
   and death exits. They cannot respond while an agent callback blocks. A
   callback may dispatch backend work before processing cancellation, even if
   cancellation was requested before admission arrived. Run blocking cleanup
@@ -98,6 +98,29 @@ defmodule GenAgent.Client do
     ref = make_ref()
     :gen_statem.cast(pid, {:submit_with_completion, ref, prompt, recipient, on_halt, stream_to})
     {:submitted, ref}
+  end
+
+  @doc """
+  Send an event asynchronously to exactly the captured local PID.
+
+  Raises `ArgumentError` unless the target is a local PID. Returns
+  `{:error, :not_alive}` if that PID is dead at the liveness check; otherwise
+  returns `:ok` after a direct cast using the core notification protocol.
+  There is no Registry lookup, retry or retargeting to a replacement.
+
+  The PID can die after the check and drop the event. The result is best
+  effort, not delivery or admission confirmation, and does not wait for
+  callbacks. No monitor or worker is created.
+  """
+  @spec notify(pid(), term()) :: :ok | {:error, :not_alive}
+  def notify(pid, event) do
+    validate_target!(pid)
+
+    if Process.alive?(pid) do
+      :gen_statem.cast(pid, {:notify, event})
+    else
+      {:error, :not_alive}
+    end
   end
 
   @doc """

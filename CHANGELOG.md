@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* **core:** add `GenAgent.Client.notify/2` for best-effort notification to a captured local PID, rejecting an already dead PID without Registry lookup or replacement delivery.
+
 ## [0.9.0](https://github.com/genagent/gen_agent/compare/v0.8.0...v0.9.0) (2026-10-23)
 
 

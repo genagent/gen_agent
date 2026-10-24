@@ -401,6 +401,7 @@ For the tradeoffs between wrappers, GenAgent, and Oban workers, see
 | `tell_with_completion/4` | Async prompt with a request-scoped completion message. |
 | `poll/3` | Check on a previously-issued `tell/3`. |
 | `GenAgent.Client.submit_with_completion/4` | Send to a captured local PID; return a ref without waiting for admission. |
+| `GenAgent.Client.notify/2` | Best-effort event cast to a captured local PID; rejects an already dead PID. |
 | `GenAgent.Client.poll/3`, `cancel_request/3`, `interrupt_request/3` | Synchronous exact-PID request controls. |
 | `notify/2` | Push an external event into `handle_event/2`. |
 | `notify_ack/3` | Wait for an in-memory notification admission result. |
@@ -505,6 +506,14 @@ uncertain. Release the monitor with `Process.demonitor(monitor, [:flush])`
 when the last obligation for that child ends. Agent stop invents no result.
 Submission does not wait for callbacks, but scheduling can let a callback
 run before the submitting function returns.
+
+`GenAgent.Client.notify(pid, event)` validates a local PID and sends the
+existing core notification cast directly to it, without Registry lookup or
+waiting for callbacks. It returns `{:error, :not_alive}` when the PID is dead
+at its liveness check, otherwise `:ok` after casting. Death after the check
+can still drop the event: this is best effort, not delivery or admission
+confirmation. It adds no monitor or worker. `GenAgent.notify(name, event)`
+continues to resolve Registry names, including PID-valued names.
 
 The captured PID never retargets a replacement under the same name.
 `GenAgent.Client.poll/3`, `cancel_request/3` and `interrupt_request/3`
