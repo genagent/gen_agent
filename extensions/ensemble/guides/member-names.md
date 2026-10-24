@@ -56,11 +56,12 @@ retirement follows the same failure path and can emit an `agent_not_running`
 warning during cleanup. Private crash/status diagnostics redact the ownership
 map now that it contains PIDs; use public status for tracked bare names and keys.
 
-The ownership check and subsequent named core call are **not atomic**. A
-replacement between check and send can still receive dispatch or forward
-work. Helper keys and status mappings address current registrations, not
-immutable incarnations. Fully pinned routing needs a separate public core/API
-solution. This fix does not copy private core protocols or depend on an
-unpublished API. Cancellation retains exact-request-ref semantics; replacement
-may produce a negative acknowledgement and `:cancelled_unconfirmed`, without
-global interruption or an external-provider settlement guarantee.
+After successful validation, dispatch and forward use that captured PID directly
+through `GenAgent.Client`; neither operation resolves the name again or retries
+against a replacement. Forward reports bounded `:not_alive` through the existing
+operation-failure path when the captured PID is dead at notification's liveness
+check. A later death can still drop the event: forwarding is best effort, not
+confirmation of delivery or admission, and never waits for the member callback.
+Helper keys and status mappings continue to address current registrations.
+Cancellation retains exact-request-ref semantics and captured-PID controls,
+without a global interruption or external-provider settlement guarantee.

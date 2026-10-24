@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Forward operations now send through `GenAgent.Client.notify/2` to the owned
+  PID captured during validation, preventing delivery to a replacement registered
+  under the same member key. A dead captured target reports bounded `:not_alive`;
+  later death remains best effort. Dispatch uses the same captured-PID helper
+  while preserving asynchronous admission and exact-ref cancellation.
+
 - Runtime mutating strategy callback raises, throws, exits and malformed results
   now halt through normal reply ownership while keeping the session readable.
   Reasons are redacted. Session halt telemetry distinguishes deliberate halts,

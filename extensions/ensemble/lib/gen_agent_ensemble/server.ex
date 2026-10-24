@@ -1352,8 +1352,8 @@ defmodule GenAgentEnsemble.Server do
   end
 
   defp apply_op({:forward, name, event}, state) when is_binary(name) do
-    with :ok <- owned_member(state, name),
-         :ok <- catch_exit(fn -> GenAgent.notify(member_name(state, name), event) end) do
+    with {:ok, pid} <- owned_member(state, name),
+         :ok <- notify_member(pid, event) do
       {:ok, state}
     end
   end
@@ -1496,6 +1496,16 @@ defmodule GenAgentEnsemble.Server do
     end
   end
 
+  # The barrier and its process-dictionary hook are absent from production builds.
+  if Mix.env() == :test do
+    defp notify_member(pid, event) do
+      GenAgentEnsemble.ForwardBoundary.pause(pid)
+      GenAgent.Client.notify(pid, event)
+    end
+  else
+    defp notify_member(pid, event), do: GenAgent.Client.notify(pid, event)
+  end
+
   defp dispatch(state, name, prompt, token) do
     opts =
       if Map.has_key?(state.stream_recipients, token),
@@ -1503,8 +1513,7 @@ defmodule GenAgentEnsemble.Server do
         else: [on_halt: :fail]
 
     result =
-      with :ok <- owned_member(state, name) do
-        pid = Map.fetch!(state.agents, name)
+      with {:ok, pid} <- owned_member(state, name) do
         {:submitted, ref} = GenAgent.Client.submit_with_completion(pid, prompt, self(), opts)
         {:submitted, ref, pid}
       end
@@ -2088,6 +2097,7 @@ defmodule GenAgentEnsemble.Server do
     do: System.convert_time_unit(System.monotonic_time() - started_at, :native, :millisecond)
 
   defp reason_kind(:cancelled), do: :cancelled
+  defp reason_kind(:not_alive), do: :not_alive
   defp reason_kind(:normal), do: :normal
   defp reason_kind(:timeout), do: :timeout
   defp reason_kind(:interrupted), do: :interrupted
@@ -2175,8 +2185,7 @@ defmodule GenAgentEnsemble.Server do
   defp member_name(%__MODULE__{session_name: session}, bare_name),
     do: GenAgentEnsemble.member_name(session, bare_name)
 
-  # Dispatch submits to the captured owned PID without a second lookup.
-  # Named forwarding still has a lookup/send race (the separate #490 fence).
+  # Both operations send to exactly the PID validated here, without re-resolution.
   defp owned_member(state, name) when is_map_key(state.runtime.stopping, name),
     do: {:error, {:agent_not_running, name}}
 
@@ -2184,7 +2193,7 @@ defmodule GenAgentEnsemble.Server do
     case Map.fetch(state.agents, name) do
       {:ok, pid} ->
         if GenAgent.whereis(member_name(state, name)) === pid,
-          do: :ok,
+          do: {:ok, pid},
           else: {:error, {:agent_not_running, name}}
 
       :error ->
