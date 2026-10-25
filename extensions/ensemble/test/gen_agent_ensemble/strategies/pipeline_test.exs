@@ -185,10 +185,9 @@ defmodule GenAgentEnsemble.Strategies.PipelineTest do
     assert {:error, {stage, :midstage_boom}} = GenAgentEnsemble.ask(name, "in", timeout: 5_000)
     assert stage == "#{name}-s2"
 
-    # Pipeline should be idle again.
-    Process.sleep(30)
-    {:ok, info} = GenAgentEnsemble.status(name)
-    assert info.phase == :idle
+    # Stages are sequential, so no other stage is in flight; the failing
+    # callback reset the phase before it replied.
+    assert {:ok, %{phase: :idle}} = GenAgentEnsemble.status(name)
   end
 
   test "stage death halts the session", %{name: name} do
@@ -403,17 +402,8 @@ defmodule GenAgentEnsemble.Strategies.PipelineTest do
     assert :sys.get_state(pid).strategy_state.responses == []
   end
 
-  defp await_completion(name, token, retries \\ 100) do
-    case GenAgentEnsemble.poll(name, token) do
-      {:ok, :completed, response} ->
-        response
-
-      {:ok, :pending} when retries > 0 ->
-        Process.sleep(20)
-        await_completion(name, token, retries - 1)
-
-      other ->
-        flunk("expected completion, got: #{inspect(other)}")
-    end
+  defp await_completion(name, token) do
+    assert {:ok, response} = GenAgentEnsemble.await(name, token, 5_000)
+    response
   end
 end

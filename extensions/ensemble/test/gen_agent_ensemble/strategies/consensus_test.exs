@@ -7,6 +7,8 @@ defmodule GenAgentEnsemble.Strategies.ConsensusTest do
   alias GenAgentEnsemble.Strategies.Consensus
   alias GenAgentEnsemble.TestAgent
 
+  @dispatch_stop [:gen_agent_ensemble, :dispatch, :stop]
+
   setup do
     name = "consensus-#{System.unique_integer([:positive])}"
     on_exit(fn -> safe_stop(name) end)
@@ -97,18 +99,18 @@ defmodule GenAgentEnsemble.Strategies.ConsensusTest do
     end
   end
 
-  defp await_completion(name, token, retries \\ 100) do
-    case GenAgentEnsemble.poll(name, token) do
-      {:ok, :completed, response} ->
-        response
+  defp await_completion(name, token) do
+    assert {:ok, response} = GenAgentEnsemble.await(name, token, 5_000)
+    response
+  end
 
-      {:ok, :pending} when retries > 0 ->
-        Process.sleep(20)
-        await_completion(name, token, retries - 1)
-
-      other ->
-        flunk("expected completion, got: #{inspect(other)}")
-    end
+  # Dispatch stop events are emitted by the server in the same message handler
+  # that runs the strategy's handle_response/3, so a status call made after
+  # receiving one observes that callback's effect.
+  defp observe_dispatch_stops do
+    ref = :telemetry_test.attach_event_handlers(self(), [@dispatch_stop])
+    on_exit(fn -> :telemetry.detach(ref) end)
+    ref
   end
 
   test "unanimous convergence on round 1", %{name: name} do
@@ -315,17 +317,25 @@ defmodule GenAgentEnsemble.Strategies.ConsensusTest do
         name,
         [
           {"a", [{:error, :boom}]},
-          {"b", [say("ok.\nVERDICT: APPROVE")]}
+          {"b", [gated_say(:b, "ok.\nVERDICT: APPROVE")]}
         ],
         threshold: :unanimous,
         rounds: 2
       )
 
+    stops = observe_dispatch_stops()
+
     assert {:error, {"a", :boom}} = GenAgentEnsemble.ask(name, "merge?", timeout: 5_000)
 
-    Process.sleep(30)
-    {:ok, info} = GenAgentEnsemble.status(name)
-    assert info.phase == :idle
+    # The failing callback resets the phase before it replies.
+    assert {:ok, %{phase: :idle, queued: 0}} = GenAgentEnsemble.status(name)
+
+    # b's vote lands after the run failed and does not restart it.
+    release(:b)
+
+    assert_receive {@dispatch_stop, ^stops, _, %{session: ^name, agent: "b"}}, 2_000
+
+    assert {:ok, %{phase: :idle, queued: 0}} = GenAgentEnsemble.status(name)
   end
 
   describe "tied thresholds" do
@@ -486,9 +496,8 @@ defmodule GenAgentEnsemble.Strategies.ConsensusTest do
 
       assert {:error, {"a", :first}} = GenAgentEnsemble.await(name, token, 5_000)
 
-      Process.sleep(30)
-      {:ok, info} = GenAgentEnsemble.status(name)
-      assert info.phase == :idle
+      # Every vote has already been handled, and the failing callback reset the phase.
+      assert {:ok, %{phase: :idle, queued: 0}} = GenAgentEnsemble.status(name)
     end
 
     test "fails when a later response makes the threshold impossible", %{name: name} do

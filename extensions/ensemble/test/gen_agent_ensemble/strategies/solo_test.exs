@@ -145,31 +145,13 @@ defmodule GenAgentEnsemble.Strategies.SoloTest do
     assert info.queued_tokens == 0
   end
 
-  defp await_completion(name, token, retries \\ 50) do
-    case GenAgentEnsemble.poll(name, token) do
-      {:ok, :completed, response} ->
-        response
-
-      {:ok, :pending} when retries > 0 ->
-        Process.sleep(20)
-        await_completion(name, token, retries - 1)
-
-      other ->
-        flunk("expected completion, got: #{inspect(other)}")
-    end
+  defp await_completion(name, token) do
+    assert {:ok, response} = GenAgentEnsemble.await(name, token, 5_000)
+    response
   end
 
-  defp await_error(name, token, retries \\ 50) do
-    case GenAgentEnsemble.poll(name, token) do
-      {:error, _} = err ->
-        err
-
-      {:ok, :pending} when retries > 0 ->
-        Process.sleep(20)
-        await_error(name, token, retries - 1)
-
-      other ->
-        flunk("expected error, got: #{inspect(other)}")
-    end
+  defp await_error(name, token) do
+    assert {:error, _} = err = GenAgentEnsemble.await(name, token, 5_000)
+    err
   end
 end

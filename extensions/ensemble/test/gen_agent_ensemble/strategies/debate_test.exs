@@ -34,18 +34,9 @@ defmodule GenAgentEnsemble.Strategies.DebateTest do
 
   defp reply(text), do: fn _prompt -> [Event.new(:result, %{text: text})] end
 
-  defp await_completion(name, token, retries \\ 100) do
-    case GenAgentEnsemble.poll(name, token) do
-      {:ok, :completed, response} ->
-        response
-
-      {:ok, :pending} when retries > 0 ->
-        Process.sleep(20)
-        await_completion(name, token, retries - 1)
-
-      other ->
-        flunk("expected completion, got: #{inspect(other)}")
-    end
+  defp await_completion(name, token) do
+    assert {:ok, response} = GenAgentEnsemble.await(name, token, 5_000)
+    response
   end
 
   test "runs to the round cap and returns full transcript", %{name: name} do
@@ -210,9 +201,9 @@ defmodule GenAgentEnsemble.Strategies.DebateTest do
 
     assert {:error, :boom} = GenAgentEnsemble.ask(name, "topic", timeout: 5_000)
 
-    Process.sleep(30)
-    {:ok, info} = GenAgentEnsemble.status(name)
-    assert info.phase == :idle
+    # Turns are sequential, so no other turn is in flight; the failing callback
+    # reset the phase before it replied.
+    assert {:ok, %{phase: :idle, queued: 0}} = GenAgentEnsemble.status(name)
   end
 
   test "second tell queues behind the first", %{name: name} do

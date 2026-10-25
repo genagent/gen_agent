@@ -186,12 +186,12 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
     old_worker = GenAgent.whereis(worker_name)
     Process.exit(old_worker, :kill)
 
-    assert {:error, {:worker_down, :killed}} = await_outcome(name, first)
+    assert {:error, {:worker_down, :killed}} = GenAgentEnsemble.await(name, first, 2_000)
     assert_receive {:controlled_prompt, "worker", "second", second_task}, 2_000
     assert await_replacement(worker_name, old_worker) != old_worker
 
     send(second_task, {:result, "recovered"})
-    assert {:ok, %{text: "recovered"}} = await_outcome(name, second)
+    assert {:ok, %{text: "recovered"}} = GenAgentEnsemble.await(name, second, 2_000)
     {:ok, info} = GenAgentEnsemble.status(name)
     assert info.free == 1
     assert info.busy == 0
@@ -317,20 +317,6 @@ defmodule GenAgentEnsemble.Strategies.PoolTest do
         drain_prompts()
     after
       0 -> :ok
-    end
-  end
-
-  defp await_outcome(name, token, retries \\ 100) do
-    case GenAgentEnsemble.poll(name, token) do
-      {:ok, :pending} when retries > 0 ->
-        Process.sleep(20)
-        await_outcome(name, token, retries - 1)
-
-      {:ok, :completed, response} ->
-        {:ok, response}
-
-      other ->
-        other
     end
   end
 
