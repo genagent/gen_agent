@@ -148,7 +148,7 @@ defmodule GenAgent.WatcherGuideTest do
     :ok = GenAgent.notify_ack(name, {:pr_opened, "alice", "active"})
     assert_receive {:started, _, task}
     assert {:error, {:overloaded, %{limit: :bytes}}} = GenAgent.notify_ack(name, event)
-    assert GenAgent.runtime_snapshot(name).pending_notifications == 0
+    assert GenAgent.status(name).pending_notifications == 0
     send(task, :release)
     await(fn -> length(state(name).actions) == 1 end)
     assert state(name).pending == []

@@ -1,4 +1,4 @@
-defmodule GenAgent.RuntimeSnapshotTest do
+defmodule GenAgent.StatusTest do
   use ExUnit.Case, async: true
 
   alias GenAgent.Event
@@ -94,36 +94,42 @@ defmodule GenAgent.RuntimeSnapshotTest do
     name
   end
 
-  defp assert_bounded(snapshot) do
-    assert Map.keys(snapshot) |> Enum.sort() ==
+  defp assert_bounded(status) do
+    assert Map.keys(status) |> Enum.sort() ==
              [
+               :agent_state,
                :current_request,
+               :current_turn,
                :halted,
+               :name,
                :pending_notifications,
-               :pending_prompts,
-               :phase,
-               :self_chain_pending
+               :queued,
+               :self_chain_pending,
+               :state
              ]
 
-    if snapshot.current_request do
-      assert Map.keys(snapshot.current_request) |> Enum.sort() ==
-               [:attempt, :elapsed_ms, :origin, :ref, :watchdog_ms]
+    if status.current_turn do
+      assert Map.keys(status.current_turn) |> Enum.sort() ==
+               [:attempt, :elapsed_ms, :origin, :watchdog_ms]
     end
+
+    refute inspect(Map.delete(status, :agent_state)) =~ "secret-payload"
   end
 
-  test "idle snapshot omits callback and backend payloads" do
+  test "idle status has empty counts and no turn metadata" do
     name = start_agent([])
-    snapshot = GenAgent.runtime_snapshot(name)
+    snapshot = GenAgent.status(name)
 
     assert_bounded(snapshot)
 
-    assert snapshot == %{
-             phase: :idle,
+    assert Map.drop(snapshot, [:agent_state, :name]) == %{
+             state: :idle,
              halted: false,
-             pending_prompts: 0,
+             queued: 0,
              pending_notifications: 0,
              self_chain_pending: false,
-             current_request: nil
+             current_request: nil,
+             current_turn: nil
            }
   end
 
@@ -139,21 +145,21 @@ defmodule GenAgent.RuntimeSnapshotTest do
     assert {:ok, second_ref} = GenAgent.tell(name, "second")
     assert :ok = GenAgent.notify(name, :reconcile)
 
-    snapshot = GenAgent.runtime_snapshot(name)
+    snapshot = GenAgent.status(name)
     assert_bounded(snapshot)
-    assert snapshot.phase == :processing
+    assert snapshot.state == :processing
     assert snapshot.halted == false
-    assert snapshot.pending_prompts == 1
+    assert snapshot.queued == 1
     assert snapshot.pending_notifications == 1
     assert snapshot.self_chain_pending == false
-    assert snapshot.current_request.ref == first_ref
-    assert snapshot.current_request.origin == :tell
-    assert snapshot.current_request.watchdog_ms == 30_000
-    assert snapshot.current_request.elapsed_ms >= 0
+    assert snapshot.current_request == first_ref
+    assert snapshot.current_turn.origin == :tell
+    assert snapshot.current_turn.watchdog_ms == 30_000
+    assert snapshot.current_turn.elapsed_ms >= 0
 
-    # The old status API still returns the server's retained state, not
-    # task-local stream callback state from the blocked prompt.
-    assert GenAgent.status(name).agent_state.seen == []
+    # agent_state is the server's retained state, not task-local stream
+    # callback state from the blocked prompt.
+    assert snapshot.agent_state.seen == []
 
     send(first_task, :release)
     assert_receive {:decision, ^first_ref, :ok}
@@ -161,11 +167,12 @@ defmodule GenAgent.RuntimeSnapshotTest do
     assert {:ok, :completed, _} = GenAgent.poll(name, first_ref)
     assert {:ok, :completed, _} = GenAgent.poll(name, second_ref)
 
-    done = GenAgent.runtime_snapshot(name)
+    done = GenAgent.status(name)
     assert_bounded(done)
-    assert done.phase == :idle
+    assert done.state == :idle
     assert done.current_request == nil
-    assert done.pending_prompts == 0
+    assert done.current_turn == nil
+    assert done.queued == 0
     assert done.pending_notifications == 0
   end
 
@@ -175,14 +182,14 @@ defmodule GenAgent.RuntimeSnapshotTest do
     assert {:ok, first_ref} = GenAgent.tell(name, "first")
     assert_receive {:blocked, :first, first_task}
     assert :ok = GenAgent.notify(name, :halt)
-    assert GenAgent.runtime_snapshot(name).pending_notifications == 1
+    assert GenAgent.status(name).pending_notifications == 1
 
     send(first_task, :release)
     assert_receive {:decision, ^first_ref, :ok}
 
-    halted = GenAgent.runtime_snapshot(name)
+    halted = GenAgent.status(name)
     assert_bounded(halted)
-    assert halted.phase == :idle
+    assert halted.state == :idle
     assert halted.halted
     assert halted.self_chain_pending
     assert halted.current_request == nil
@@ -190,17 +197,17 @@ defmodule GenAgent.RuntimeSnapshotTest do
     assert :ok = GenAgent.resume(name)
     assert_receive {:blocked, :follow, follow_task}
 
-    resumed = GenAgent.runtime_snapshot(name)
+    resumed = GenAgent.status(name)
     assert_bounded(resumed)
-    assert resumed.phase == :processing
+    assert resumed.state == :processing
     refute resumed.halted
     refute resumed.self_chain_pending
-    assert resumed.current_request.origin == :self_chain
+    assert resumed.current_turn.origin == :self_chain
 
     send(follow_task, :release)
     assert_receive {:decision, _follow_ref, :ok}
     assert {:ok, :completed, _} = GenAgent.poll(name, first_ref)
-    assert GenAgent.runtime_snapshot(name).phase == :idle
+    assert GenAgent.status(name).state == :idle
   end
 
   test "ask and event-origin turns identify their source without caller payloads" do
@@ -208,21 +215,21 @@ defmodule GenAgent.RuntimeSnapshotTest do
 
     caller = Task.async(fn -> GenAgent.ask(name, "private prompt") end)
     assert_receive {:blocked, :ask, ask_task}
-    ask_snapshot = GenAgent.runtime_snapshot(name)
+    ask_snapshot = GenAgent.status(name)
     assert_bounded(ask_snapshot)
-    assert ask_snapshot.current_request.origin == :ask
+    assert ask_snapshot.current_turn.origin == :ask
     send(ask_task, :release)
     assert {:ok, %{text: "asked"}} = Task.await(caller)
     assert_receive {:decision, _ask_ref, :ok}
 
     assert :ok = GenAgent.notify(name, {:prompt, "event prompt"})
     assert_receive {:blocked, :event, event_task}
-    event_snapshot = GenAgent.runtime_snapshot(name)
+    event_snapshot = GenAgent.status(name)
     assert_bounded(event_snapshot)
-    assert event_snapshot.current_request.origin == :event
+    assert event_snapshot.current_turn.origin == :event
     send(event_task, :release)
     assert_receive {:decision, _event_ref, :ok}
-    assert GenAgent.runtime_snapshot(name).phase == :idle
+    assert GenAgent.status(name).state == :idle
   end
 
   test "an errored turn returns to an empty idle snapshot" do
@@ -231,11 +238,11 @@ defmodule GenAgent.RuntimeSnapshotTest do
     assert_receive {:decision, ^ref, {:error, :fixture_error}}
     assert {:error, :fixture_error} = GenAgent.poll(name, ref)
 
-    snapshot = GenAgent.runtime_snapshot(name)
+    snapshot = GenAgent.status(name)
     assert_bounded(snapshot)
-    assert snapshot.phase == :idle
+    assert snapshot.state == :idle
     assert snapshot.current_request == nil
-    assert snapshot.pending_prompts == 0
+    assert snapshot.queued == 0
     assert snapshot.pending_notifications == 0
   end
 end

@@ -94,7 +94,7 @@ defmodule GenAgent.InfoMessagesTest do
     assert_receive {:mock_blocked, :turn, task_pid}
 
     send(pid, :during_turn)
-    assert GenAgent.runtime_snapshot(name).pending_notifications == 1
+    assert GenAgent.status(name).pending_notifications == 1
     refute_receive {:info, :during_turn, _}, 0
 
     send(task_pid, {:mock_release, :turn})
@@ -124,7 +124,7 @@ defmodule GenAgent.InfoMessagesTest do
 
     send(task_pid, {:mock_release, :stale})
     assert_receive {:response, 0}
-    assert GenAgent.runtime_snapshot(name).phase == :idle
+    assert GenAgent.status(name).state == :idle
 
     send(pid, {task_ref, :late_result})
     send(pid, {:DOWN, task_ref, :process, task_pid, :late_failure})

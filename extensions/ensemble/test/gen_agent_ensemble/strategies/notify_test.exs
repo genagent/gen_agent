@@ -77,8 +77,8 @@ defmodule GenAgentEnsemble.Strategies.NotifyTest do
   # The turn stays gated throughout, so the phase must remain :processing.
   defp await_buffered_notifications(member_name, count, deadline \\ nil) do
     deadline = deadline || System.monotonic_time(:millisecond) + 2_000
-    snapshot = GenAgent.runtime_snapshot(member_name)
-    assert %{phase: :processing} = snapshot
+    snapshot = GenAgent.status(member_name)
+    assert %{state: :processing} = snapshot
 
     cond do
       snapshot.pending_notifications == count ->

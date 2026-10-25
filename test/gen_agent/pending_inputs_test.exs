@@ -93,7 +93,7 @@ defmodule GenAgent.PendingInputsTest do
     assert {:ok, second} = GenAgent.tell(name, "second")
     overloaded(GenAgent.tell(name, "third"), :prompts, :count)
     overloaded(GenAgent.ask(name, "third"), :prompts, :count)
-    assert GenAgent.runtime_snapshot(name).pending_prompts == 1
+    assert GenAgent.status(name).queued == 1
     assert {:ok, :pending} = GenAgent.poll(name, second)
 
     send(task, :release)
@@ -134,7 +134,7 @@ defmodule GenAgent.PendingInputsTest do
     {_first, task} = start_held(name)
     assert :ok = GenAgent.notify_ack(name, event)
     overloaded(GenAgent.notify_ack(name, {:update, 2}), :notifications, :count)
-    assert GenAgent.runtime_snapshot(name).pending_notifications == 1
+    assert GenAgent.status(name).pending_notifications == 1
 
     handler = "input-rejected-#{System.unique_integer([:positive])}"
     observer = self()
@@ -185,7 +185,7 @@ defmodule GenAgent.PendingInputsTest do
 
     assert Enum.count(outcomes, &match?({:ok, _}, &1)) == 3
     assert Enum.count(outcomes, &match?({:error, {:overloaded, _}}, &1)) == 17
-    assert GenAgent.runtime_snapshot(name).pending_prompts == 3
+    assert GenAgent.status(name).queued == 3
   end
 
   test "halt and resume preserve accepted work and replenish capacity" do

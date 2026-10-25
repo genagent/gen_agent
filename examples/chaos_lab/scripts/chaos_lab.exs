@@ -256,20 +256,20 @@ defmodule ChaosLab.Run do
     IO.inspect(prompts, label: "prompt overload")
 
     %{
-      phase: :processing,
-      pending_prompts: 2,
+      state: :processing,
+      queued: 2,
       pending_notifications: 5,
       self_chain_pending: false,
-      current_request: %{ref: ^ref}
+      current_request: ^ref
     } =
-      IO.inspect(GenAgent.runtime_snapshot(:chaos_i, 5_000), label: "runtime snapshot")
+      IO.inspect(Map.delete(GenAgent.status(:chaos_i, 5_000), :agent_state), label: "status")
 
     send(task, :release)
     observe({:gen_agent, :completion, :chaos_i, ^ref, {:ok, _}})
     pid = GenAgent.whereis(:chaos_i)
     observe({:response, ^pid, ^first, "queued one"})
     observe({:response, ^pid, ^second, "queued two"})
-    %{pending_prompts: 0, pending_notifications: 0} = GenAgent.runtime_snapshot(:chaos_i, 5_000)
+    %{queued: 0, pending_notifications: 0} = GenAgent.status(:chaos_i, 5_000)
     :ok = GenAgent.stop(:chaos_i)
   end
 

@@ -792,7 +792,7 @@ defmodule GenAgent.IntegrationTest do
       wait_until(fn -> GenAgent.status(name).halted end)
 
       caller = Task.async(fn -> GenAgent.ask(name, "queued") end)
-      wait_until(fn -> GenAgent.runtime_snapshot(name).pending_prompts == 1 end)
+      wait_until(fn -> GenAgent.status(name).queued == 1 end)
       assert Task.yield(caller, 0) == nil
 
       assert :ok = GenAgent.resume(name)

@@ -165,7 +165,7 @@ defmodule GenAgent.ServerTest do
       send(task, :release)
       assert_receive :halted
       assert status(pid).halted
-      assert :gen_statem.call(pid, :runtime_snapshot).self_chain_pending
+      assert :gen_statem.call(pid, :status).self_chain_pending
 
       assert :ok = :gen_statem.stop(pid, :normal, 1_000)
       assert {:error, {:agent_terminated, :normal}} = Task.await(caller)
@@ -198,8 +198,8 @@ defmodule GenAgent.ServerTest do
         assert {:ok, :pending} = poll(pid, ref)
         assert status(pid).current_request == ref
 
-        assert %{current_request: %{ref: ^ref, attempt: 2, origin: :tell}} =
-                 :gen_statem.call(pid, :runtime_snapshot)
+        assert %{current_request: ^ref, current_turn: %{attempt: 2, origin: :tell}} =
+                 :gen_statem.call(pid, :status)
 
         refute_receive {:gen_agent, :completion, _, ^ref, _}
         send(task, :release)
@@ -376,7 +376,7 @@ defmodule GenAgent.ServerTest do
 
         assert_receive {:retry_gate, :first, task, _}
         notify(pid, :halt)
-        assert :gen_statem.call(pid, :runtime_snapshot).pending_notifications == 1
+        assert :gen_statem.call(pid, :status).pending_notifications == 1
         send(task, :release)
         assert_receive {:retry_telemetry, [:gen_agent, :turn, :error], _}
         assert status(pid).halted
@@ -397,7 +397,7 @@ defmodule GenAgent.ServerTest do
             assert {:ok, :cancelled} = :gen_statem.call(pid, {:cancel_request, ref})
             refute_receive {:gen_agent, :completion, _, ^ref, _}
             resume(pid)
-            refute :gen_statem.call(pid, :runtime_snapshot).self_chain_pending
+            refute :gen_statem.call(pid, :status).self_chain_pending
 
           true ->
             if ref, do: assert({:ok, :pending} == poll(pid, ref))

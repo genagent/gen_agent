@@ -184,8 +184,8 @@ Enum.each(actions, fn a -> IO.puts(a.text) end)
 GenAgent.stop("ci-watcher")
 ```
 
-Use `runtime_snapshot/2` (timeout optional) to inspect queue counts without
-copying action history. Its current request ref can be passed to
+Use `status/2` (timeout optional) to inspect queue counts; its
+`agent_state` field carries the action history. Its current request ref can be passed to
 `interrupt_request/3` to interrupt the active turn. `tell_with_completion/4`
 and `cancel_request/3` apply to caller-owned prompts on a separate agent, not
 to this event-driven recipe. Notification admission is not completion.

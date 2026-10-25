@@ -394,7 +394,7 @@ defmodule GenAgent.ClientTest do
     assert {:gen_agent, :event, ^name, ^ref, %Event{kind: :error}} = next_message()
     assert_receive {:backend, "retry", retry}
     assert {:ok, :pending} = poll(pid, ref)
-    assert GenAgent.runtime_snapshot(name).current_request.ref == ref
+    assert GenAgent.status(name).current_request == ref
 
     send(
       retry,

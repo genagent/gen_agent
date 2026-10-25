@@ -64,7 +64,7 @@ down, retrying later, or reporting the rejection.
   Concurrent attempts take distinct positions in the rotation;
   arrival and completion order can differ. Rejections also consume a position.
 - **Pool-wide quiescence detection**: "all workers are idle and
-  their pending queues are empty" -- a loop over `runtime_snapshot/1`
+  their pending queues are empty" -- a loop over `status/1`
   that does not copy accumulated results. Stop submitting before waiting;
   this is not a barrier against concurrent submissions.
 
@@ -226,10 +226,10 @@ defmodule Pool do
   defp do_wait(%{workers: workers} = pool, deadline) do
     any_busy =
       Enum.any?(workers, fn w ->
-        snapshot = GenAgent.runtime_snapshot(w)
+        status = GenAgent.status(w)
 
-        snapshot.phase != :idle or snapshot.pending_prompts > 0 or
-          snapshot.pending_notifications > 0 or snapshot.self_chain_pending
+        status.state != :idle or status.queued > 0 or
+          status.pending_notifications > 0 or status.self_chain_pending
       end)
 
     cond do
@@ -296,8 +296,8 @@ so it does not create a result entry; use the returned ref to check that outcome
 ## Variations
 
 - **Work-stealing instead of round-robin.** Instead of assigning
-  the next task to `idx`, read each worker's `runtime_snapshot/1` and
-  pick the one with the smallest `pending_prompts` count, preferring
+  the next task to `idx`, read each worker's `status/1` and
+  pick the one with the smallest `queued` count, preferring
   idle workers. More balanced under uneven task durations but adds N
   snapshot calls per submit. These observations can race with other
   submitters, so overload handling is still required.

@@ -41,8 +41,8 @@ defmodule LogTriageTest do
     assert_receive {:note, note}
     # The synchronous snapshot is processed after handle_response and the
     # internal process-next event, so it also detects any unwanted extra turn.
-    assert %{phase: :idle, pending_notifications: 0, pending_prompts: 0} =
-             GenAgent.runtime_snapshot(name)
+    assert %{state: :idle, pending_notifications: 0, queued: 0} =
+             GenAgent.status(name)
 
     note
   end
@@ -55,7 +55,7 @@ defmodule LogTriageTest do
       assert :ok = GenAgent.notify(name, {:log, "duplicate", sample})
     end
 
-    assert GenAgent.runtime_snapshot(name).pending_notifications == 5
+    assert GenAgent.status(name).pending_notifications == 5
     send(first, :release)
     assert_receive {:note, first_note}
     assert first_note =~ "Incident: 1 reports across 1 fingerprints."
@@ -83,7 +83,7 @@ defmodule LogTriageTest do
       assert_receive {:drop, %{agent: ^name, reason: {:overloaded, ^info}}}
       assert :ok = GenAgent.notify(name, event)
       assert_receive {:drop, %{agent: ^name, reason: {:overloaded, ^info}}}
-      assert GenAgent.runtime_snapshot(name).pending_notifications == 1
+      assert GenAgent.status(name).pending_notifications == 1
       assert LogTriage.Sink.snapshot(sink).drops == 2
 
       # Other agents and prompt-queue rejections do not affect this counter.
@@ -116,7 +116,7 @@ defmodule LogTriageTest do
       assert :ok = LogTriage.Handler.log(event, config)
     end
 
-    assert GenAgent.runtime_snapshot(name).pending_notifications == 0
+    assert GenAgent.status(name).pending_notifications == 0
 
     for level <- [:error, :critical, :alert, :emergency] do
       assert :ok =
@@ -126,7 +126,7 @@ defmodule LogTriageTest do
                )
     end
 
-    assert GenAgent.runtime_snapshot(name).pending_notifications == 4
+    assert GenAgent.status(name).pending_notifications == 4
     send(first, :release)
     assert_receive {:note, _}
     assert_receive {:turn_started, prompt, second}
