@@ -12,8 +12,6 @@ defmodule GenAgent.Response do
   `from_events/2` can also build a response outside the agent lifecycle,
   including from an event list containing an `:error` event. It carries:
 
-    * `:prompt` -- the prompt actually sent to the backend after `pre_turn/2`
-      rewriting. It is `nil` for responses built outside an agent turn.
     * `:text` -- the full assembled assistant text for the turn.
     * `:final_message` -- the terminal text when provided, otherwise the
       last boundary-marked assistant message (or all text if no boundary
@@ -35,7 +33,6 @@ defmodule GenAgent.Response do
   alias GenAgent.Event
 
   @type t :: %__MODULE__{
-          prompt: String.t() | nil,
           text: String.t(),
           final_message: String.t() | nil,
           events: [Event.t()],
@@ -48,8 +45,7 @@ defmodule GenAgent.Response do
           model: String.t() | nil
         }
 
-  defstruct prompt: nil,
-            text: "",
+  defstruct text: "",
             final_message: nil,
             events: [],
             terminal: nil,

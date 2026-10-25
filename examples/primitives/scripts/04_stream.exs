@@ -47,21 +47,20 @@ end
 assert Enum.map(response.events, &{&1.kind, &1.data}) == expected
 assert :ok = GenAgent.stop(:stream)
 
-IO.puts("Lossless retention fails the turn when max_events_per_turn is exceeded.")
+IO.puts("Retention keeps a bounded prefix when max_events_per_turn is exceeded.")
 
 {:ok, _pid} =
   GenAgent.start_agent(StreamAgent,
     name: :overflow,
     backend: Primitives.ScriptedBackend,
     sink: self(),
-    max_events_per_turn: 2,
-    event_retention: :lossless
+    max_events_per_turn: 2
   )
 
-assert {:error,
-        {:event_capture_overflow,
-         %{max_events: 2, retained_events: 2, rejected_event_kind: :text}}} =
+assert {:ok, %{event_coverage: %{mode: :compact, retained_events: 2}} = response} =
          GenAgent.ask(:overflow, "one two three")
+
+assert length(response.events) == 2
 
 assert %{state: :idle} = GenAgent.status(:overflow, 5_000)
 assert :ok = GenAgent.stop(:overflow)

@@ -67,8 +67,8 @@ defmodule GenAgent.SessionCheckpointTest do
   defp session(name), do: :gen_statem.call(GenAgent.whereis(name), :get_backend_session)
   defp result, do: Event.new(:result, %{text: "ok"})
 
-  test "terminal error keeps the early ID for the next prompt in both capture modes" do
-    for mode <- [:compact, :lossless] do
+  test "terminal error keeps the early ID for the next prompt" do
+    for _ <- [:once] do
       script = fn
         "fail", %{checkpoint: checkpoint} ->
           Stream.map([:one], fn _ ->
@@ -80,7 +80,7 @@ defmodule GenAgent.SessionCheckpointTest do
           [result()]
       end
 
-      name = start_agent(script, event_retention: mode)
+      name = start_agent(script)
       assert {:error, :provider_failed} = GenAgent.ask(name, "fail")
       assert session(name).id == "cli-session"
       assert {:ok, _} = GenAgent.ask(name, "next")
@@ -154,25 +154,6 @@ defmodule GenAgent.SessionCheckpointTest do
     assert_receive :holding
     assert {:ok, :accepted} = GenAgent.interrupt_request(interrupted, ref)
     assert session(interrupted).id == nil
-  end
-
-  test "lossless capture overflow does not discard the checkpoint" do
-    script = fn
-      "overflow", %{checkpoint: checkpoint} ->
-        Stream.map(1..3, fn n ->
-          if n == 1, do: assert(:ok = checkpoint.("overflow-session"))
-          Event.new(:text, %{text: Integer.to_string(n)})
-        end)
-
-      "next", _ ->
-        [result()]
-    end
-
-    name = start_agent(script, event_retention: :lossless, max_events_per_turn: 2)
-    assert {:error, {:event_capture_overflow, _}} = GenAgent.ask(name, "overflow")
-    assert session(name).id == "overflow-session"
-    assert {:ok, _} = GenAgent.ask(name, "next")
-    assert_receive {:prompt_session, "next", "overflow-session"}
   end
 
   test "wrong caller and old request cannot checkpoint a successor" do

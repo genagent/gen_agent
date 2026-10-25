@@ -119,6 +119,9 @@ defmodule GenAgent.ClientTest do
 
   # Select across protocol kinds, rather than skipping an unexpected admission,
   # completion or DOWN while waiting for an expected one.
+  # Exact-PID poll through the core protocol; GenAgent.poll/3 resolves names.
+  defp poll(pid, ref), do: :gen_statem.call(pid, {:poll, ref}, 5_000)
+
   defp next_message do
     receive do
       {:gen_agent, _, _, _, _} = message -> message
@@ -170,15 +173,15 @@ defmodule GenAgent.ClientTest do
     accept(name, first)
     accept(name, second)
     assert_receive {:backend, "held", task}
-    assert {:ok, :pending} = Client.poll(pid, first)
-    assert {:ok, :pending} = Client.poll(pid, second)
+    assert {:ok, :pending} = poll(pid, first)
+    assert {:ok, :pending} = poll(pid, second)
     send(task, :release)
     complete(name, first, "held")
     assert_receive {:backend, "queued", queued}
     send(queued, :release)
     complete(name, second, "queued")
-    assert {:ok, :completed, %{text: "held"}} = Client.poll(pid, first)
-    assert {:ok, :completed, %{text: "queued"}} = Client.poll(pid, second)
+    assert {:ok, :completed, %{text: "held"}} = poll(pid, first)
+    assert {:ok, :completed, %{text: "queued"}} = poll(pid, second)
     empty_pending(pid)
   end
 
@@ -220,7 +223,7 @@ defmodule GenAgent.ClientTest do
       assert info.limit ==
                if(Keyword.has_key?(opts, :max_pending_prompts), do: :count, else: :bytes)
 
-      assert {:error, :not_found} = Client.poll(pid, rejected)
+      assert {:error, :not_found} = poll(pid, rejected)
       assert data(pid).stream_recipients == %{queued => self()}
       assert data(pid).pending_prompt_bytes == :erlang.external_size("queued")
       assert {:ok, :cancelled} = Client.cancel_request(pid, queued)
@@ -229,7 +232,7 @@ defmodule GenAgent.ClientTest do
       empty_pending(pid)
       send(task, :release)
       complete(name, active, "held")
-      assert {:error, :not_found} = Client.poll(pid, rejected)
+      assert {:error, :not_found} = poll(pid, rejected)
       refute_received {:gen_agent, _, ^name, ^rejected, _}
     end
   end
@@ -243,7 +246,7 @@ defmodule GenAgent.ClientTest do
     assert_receive {:backend, "larger than zero", task}
     send(task, :release)
     complete(name, ref, "larger than zero")
-    assert {:error, :not_found} = Client.poll(pid, ref)
+    assert {:error, :not_found} = poll(pid, ref)
     assert data(pid).tell_results == %{}
     empty_pending(pid)
   end
@@ -259,7 +262,7 @@ defmodule GenAgent.ClientTest do
       {:submitted, ref} = Client.submit_with_completion(pid, prompt, self(), stream_to: self())
       assert {:gen_agent, :completion, ^name, ^ref, {:error, ^reason}} = next_message()
       accept(name, ref)
-      assert {:error, ^reason} = Client.poll(pid, ref)
+      assert {:error, ^reason} = poll(pid, ref)
       refute_received {:backend, _, _}
       refute_received {:post_turn, ^ref, _}
       empty_pending(pid)
@@ -300,8 +303,8 @@ defmodule GenAgent.ClientTest do
     assert {:gen_agent, :admission, ^name, ^rejected, {:error, :halted}} = next_message()
     {:submitted, queued} = Client.submit_with_completion(pid, "queued")
     accept(name, queued)
-    assert {:ok, :pending} = Client.poll(pid, queued)
-    assert {:error, :not_found} = Client.poll(pid, rejected)
+    assert {:ok, :pending} = poll(pid, queued)
+    assert {:error, :not_found} = poll(pid, rejected)
     GenAgent.resume(name)
     assert_receive {:backend, "queued", task}
     send(task, :release)
@@ -325,7 +328,7 @@ defmodule GenAgent.ClientTest do
     complete(name, active, "held")
     assert {:gen_agent, :completion, ^name, ^halt, {:error, :pre_turn_halted}} = next_message()
     assert {:gen_agent, :completion, ^name, ^failed, {:error, :halted}} = next_message()
-    assert {:error, :halted} = Client.poll(pid, failed)
+    assert {:error, :halted} = poll(pid, failed)
     empty_pending(pid)
   end
 
@@ -349,7 +352,7 @@ defmodule GenAgent.ClientTest do
     assert_receive {:backend, "survivor", surviving_task}
     assert {:error, :not_current} = Client.interrupt_request(pid, active)
     assert {:ok, :cancelled} = Client.cancel_request(pid, cancelled)
-    assert {:ok, :pending} = Client.poll(pid, survivor)
+    assert {:ok, :pending} = poll(pid, survivor)
     send(surviving_task, :release)
     complete(name, survivor, "survivor")
     refute_received {:backend, "cancel", _}
@@ -390,7 +393,7 @@ defmodule GenAgent.ClientTest do
     assert {:gen_agent, :event, ^name, ^ref, %Event{kind: :text}} = next_message()
     assert {:gen_agent, :event, ^name, ^ref, %Event{kind: :error}} = next_message()
     assert_receive {:backend, "retry", retry}
-    assert {:ok, :pending} = Client.poll(pid, ref)
+    assert {:ok, :pending} = poll(pid, ref)
     assert GenAgent.runtime_snapshot(name).current_request.ref == ref
 
     send(
@@ -406,7 +409,7 @@ defmodule GenAgent.ClientTest do
     assert_receive {:backend, "queued", task}
     send(task, :release)
     complete(name, queued, "queued")
-    assert {:ok, :completed, _} = Client.poll(pid, ref)
+    assert {:ok, :completed, _} = poll(pid, ref)
     refute_received {:gen_agent, _, ^name, ^ref, _}
     empty_pending(pid)
   end
@@ -489,7 +492,7 @@ defmodule GenAgent.ClientTest do
     send(task, :release)
     assert_receive {:recipient, {:gen_agent, :completion, ^name, ^ref, {:ok, %{text: "go"}}}}
     assert_receive {:DOWN, ^monitor, :process, ^recipient, :normal}
-    assert {:ok, :completed, _} = Client.poll(pid, ref)
+    assert {:ok, :completed, _} = poll(pid, ref)
     refute_received {:gen_agent, _, ^name, ^ref, _}
   end
 
@@ -538,7 +541,7 @@ defmodule GenAgent.ClientTest do
     {^name, replacement} = start_agent(name: name)
     {:submitted, ref} = Client.submit_with_completion(old, "lost")
 
-    for operation <- [&Client.poll/2, &Client.cancel_request/2, &Client.interrupt_request/2] do
+    for operation <- [&Client.cancel_request/2, &Client.interrupt_request/2] do
       assert {:noproc, {:gen_statem, :call, _}} = catch_exit(operation.(old, ref))
     end
 
@@ -558,7 +561,7 @@ defmodule GenAgent.ClientTest do
       # The named API emits no new admission message.
       complete(name, named_ref, "named")
       assert {:error, :not_found} = GenAgent.poll(pid, named_ref)
-      assert {:ok, :completed, _} = Client.poll(pid, named_ref)
+      assert {:ok, :completed, _} = poll(pid, named_ref)
       {:submitted, pinned_ref} = Client.submit_with_completion(pid, "pinned")
       accept(name, pinned_ref)
       assert_receive {:backend, "pinned", pinned_task}
@@ -603,7 +606,7 @@ defmodule GenAgent.ClientTest do
 
     refute_received {:"$gen_cast", {:notify, _}}
 
-    for operation <- [&Client.poll/2, &Client.cancel_request/2, &Client.interrupt_request/2] do
+    for operation <- [&Client.cancel_request/2, &Client.interrupt_request/2] do
       assert_raise ArgumentError, fn -> operation.(remote, make_ref()) end
       assert_raise ArgumentError, fn -> operation.(self(), :bad_ref) end
     end

@@ -419,7 +419,7 @@ For the tradeoffs between wrappers, GenAgent, and Oban workers, see
 | `poll/3` | Check on a previously-issued `tell/3`. |
 | `GenAgent.Client.submit_with_completion/4` | Send to a captured local PID; return a ref without waiting for admission. |
 | `GenAgent.Client.notify/2` | Best-effort event cast to a captured local PID; rejects an already dead PID. |
-| `GenAgent.Client.poll/3`, `cancel_request/3`, `interrupt_request/3` | Synchronous exact-PID request controls. |
+| `GenAgent.Client.cancel_request/3`, `interrupt_request/3` | Synchronous exact-PID request controls. |
 | `notify/2` | Push an external event into `handle_event/2`. |
 | `notify_ack/3` | Wait for an in-memory notification admission result. |
 | `interrupt/1` | Cancel an in-flight turn. |
@@ -522,7 +522,7 @@ confirmation. It adds no monitor or worker. `GenAgent.notify(name, event)`
 continues to resolve Registry names, including PID-valued names.
 
 The captured PID never retargets a replacement under the same name.
-`GenAgent.Client.poll/3`, `cancel_request/3` and `interrupt_request/3`
+`GenAgent.Client.cancel_request/3` and `interrupt_request/3`
 use that PID and default to 5 seconds, with native call timeout/death exits.
 They still wait behind blocked callbacks. A timeout is uncertainty, not
 confirmed cancellation or permission to resubmit; before admission is
@@ -579,7 +579,7 @@ event terms by default. Override these positive-integer limits with
 or `child_spec/2`. Byte usage is the sum of `:erlang.external_size/1`
 for retained events, not total process memory.
 
-The default `event_retention: :compact` delivers every normalized event to
+GenAgent delivers every normalized event to
 `handle_stream_event/2` and continues to the terminal event. If the log
 limit is reached, `Response.events` holds the unchanged prefix and
 `Response.event_coverage` reports the observed, retained, and omitted
@@ -588,13 +588,8 @@ terminal event separately; `Response.text`, usage, and session ID are built
 from the full stream. Check coverage before using `Response.events` as a
 complete record. Full response text, terminal payloads, callback state, and
 provider decoder buffers can still grow beyond the event-log budget.
-
-Set `event_retention: :lossless` to require the previous complete-log
-contract. An event that exceeds either limit then ends the turn with
-`{:error, {:event_capture_overflow, diagnostics}}`; the rejected event is
-not delivered to `handle_stream_event/2`. The stream enumerable is halted,
-but settlement of provider subprocesses or remote work remains the
-backend's responsibility.
+An application that needs every event can retain them in
+`handle_stream_event/2`.
 
 ## Supervision
 

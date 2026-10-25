@@ -23,7 +23,6 @@ defmodule GenAgent.Server do
   @default_max_tell_result_bytes 8_388_608
   @default_max_events_per_turn 1_000
   @default_max_event_bytes_per_turn 1_048_576
-  @default_event_retention :compact
   @default_max_pending_prompts 1_000
   @default_max_pending_prompt_bytes 1_048_576
   @default_max_pending_notifications 1_000
@@ -50,7 +49,6 @@ defmodule GenAgent.Server do
       :max_tell_result_bytes,
       :max_events_per_turn,
       :max_event_bytes_per_turn,
-      :event_retention,
       :max_pending_prompts,
       :max_pending_prompt_bytes,
       :max_pending_notifications,
@@ -165,8 +163,6 @@ defmodule GenAgent.Server do
     max_event_bytes_per_turn =
       Keyword.get(opts, :max_event_bytes_per_turn, @default_max_event_bytes_per_turn)
 
-    event_retention = Keyword.get(opts, :event_retention, @default_event_retention)
-
     max_pending_prompts = Keyword.get(opts, :max_pending_prompts, @default_max_pending_prompts)
 
     max_pending_prompt_bytes =
@@ -183,7 +179,6 @@ defmodule GenAgent.Server do
     validate_pending_limit!(max_tell_result_bytes, :max_tell_result_bytes)
     validate_capture_limit!(max_events_per_turn, :max_events_per_turn)
     validate_capture_limit!(max_event_bytes_per_turn, :max_event_bytes_per_turn)
-    validate_event_retention!(event_retention)
     validate_pending_limit!(max_pending_prompts, :max_pending_prompts)
     validate_pending_limit!(max_pending_prompt_bytes, :max_pending_prompt_bytes)
     validate_pending_limit!(max_pending_notifications, :max_pending_notifications)
@@ -206,7 +201,6 @@ defmodule GenAgent.Server do
         max_tell_result_bytes: max_tell_result_bytes,
         max_events_per_turn: max_events_per_turn,
         max_event_bytes_per_turn: max_event_bytes_per_turn,
-        event_retention: event_retention,
         max_pending_prompts: max_pending_prompts,
         max_pending_prompt_bytes: max_pending_prompt_bytes,
         max_pending_notifications: max_pending_notifications,
@@ -1444,7 +1438,6 @@ defmodule GenAgent.Server do
     task_supervisor = data.task_supervisor
     max_events_per_turn = data.max_events_per_turn
     max_event_bytes_per_turn = data.max_event_bytes_per_turn
-    event_retention = data.event_retention
     name = data.name
     owner = self()
     stream_tag = if stream_to, do: make_ref()
@@ -1466,7 +1459,7 @@ defmodule GenAgent.Server do
              module,
              agent_state,
              prompt,
-             {max_events_per_turn, max_event_bytes_per_turn, event_retention},
+             {max_events_per_turn, max_event_bytes_per_turn},
              {owner, request_ref, stream_tag}
            )
          end)}
@@ -1488,7 +1481,6 @@ defmodule GenAgent.Server do
           kind: kind,
           stream_to: stream_to,
           stream_tag: stream_tag,
-          prompt: prompt,
           started_at: started_at,
           checkpoint_id: nil,
           checkpoint_error: nil
@@ -1536,7 +1528,7 @@ defmodule GenAgent.Server do
          module,
          agent_state,
          prompt,
-         {max_events_per_turn, max_event_bytes_per_turn, event_retention},
+         {max_events_per_turn, max_event_bytes_per_turn},
          {owner, request_ref, stream_tag}
        ) do
     started = System.monotonic_time(:millisecond)
@@ -1562,8 +1554,7 @@ defmodule GenAgent.Server do
           handler,
           agent_state,
           started,
-          {max_events_per_turn, max_event_bytes_per_turn},
-          event_retention
+          {max_events_per_turn, max_event_bytes_per_turn}
         )
 
       {:error, reason} ->
@@ -1578,46 +1569,7 @@ defmodule GenAgent.Server do
          module,
          agent_state,
          started,
-         {max_events, max_bytes},
-         :lossless
-       ) do
-    initial = {:ok, [], agent_state, 0, 0, nil}
-
-    result =
-      Enum.reduce_while(stream, initial, fn event, accumulator ->
-        capture_event(event, accumulator, module, max_events, max_bytes)
-      end)
-
-    case result do
-      {:overflow, limit, state, count, bytes, kind, event_bytes} ->
-        reason =
-          {:event_capture_overflow,
-           %{
-             limit: limit,
-             max_events: max_events,
-             max_bytes: max_bytes,
-             retained_events: count,
-             retained_bytes: bytes,
-             rejected_event_kind: kind,
-             rejected_event_bytes: event_bytes
-           }}
-
-        {:error, reason, backend_session, state}
-
-      {:ok, reversed_events, state, _count, _bytes, terminal} ->
-        finish_stream(reversed_events, terminal, backend, backend_session, state, started)
-    end
-  end
-
-  defp consume_stream(
-         stream,
-         backend,
-         backend_session,
-         module,
-         agent_state,
-         started,
-         {max_events, max_bytes},
-         :compact
+         {max_events, max_bytes}
        ) do
     initial = %{
       events: [],
@@ -1715,51 +1667,6 @@ defmodule GenAgent.Server do
     }
   end
 
-  defp capture_event(
-         %Event{} = event,
-         {:ok, events, state, count, bytes, _terminal},
-         module,
-         max_events,
-         max_bytes
-       ) do
-    event_bytes = :erlang.external_size(event)
-
-    cond do
-      count >= max_events ->
-        {:halt, {:overflow, :events, state, count, bytes, event.kind, event_bytes}}
-
-      event_bytes > max_bytes - bytes ->
-        {:halt, {:overflow, :bytes, state, count, bytes, event.kind, event_bytes}}
-
-      true ->
-        state = maybe_handle_stream_event(module, event, state)
-        terminal = if Event.terminal?(event), do: event, else: nil
-        accepted = {:ok, [event | events], state, count + 1, bytes + event_bytes, terminal}
-
-        if terminal, do: {:halt, accepted}, else: {:cont, accepted}
-    end
-  end
-
-  defp finish_stream(_events, nil, _backend, backend_session, agent_state, _started) do
-    {:error, :no_terminal_event, backend_session, agent_state}
-  end
-
-  defp finish_stream(_events, %Event{kind: :error, data: data}, _backend, session, state, _) do
-    {:error, Map.get(data, :reason, :unknown), session, state}
-  end
-
-  defp finish_stream(events, %Event{kind: :result, data: data}, backend, session, state, started) do
-    session = maybe_update_session(backend, session, data)
-
-    response =
-      Response.from_events(Enum.reverse(events),
-        duration_ms: System.monotonic_time(:millisecond) - started,
-        session_id: Map.get(data, :session_id)
-      )
-
-    {:ok, response, session, state}
-  end
-
   defp validate_capture_limit!(value, _name) when is_integer(value) and value > 0, do: :ok
 
   defp validate_capture_limit!(value, name) do
@@ -1772,12 +1679,6 @@ defmodule GenAgent.Server do
   defp validate_watchdog!(value) do
     raise ArgumentError,
           "watchdog_ms must be a positive integer or :infinity, got: #{inspect(value)}"
-  end
-
-  defp validate_event_retention!(mode) when mode in [:compact, :lossless], do: :ok
-
-  defp validate_event_retention!(_mode) do
-    raise ArgumentError, "event_retention must be :compact or :lossless"
   end
 
   defp validate_pending_limit!(value, _name) when is_integer(value) and value >= 0, do: :ok
@@ -2151,8 +2052,6 @@ defmodule GenAgent.Server do
   # ---------------------------------------------------------------------------
 
   defp finish_turn(data, current, response, new_session, new_agent_state) do
-    response = %{response | prompt: current.prompt}
-
     decision =
       data.agent_module.handle_response(current.request_ref, response, new_agent_state)
 
