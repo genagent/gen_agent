@@ -238,8 +238,7 @@ defmodule GenAgentEnsemble.MemberNamesTest do
     assert_receive {:member_telemetry, [:gen_agent_ensemble, :dispatch, :start], _,
                     %{session: ^name, agent: "w", member_name: ^key, ref: ref}}
 
-    assert_receive {:member_telemetry, [:gen_agent, :turn, :start], _,
-                    %{agent: ^key, ref: ^ref}}
+    assert_receive {:member_telemetry, [:gen_agent, :turn, :start], _, %{agent: ^key, ref: ^ref}}
 
     assert_receive {:member_telemetry, [:gen_agent_ensemble, :dispatch, :stop], _,
                     %{member_name: ^key, ref: ^ref}}
