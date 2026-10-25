@@ -225,8 +225,8 @@ defmodule GenAgent.ServerPropertyTest do
   end
 
   defp dispatch(%{active: nil, halted: false, queue: [entry | rest]} = model) do
-    snapshot = call(model, :runtime_snapshot)
-    assert %{ref: ref, origin: origin} = snapshot.current_request
+    snapshot = call(model, :status)
+    assert %{current_request: ref, current_turn: %{origin: origin}} = snapshot
     assert origin == entry.origin
     if entry.ref, do: assert(ref == entry.ref)
     token = model.token
@@ -285,14 +285,12 @@ defmodule GenAgent.ServerPropertyTest do
 
   defp assert_model(model) do
     assert System.monotonic_time(:millisecond) < model.deadline
-    snapshot = call(model, :runtime_snapshot)
     status = call(model, :status)
-    assert snapshot.pending_prompts == length(model.queue)
-    assert status.queued == snapshot.pending_prompts
-    assert snapshot.pending_notifications == length(model.notifications)
-    assert snapshot.halted == model.halted
-    refute snapshot.self_chain_pending
-    assert snapshot.phase == if(model.active, do: :processing, else: :idle)
+    assert status.queued == length(model.queue)
+    assert status.pending_notifications == length(model.notifications)
+    assert status.halted == model.halted
+    refute status.self_chain_pending
+    assert status.state == if(model.active, do: :processing, else: :idle)
     assert status.current_request == if(model.active, do: model.active.ref, else: nil)
 
     # Neither public observation API exposes bytes. Read only the counters,
@@ -333,8 +331,8 @@ defmodule GenAgent.ServerPropertyTest do
     # Idle while halted may retain prompts; interruption is not queue cancellation.
     # Unhalted quiescence has neither queued prompts nor buffered notifications.
     if is_nil(model.active) and not model.halted do
-      assert snapshot.pending_prompts == 0
-      assert snapshot.pending_notifications == 0
+      assert status.queued == 0
+      assert status.pending_notifications == 0
       assert counters.pending_prompt_bytes == 0
       assert counters.pending_notification_bytes == 0
     end

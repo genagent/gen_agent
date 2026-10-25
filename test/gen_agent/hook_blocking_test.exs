@@ -123,7 +123,7 @@ defmodule GenAgent.HookBlockingTest do
       assert GenAgent.notify(name, :ping) == :ok
 
       status = Task.async(fn -> GenAgent.status(name) end)
-      snapshot = Task.async(fn -> GenAgent.runtime_snapshot(name) end)
+      snapshot = Task.async(fn -> GenAgent.status(name) end)
       poll = Task.async(fn -> GenAgent.poll(name, make_ref()) end)
       notify_ack = Task.async(fn -> GenAgent.notify_ack(name, :ack) end)
       tell = Task.async(fn -> GenAgent.tell(name, "hello") end)
@@ -163,7 +163,7 @@ defmodule GenAgent.HookBlockingTest do
       assert GenAgent.notify(name, :ping) == :ok
 
       status = Task.async(fn -> GenAgent.status(name) end)
-      snapshot = Task.async(fn -> GenAgent.runtime_snapshot(name) end)
+      snapshot = Task.async(fn -> GenAgent.status(name) end)
       poll = Task.async(fn -> GenAgent.poll(name, make_ref()) end)
       notify_ack = Task.async(fn -> GenAgent.notify_ack(name, :ack) end)
       tell = Task.async(fn -> GenAgent.tell(name, "later") end)

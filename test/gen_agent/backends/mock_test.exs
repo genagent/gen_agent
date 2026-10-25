@@ -148,7 +148,7 @@ defmodule GenAgent.Backends.MockTest do
     {:ok, ref} = GenAgent.tell_with_completion(name, "work")
     assert_receive {:mock_blocked, :first, turn_pid}
     assert Mock.history(name) == ["work"]
-    assert GenAgent.runtime_snapshot(name).phase == :processing
+    assert GenAgent.status(name).state == :processing
 
     send(turn_pid, {:mock_release, :first})
     assert_receive {:gen_agent, :completion, ^name, ^ref, {:ok, response}}

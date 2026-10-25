@@ -17,7 +17,7 @@ defmodule GenAgent.ClientTargetTest do
     assert {:error, :not_found} = GenAgent.interrupt_request(name, ref)
     assert {:error, :not_found} = GenAgent.cancel_request(name, ref)
     assert {:error, :not_found} = GenAgent.status(name)
-    assert {:error, :not_found} = GenAgent.runtime_snapshot(name)
+    assert {:error, :not_found} = GenAgent.status(name)
 
     assert :ok = GenAgent.notify(name, :event)
     assert :ok = GenAgent.interrupt(name)

@@ -171,7 +171,7 @@ defmodule GenAgent.RequestCompletionTest do
     assert {:error, :halted} = GenAgent.poll(name, failed_a)
     assert {:error, :halted} = GenAgent.poll(name, failed_b)
     assert {:ok, :pending} = GenAgent.poll(name, surviving)
-    assert GenAgent.runtime_snapshot(name).pending_prompts == 1
+    assert GenAgent.status(name).queued == 1
     refute_receive {:started, "failed-a", _}, 0
     refute_receive {:started, "failed-b", _}, 0
 
@@ -302,7 +302,7 @@ defmodule GenAgent.RequestCompletionTest do
     spawn_ask.(:active, "held")
     assert_receive {:started, "held", _task}, 1_000
     spawn_ask.(:queued, "queued")
-    wait_until(fn -> GenAgent.runtime_snapshot(name).pending_prompts == 1 end, timeout: 300)
+    wait_until(fn -> GenAgent.status(name).queued == 1 end, timeout: 300)
 
     assert :ok = GenAgent.stop(name)
     assert_receive {:ask_result, :active, {:error, {:agent_terminated, :shutdown}}}, 1_000

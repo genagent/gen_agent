@@ -121,23 +121,18 @@ defmodule GenAgent.PoolGuideTest do
     assert Enum.frequencies(outcomes) == Map.new(pool.workers, &{&1, 100})
 
     Enum.each(pool.workers, fn worker ->
-      assert GenAgent.runtime_snapshot(worker).pending_prompts == 100
+      assert GenAgent.status(worker).queued == 100
     end)
   end
 
-  test "waiting uses metadata snapshots and waits through queued work" do
+  test "waiting polls status and waits through queued work" do
     pool = start_pool(1)
     assert {:ok, _} = Pool.submit(pool, "hold:first")
     assert_receive {:started, "hold:first", first_task}, 1_000
     assert {:ok, _} = Pool.submit(pool, "hold:second")
 
-    :erlang.trace_pattern({GenAgent, :runtime_snapshot, 1}, true, [:local])
     :erlang.trace_pattern({GenAgent, :status, 1}, true, [:local])
-
-    on_exit(fn ->
-      :erlang.trace_pattern({GenAgent, :runtime_snapshot, 1}, false, [:local])
-      :erlang.trace_pattern({GenAgent, :status, 1}, false, [:local])
-    end)
+    on_exit(fn -> :erlang.trace_pattern({GenAgent, :status, 1}, false, [:local]) end)
 
     waiter =
       Task.async(fn ->
@@ -148,14 +143,13 @@ defmodule GenAgent.PoolGuideTest do
 
     :erlang.trace(waiter.pid, true, [:call, {:tracer, self()}])
     send(waiter.pid, :go)
-    assert_receive {:trace, _, :call, {GenAgent, :runtime_snapshot, [_]}}, 1_000
+    assert_receive {:trace, _, :call, {GenAgent, :status, [_]}}, 1_000
     assert Task.yield(waiter, 0) == nil
     send(first_task, :release)
     assert_receive {:started, "hold:second", second_task}, 1_000
     assert Task.yield(waiter, 0) == nil
     send(second_task, :release)
     assert :ok = Task.await(waiter)
-    refute_receive {:trace, _, :call, {GenAgent, :status, [_]}}
   end
 
   test "stopping extras terminates their processes and retains the other workers" do

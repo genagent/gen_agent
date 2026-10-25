@@ -244,8 +244,8 @@ history are in-memory only. Repeated failures can grow both lists until a
 prompt exceeds the configured byte limit; cap or persist them in production.
 This example is driven only by events; do not mix unrelated `tell`/`ask`
 turns into its callbacks.
-Use `runtime_snapshot/2` (timeout optional) for queue counts and lifecycle
-inspection without copying the observation history. Its current request ref
+Use `status/2` (timeout optional) for queue counts and lifecycle
+inspection; its `agent_state` field carries the observation history. Its current request ref
 can be passed to `interrupt_request/3` to interrupt the active turn.
 `tell_with_completion/4` and `cancel_request/3` apply to caller-owned prompts
 on a separate agent, not to this event-driven recipe. Notification admission

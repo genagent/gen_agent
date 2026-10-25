@@ -48,18 +48,19 @@ assert {:error, {:overloaded, %{limit: :count, pending_count: 1, max_count: 1}}}
          GenAgent.tell(:requests, "too many")
 
 assert %{
-         phase: :processing,
-         pending_prompts: 1,
+         state: :processing,
+         queued: 1,
          pending_notifications: 0,
-         current_request: %{ref: ^active, origin: :tell, elapsed_ms: elapsed}
-       } = GenAgent.runtime_snapshot(:requests, 5_000)
+         current_request: ^active,
+         current_turn: %{origin: :tell, elapsed_ms: elapsed}
+       } = GenAgent.status(:requests, 5_000)
 
 assert elapsed >= 0
 
 IO.puts("A queued ref cannot interrupt the active turn; cancellation frees its queue slot.")
 assert {:ok, :cancelled} = GenAgent.cancel_request(:requests, queued, 5_000)
 assert {:error, :cancelled} = GenAgent.poll(:requests, queued, 5_000)
-assert %{pending_prompts: 0} = GenAgent.runtime_snapshot(:requests, 5_000)
+assert %{queued: 0} = GenAgent.status(:requests, 5_000)
 assert {:ok, :accepted} = GenAgent.interrupt_request(:requests, active, 5_000)
 assert_receive {:delivered, ^active, {:error, :interrupted}}, 5_000
 assert {:error, :interrupted} = GenAgent.poll(:requests, active, 5_000)
@@ -82,6 +83,6 @@ IO.puts(
 {:ok, slow} = GenAgent.tell_with_completion(:watchdog, "slow", self(), 5_000)
 assert_receive {:gen_agent, :completion, :watchdog, ^slow, {:error, :timeout}}, 5_000
 assert {:error, :timeout} = GenAgent.poll(:watchdog, slow, 5_000)
-assert %{phase: :idle, current_request: nil} = GenAgent.runtime_snapshot(:watchdog, 5_000)
+assert %{state: :idle, current_request: nil} = GenAgent.status(:watchdog, 5_000)
 assert :ok = GenAgent.stop(:watchdog)
 IO.puts("02_requests: ok")

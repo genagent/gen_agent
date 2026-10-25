@@ -115,7 +115,7 @@ defmodule GenAgent.SwitchboardGuideTest do
              Switchboard.inbox(name, ack: true)
 
     # Admission is synchronous, application is deferred until after handle_response.
-    assert GenAgent.runtime_snapshot(name).pending_notifications == 1
+    assert GenAgent.status(name).pending_notifications == 1
     assert GenAgent.status(name).agent_state.inbox_cursor == 0
     complete(name, second, task)
     assert {:ok, %{new_requests: [%{ref: ^second}]}} = Switchboard.inbox(name)
@@ -152,10 +152,10 @@ defmodule GenAgent.SwitchboardGuideTest do
     assert {:ok, first} = Switchboard.submit(name, "first")
     assert_receive {:started, "first", task}, 1_000
     assert :ok = Switchboard.halt(name)
-    assert GenAgent.runtime_snapshot(name).pending_notifications == 1
+    assert GenAgent.status(name).pending_notifications == 1
     assert {:ok, second} = Switchboard.submit(name, "second")
     complete(name, first, task)
-    assert %{halted: true, pending_prompts: 1} = GenAgent.runtime_snapshot(name)
+    assert %{halted: true, queued: 1} = GenAgent.status(name)
     assert {:ok, third} = Switchboard.submit(name, "third")
     assert {:ok, :pending} = Switchboard.poll(name, second)
     assert {:ok, :pending} = Switchboard.poll(name, third)
@@ -201,7 +201,6 @@ defmodule GenAgent.SwitchboardGuideTest do
     assert_receive {:trace_delivered, _, ^delivered}
     assert_receive {:trace, _, :call, {GenAgent, :tell, [^name, "traced"]}}
     refute_received {:trace, _, :call, {GenAgent, :status, _}}
-    refute_received {:trace, _, :call, {GenAgent, :runtime_snapshot, _}}
     assert_receive {:started, "traced", task}, 1_000
     complete(name, ref, task)
   end
