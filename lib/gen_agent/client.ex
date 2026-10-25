@@ -56,8 +56,8 @@ defmodule GenAgent.Client do
 
   On processing, the agent sends the recipient
   `{:gen_agent, :admission, name, ref, :ok | {:error, reason}}` at most once,
-  provided the handler reaches that send. Admission rejection (`:draining`,
-  `:halted` or overload) sends no completion and retains no request. An idle
+  provided the handler reaches that send. Admission rejection (`:halted` or
+  overload) sends no completion and retains no request. An idle
   `pre_turn/2` skip, halt, invalid return, crash or task dispatch failure is
   accepted work: its error completion can arrive **before** admission `:ok`.
   That completion proves acceptance; a later admission must not reopen it.

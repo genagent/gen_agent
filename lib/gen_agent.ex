@@ -135,9 +135,8 @@ defmodule GenAgent do
       interruption, or prompt-task exit ended a turn.
     * `{:overloaded, info}` -- a pending input or generated prompt exceeded
       a configured limit.
-    * `:cancelled`, `:halted`, `:draining` -- a queued request was cancelled,
-      a request using `on_halt: :fail` was rejected by a halt, or the agent
-      began draining before dispatch.
+    * `:cancelled`, `:halted` -- a queued request was cancelled, or a
+      request using `on_halt: :fail` was rejected by a halt.
     * `{:agent_terminated, reason}` -- an active or queued ask was replied
       to during an orderly stop.
 
@@ -287,7 +286,6 @@ defmodule GenAgent do
     * `reset_session/2` -- clear a backend's conversation context between turns.
     * `status/2` -- read the agent's current state.
     * `runtime_snapshot/2` -- read bounded runtime metadata.
-    * `drain/2` -- refuse new work, finish the active turn, then stop.
     * `stop/1` -- terminate the agent.
     * `stop/2` -- terminate an agent under its caller-owned supervisor.
     * `whereis/1` -- look up an agent's pid.
@@ -370,7 +368,6 @@ defmodule GenAgent do
           | {:overloaded, map()}
           | :cancelled
           | :halted
-          | :draining
           | :not_found
           | {:agent_terminated, term()}
 
@@ -1245,8 +1242,7 @@ defmodule GenAgent do
 
   The backend must implement `c:GenAgent.Backend.reset_session/1`. This
   call is accepted only while the agent is idle; an active turn returns
-  `{:error, :busy}` so its session cannot be replaced under it. A draining
-  agent returns `{:error, :draining}`. Callback state and queued prompts
+  `{:error, :busy}` so its session cannot be replaced under it. Callback state and queued prompts
   are preserved. A backend without the callback returns
   `{:error, :unsupported}`. Returns `{:error, :not_found}` if the agent
   is not registered. The default call timeout is `:infinity`.
@@ -1275,7 +1271,6 @@ defmodule GenAgent do
             current_request: request_ref() | nil,
             halted: boolean(),
             halt_pending: boolean(),
-            draining: boolean(),
             agent_state: term()
           }
           | {:error, :not_found}
@@ -1288,7 +1283,6 @@ defmodule GenAgent do
           phase: :idle | :processing,
           halted: boolean(),
           halt_pending: boolean(),
-          draining: boolean(),
           pending_prompts: non_neg_integer(),
           pending_notifications: non_neg_integer(),
           self_chain_pending: boolean(),
@@ -1312,8 +1306,6 @@ defmodule GenAgent do
   reports a separately held callback-generated follow-up prompt.
   `halt_pending` means an external halt was requested while a turn was
   active and will take effect after that turn finishes.
-  `draining` is true after `drain/2` has stopped accepting work and before
-  the agent exits.
   `current_request` is `nil` when idle and otherwise contains the
   volatile request ref, its origin (`:event` and `:self_chain` are
   callback-origin turns), 1-based attempt number, elapsed monotonic
@@ -1331,59 +1323,6 @@ defmodule GenAgent do
   @spec runtime_snapshot(name(), timeout()) :: runtime_snapshot() | {:error, :not_found}
   def runtime_snapshot(name, timeout \\ @default_call_timeout) do
     call(name, :runtime_snapshot, timeout)
-  end
-
-  @doc """
-  Stop an agent after its active turn finishes.
-
-  Drain immediately refuses new asks, tells, and acknowledged notifications
-  with `{:error, :draining}`. Already queued asks receive that error and
-  queued `tell_with_completion/4` recipients receive a completion with the
-  same error. Queued notifications and callback-generated follow-up prompts
-  are discarded. The active turn runs through its decision and `post_turn/3`
-  callbacks, then the agent terminates its backend session and exits. Plain
-  `notify/2` casts sent during drain remain best effort and are ignored.
-
-  Returns `:ok` only after the agent process has exited normally, or
-  `{:error, :not_found}` if it is absent at lookup. If it exits abnormally,
-  returns `{:error, {:agent_down, reason}}`. The timeout covers both the
-  admission call and the wait for process exit; a caller-side timeout does
-  not cancel the drain. As with other synchronous APIs, a timeout or a
-  concurrent agent death during the admission call can exit the caller.
-  The default timeout is `:infinity`.
-  """
-  @spec drain(name(), timeout()) :: :ok | {:error, :not_found | :timeout | {:agent_down, term()}}
-  def drain(name, timeout \\ @default_call_timeout) do
-    case whereis(name) do
-      nil ->
-        {:error, :not_found}
-
-      pid ->
-        monitor = Process.monitor(pid)
-
-        deadline =
-          if timeout == :infinity,
-            do: :infinity,
-            else: System.monotonic_time(:millisecond) + timeout
-
-        try do
-          :ok = :gen_statem.call(pid, :drain, timeout)
-
-          remaining =
-            if deadline == :infinity,
-              do: :infinity,
-              else: max(deadline - System.monotonic_time(:millisecond), 0)
-
-          receive do
-            {:DOWN, ^monitor, :process, ^pid, :normal} -> :ok
-            {:DOWN, ^monitor, :process, ^pid, reason} -> {:error, {:agent_down, reason}}
-          after
-            remaining -> {:error, :timeout}
-          end
-        after
-          Process.demonitor(monitor, [:flush])
-        end
-    end
   end
 
   @doc """
