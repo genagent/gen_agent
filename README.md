@@ -731,10 +731,7 @@ GenAgent emits telemetry events for observability:
 [:gen_agent, :turn, :stop]       # content-free, duration_ms
 [:gen_agent, :turn, :error]      # content-free, duration_ms, reason_kind
 [:gen_agent, :turn, :rejected]   # declined before dispatch; no matching start
-[:gen_agent, :prompt, :start]    # %{agent, ref}
-[:gen_agent, :prompt, :stop]     # %{agent, ref, duration}
-[:gen_agent, :prompt, :error]    # %{agent, ref, reason}
-[:gen_agent, :event, :received]  # %{agent, event}
+[:gen_agent, :turn, :cancelled]  # queued work removed before dispatch
 [:gen_agent, :state, :changed]   # %{agent, from, to}
 [:gen_agent, :mailbox, :queued]  # %{agent, depth}
 [:gen_agent, :input, :rejected]  # %{agent, reason: {:overloaded, info}}

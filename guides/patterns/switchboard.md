@@ -55,7 +55,7 @@ sessions, non-blocking."
 - Per-session history, inbox cursor, and manager-curated summary
   all live in the callback module's state.
 - Telemetry events (`[:gen_agent, :state, :changed]`,
-  `[:gen_agent, :prompt, :start|:stop|:error]`, etc.) tailed from
+  `[:gen_agent, :turn, :start|:stop|:error]`, etc.) tailed from
   the manager side as a live feed.
 
 ## Callback reference implementation
@@ -326,7 +326,7 @@ Switchboard.stop_session("project-a")
   Busy sessions queue accepted prompts; halted sessions wait for resume.
   Broadcast admission is per session, not atomic across the fleet.
 - **Live telemetry tail.** Attach a telemetry handler to
-  `[:gen_agent, :prompt, :start|:stop|:error]` and
+  `[:gen_agent, :turn, :start|:stop|:error]` and
   `[:gen_agent, :state, :changed]` and print one line per event
   across every registered session. Useful as a "what's happening
   right now" view from the manager side.

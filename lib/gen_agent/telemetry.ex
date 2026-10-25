@@ -47,29 +47,21 @@ defmodule GenAgent.Telemetry do
   them to correlate traces, not as unbounded metric labels. The
   bounded `origin` and `reason_kind` fields are suitable dimensions.
 
-  ## Rich local events
+  ## Local agent events
 
-  The original events remain for trusted, in-process observers:
+  These events are for trusted, in-process observers:
 
   | Event | Measurements | Metadata that may contain application data |
   | --- | --- | --- |
-  | `[:gen_agent, :prompt, :start]` | `system_time` (native unit) | `agent`, `ref`, `attempt`, `prompt`, `original_prompt`, `rewritten`, `agent_state` |
-  | `[:gen_agent, :prompt, :stop]` | `duration` (core-measured prompt-task elapsed milliseconds) | `agent`, `ref`, `attempt`, `agent_state` |
-  | `[:gen_agent, :prompt, :error]` | `system_time` (native unit); `duration` (milliseconds) for dispatched turns | `agent`, `ref`, `attempt`, raw `reason`, `agent_state` |
-  | `[:gen_agent, :event, :received]` | `system_time` (native unit) | `agent`, raw `event` |
   | `[:gen_agent, :state, :changed]` | `system_time` (native unit) | `agent`, `from`, `to` |
   | `[:gen_agent, :mailbox, :queued]` | `depth` (count) | `agent` |
   | `[:gen_agent, :input, :rejected]` | `system_time` (native unit) | `agent`, raw `reason` |
   | `[:gen_agent, :halted]` | `system_time` (native unit) | `agent`, `agent_state` |
   | `[:gen_agent, :terminated]` | `system_time` (native unit) | `agent`, raw `reason` |
 
-  Rich `:prompt, :error` may describe a generated prompt rejected
-  before dispatch, in which case it has no matching prompt start or
-  duration. It also fires on interruption. These events can contain
-  sensitive application data and should not be exported or turned
-  into metrics without filtering. The `attempt` field is additive for
-  existing local observers; errors before dispatch default to attempt 1
-  for independent generated prompts.
+  `:input, :rejected`, `:halted` and `:terminated` can contain
+  application data in `reason` or `agent_state` and should not be
+  exported or turned into metrics without filtering.
 
   `:terminated` fires after agent and backend cleanup callbacks when the
   agent process's termination callback runs. Its raw reason may contain
