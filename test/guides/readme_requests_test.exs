@@ -6,6 +6,7 @@ defmodule GenAgent.ReadmeRequestsGuideTest do
     use GenAgent
     def init_agent(opts), do: {:ok, [scripts: opts[:scripts] || []], %{events: []}}
     def handle_response(_, _, state), do: {:noreply, state}
+    def handle_event(:halt, state), do: {:halt, state}
     def handle_event(event, state), do: {:noreply, %{state | events: state.events ++ [event]}}
   end
 
@@ -45,7 +46,7 @@ defmodule GenAgent.ReadmeRequestsGuideTest do
 
   test "exact README example cancels a tell queued while halted" do
     {name, _} = start()
-    :ok = GenAgent.halt(name)
+    :ok = GenAgent.notify_ack(name, :halt)
 
     assert %{ref: ref, interruption: {:ok, :cancelled}} =
              evaluate("try do\n  with {:ok, ref}", name)
