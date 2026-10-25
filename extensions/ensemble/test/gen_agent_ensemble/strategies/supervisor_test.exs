@@ -138,12 +138,8 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
 
     {:ok, _} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
 
-    # Let {:stop, ...} ops drain.
-    Process.sleep(50)
-    {:ok, info} = GenAgentEnsemble.status(name)
-
     # Only the coordinator should remain.
-    assert info.agents == ["#{name}-coord"]
+    await_agents(name, ["#{name}-coord"])
   end
 
   test "empty decomposition replies with coordinator text", %{name: name} do
@@ -375,10 +371,7 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
     assert {:error, {_, :worker_boom}} = GenAgentEnsemble.ask(name, "q", timeout: 5_000)
 
     # Both workers should be torn down; coordinator remains.
-    Process.sleep(50)
-    {:ok, info} = GenAgentEnsemble.status(name)
-    assert info.agents == ["#{name}-coord"]
-    assert info.phase == :idle
+    assert %{phase: :idle} = await_agents(name, ["#{name}-coord"])
   end
 
   test "coordinator death halts the session", %{name: name} do
@@ -395,17 +388,27 @@ defmodule GenAgentEnsemble.Strategies.SupervisorTest do
     assert {:coordinator_down, _} = HaltSupport.assert_halted(name)
   end
 
-  defp await_completion(name, token, retries \\ 100) do
-    case GenAgentEnsemble.poll(name, token) do
-      {:ok, :completed, response} ->
-        response
+  defp await_completion(name, token) do
+    assert {:ok, response} = GenAgentEnsemble.await(name, token, 5_000)
+    response
+  end
 
-      {:ok, :pending} when retries > 0 ->
-        Process.sleep(20)
-        await_completion(name, token, retries - 1)
+  # Worker stops run in lifecycle workers after the reply, so wait for the
+  # server to record them rather than for a fixed interval.
+  defp await_agents(name, expected, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+    {:ok, status} = GenAgentEnsemble.status(name)
 
-      other ->
-        flunk("expected completion, got: #{inspect(other)}")
+    cond do
+      status.agents == expected ->
+        status
+
+      System.monotonic_time(:millisecond) < deadline ->
+        Process.sleep(10)
+        await_agents(name, expected, deadline)
+
+      true ->
+        flunk("agents did not become #{inspect(expected)}; got #{inspect(status.agents)}")
     end
   end
 end
