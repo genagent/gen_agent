@@ -151,26 +151,17 @@ The server bounds the events it retains per turn:
 |---|---|---|
 | `:max_events_per_turn` | `1_000` | `start_agent/2` or `child_spec/2` |
 | `:max_event_bytes_per_turn` | `1_048_576` | `start_agent/2` or `child_spec/2` |
-| `:event_retention` | `:compact` | `start_agent/2` or `child_spec/2` |
 
 Bytes are the sum of `:erlang.external_size/1` over retained events.
 `init_impl/1` in server.ex raises `ArgumentError` for a limit that is
-not a positive integer or a retention mode other than `:compact` or
-`:lossless`.
+not a positive integer.
 
-With `:compact` (`capture_compact_event/5` in server.ex), every
+Retention (`capture_compact_event/5` in server.ex) is compact: every
 event still reaches `handle_stream_event/2` and the stream is read to
 its terminal event. Once a limit is reached, later events are left
 out of `Response.events`, and `Response.event_coverage` reports the
 counts and the first omission. Response text, usage, and the terminal
 event are built from the full stream.
-
-With `:lossless` (`capture_event/5` in server.ex), the first event
-that would exceed either limit stops consumption and fails the turn
-with `{:event_capture_overflow, diagnostics}`. The diagnostics map
-carries `:limit`, `:max_events`, `:max_bytes`, `:retained_events`,
-`:retained_bytes`, `:rejected_event_kind`, and
-`:rejected_event_bytes`.
 
 A backend that emits one event per small delta uses the event budget
 faster than one that emits completed messages. Checkpoints are not
