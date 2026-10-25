@@ -1007,14 +1007,6 @@ defmodule GenAgent.Server do
     else
       new_session = restore_checkpoint(data.backend, new_session, current)
 
-      emit_prompt_stop(
-        data.name,
-        current.request_ref,
-        response.duration_ms,
-        new_agent_state,
-        current.attempt
-      )
-
       emit_turn_stop(data.name, current)
       finish_turn(data, current, response, new_session, new_agent_state)
     end
@@ -1300,8 +1292,6 @@ defmodule GenAgent.Server do
 
   # ---------------------------------------------------------------------------
   defp notify_processing(data, event, from) do
-    emit_event_received(data.name, event)
-
     case enqueue_notification(data, event) do
       {:ok, queued} -> reply_notification(from, {:keep_state, queued}, :ok)
       {:error, reason} -> reply_notification(from, {:keep_state, data}, {:error, reason})
@@ -1309,8 +1299,6 @@ defmodule GenAgent.Server do
   end
 
   defp notify_idle(data, event, from) do
-    emit_event_received(data.name, event)
-
     {result, acknowledgement} =
       apply_immediate_decision(
         data,
@@ -1385,7 +1373,7 @@ defmodule GenAgent.Server do
       {:returned, {:ok, new_prompt, new_state}} when is_binary(new_prompt) ->
         data = %{data | agent_state: new_state}
 
-        case dispatch(data, request_ref, kind, new_prompt, prompt, stream_to, attempt) do
+        case dispatch(data, request_ref, kind, new_prompt, stream_to, attempt) do
           {:ok, data} ->
             {:next_state, :processing, data}
 
@@ -1448,7 +1436,7 @@ defmodule GenAgent.Server do
   defp reject_pre_turn(data, pseudo_current, reason),
     do: record_error(data, pseudo_current, reason)
 
-  defp dispatch(%Data{} = data, request_ref, kind, prompt, original_prompt, stream_to, attempt) do
+  defp dispatch(%Data{} = data, request_ref, kind, prompt, stream_to, attempt) do
     backend = data.backend
     backend_session = data.backend_session
     module = data.agent_module
@@ -1490,7 +1478,6 @@ defmodule GenAgent.Server do
     case task do
       {:ok, task} ->
         started_at = System.monotonic_time(:millisecond)
-        emit_prompt_start(data.name, request_ref, prompt, original_prompt, agent_state, attempt)
         emit_turn_start(data.name, request_ref, kind, attempt)
 
         current = %{
@@ -1516,7 +1503,6 @@ defmodule GenAgent.Server do
 
   defp reject_dispatch(%Data{} = data, request_ref, kind, reason, attempt) do
     emit_turn_rejected(data.name, request_ref, kind, reason, attempt)
-    emit_prompt_error(data.name, request_ref, reason, data.agent_state, nil, attempt)
 
     # A retry cannot start until the caller restores the task supervisor.
     # Discard an immediate retry from handle_error/3 to avoid an internal loop.
@@ -2139,8 +2125,6 @@ defmodule GenAgent.Server do
   end
 
   defp reject_generated_prompt(data, request_ref, reason) do
-    emit_prompt_error(data.name, request_ref, reason, data.agent_state)
-
     case safely_handle_error(data.name, data.agent_module, request_ref, reason, data.agent_state) do
       {:noreply, new_state} ->
         %{data | agent_state: new_state}
@@ -2225,15 +2209,6 @@ defmodule GenAgent.Server do
 
   defp finish_error(data, current, reason) do
     duration_ms = max(System.monotonic_time(:millisecond) - current.started_at, 0)
-
-    emit_prompt_error(
-      data.name,
-      current.request_ref,
-      reason,
-      data.agent_state,
-      duration_ms,
-      current.attempt
-    )
 
     emit_turn_error(data.name, current, reason, duration_ms)
 
@@ -2465,44 +2440,6 @@ defmodule GenAgent.Server do
   # Telemetry
   # ---------------------------------------------------------------------------
 
-  defp emit_prompt_start(name, ref, prompt, original_prompt, agent_state, attempt) do
-    rewritten = not is_nil(original_prompt) and original_prompt != prompt
-
-    :telemetry.execute([:gen_agent, :prompt, :start], %{system_time: System.system_time()}, %{
-      agent: name,
-      ref: ref,
-      attempt: attempt,
-      prompt: prompt,
-      original_prompt: original_prompt || prompt,
-      rewritten: rewritten,
-      agent_state: agent_state
-    })
-  end
-
-  defp emit_prompt_stop(name, ref, duration_ms, agent_state, attempt) do
-    :telemetry.execute([:gen_agent, :prompt, :stop], %{duration: duration_ms}, %{
-      agent: name,
-      ref: ref,
-      attempt: attempt,
-      agent_state: agent_state
-    })
-  end
-
-  defp emit_prompt_error(name, ref, reason, agent_state, duration_ms \\ nil, attempt \\ 1) do
-    measurements = %{system_time: System.system_time()}
-
-    measurements =
-      if duration_ms, do: Map.put(measurements, :duration, duration_ms), else: measurements
-
-    :telemetry.execute([:gen_agent, :prompt, :error], measurements, %{
-      agent: name,
-      ref: ref,
-      attempt: attempt,
-      reason: reason,
-      agent_state: agent_state
-    })
-  end
-
   defp emit_turn_start(name, ref, kind, attempt) do
     :telemetry.execute([:gen_agent, :turn, :start], %{system_time: System.system_time()}, %{
       agent: name,
@@ -2557,13 +2494,6 @@ defmodule GenAgent.Server do
   defp turn_error_kind(:interrupted), do: :interrupted
   defp turn_error_kind({:task_crashed, _}), do: :task_crashed
   defp turn_error_kind(_), do: :backend_or_callback_error
-
-  defp emit_event_received(name, event) do
-    :telemetry.execute([:gen_agent, :event, :received], %{system_time: System.system_time()}, %{
-      agent: name,
-      event: event
-    })
-  end
 
   defp emit_state_change(name, from, to) do
     :telemetry.execute([:gen_agent, :state, :changed], %{system_time: System.system_time()}, %{

@@ -41,33 +41,25 @@ Before adding any new callback, use existing telemetry events for
 observational use cases. The original proposal was to enrich them
 (`agent_state` on `:prompt, :start`; post-decision `agent_state` and
 `outcome` on `:prompt, :stop`; `reason` on `:halted`). That proposal
-was only partly adopted. Current behavior (see [GenAgent.Telemetry](../lib/gen_agent/telemetry.ex)
-and `emit_prompt_start/6`, `emit_prompt_stop/5`, `emit_halted/2` in
-[GenAgent.Server](../lib/gen_agent/server.ex)):
+was only partly adopted, and the prompt-level events that carried
+`agent_state` (`[:gen_agent, :prompt, :start | :stop | :error]` and
+`[:gen_agent, :event, :received]`) were removed in core 0.11 in favor of
+the content-free `[:gen_agent, :turn, *]` events. Current behavior (see
+[GenAgent.Telemetry](../lib/gen_agent/telemetry.ex)):
 
-- `[:gen_agent, :prompt, :start]` -- metadata has `agent`, `ref`,
-  `attempt`, `prompt`, `original_prompt`, `rewritten`, `agent_state`.
-- `[:gen_agent, :prompt, :stop]` -- measurement `duration` is the
-  core-measured prompt-task elapsed time in **milliseconds**; metadata is `agent`,
-  `ref`, `attempt`, `agent_state`. It fires when the backend task
-  returns, **before** `handle_response/3` and `post_turn/3`, so
-  `agent_state` is the pre-decision state (it does not include changes
-  made by this turn's `handle_response/3`, but includes returned
-  task-local stream state). See `handle_task_result/3` in
-  [GenAgent.Server](../lib/gen_agent/server.ex). There is no `outcome` key
-  (success and failure are the separate `:stop` and `:error` events),
-  no `usage`, no `session_id`, and no response.
+- `[:gen_agent, :turn, :start | :stop | :error | :rejected | :cancelled]`
+  -- metadata is `agent`, `ref`, `attempt`, `origin`, and `reason_kind`
+  where applicable. No prompt, response, or agent state.
 - `[:gen_agent, :halted]` -- metadata is `agent` and `agent_state`
   (the state at the halt transition, after the decision). There is no
   `reason`; per Q4 there is a single halt cause.
 
-Duration units differ: `:prompt, :stop` and `:prompt, :error`
-`duration` are milliseconds, `:turn, :stop`/`:error` use `duration_ms`
-(milliseconds), and `system_time` measurements are in native units.
-Do not pass these through `System.convert_time_unit/3` as native time.
+`:turn, :stop`/`:error` use `duration_ms` (milliseconds), and
+`system_time` measurements are in native units. Do not pass
+`duration_ms` through `System.convert_time_unit/3` as native time.
 
 Normalized token usage lives on `GenAgent.Response.usage`. Read it in
-`handle_response/3` or `post_turn/3`, not from prompt-stop telemetry.
+`handle_response/3` or `post_turn/3`.
 
 If a use case is pure observation that needs only the metadata above
 (send a Slack summary on halt, emit a duration metric), use a telemetry
@@ -320,10 +312,10 @@ with no-op) justify it. The workaround otherwise is storing the
 template in state and rebuilding the prompt inside every callback
 that returns `{:prompt, ...}` -- duplicated and ugly.
 
-**Traceability requirement**: `[:gen_agent, :prompt, :start]` telemetry
-metadata must carry both the original and rewritten prompt, plus a
-`rewritten: boolean` flag. A reader debugging a turn can see the
-rewrite in telemetry without inspecting the callback module.
+**Traceability requirement** (superseded): the original design had
+`[:gen_agent, :prompt, :start]` carry the original and rewritten prompt.
+That event was removed in core 0.11; a callback that needs a rewrite
+trail records it in its own state or logs.
 
 ### Q4: `post_run` reasons?
 

@@ -13,9 +13,6 @@ Code.compile_string(code, guide)
 defmodule GenAgent.HeartbeatGuideTest do
   use ExUnit.Case, async: false
 
-  def tick_handler(_event, _measurements, metadata, observer),
-    do: send(observer, {:tick_event, metadata})
-
   defmodule Backend do
     @behaviour GenAgent.Backend
     @impl true
@@ -172,22 +169,14 @@ defmodule GenAgent.HeartbeatGuideTest do
     :ok = GenAgent.notify_ack(name, {:tick, old_pid})
     assert state(name).observations == [:replacement]
     refute_receive {:started, _, _}, 50
-    observer = self()
-    handler = "ticker-#{name}"
-
-    :ok =
-      :telemetry.attach(
-        handler,
-        [:gen_agent, :event, :received],
-        &__MODULE__.tick_handler/4,
-        observer
-      )
-
-    on_exit(fn -> :telemetry.detach(handler) end)
+    # Trace the agent's mailbox to observe the replacement ticker's pulse.
+    :erlang.trace(new_pid, true, [:receive])
+    on_exit(fn -> if Process.alive?(new_pid), do: :erlang.trace(new_pid, false, [:receive]) end)
     replacement = start_supervised!({Heartbeat.Ticker, agent: name, interval_ms: 60_000})
     send(replacement, :tick)
-    assert_receive {:tick_event, %{agent: ^name, event: {:tick, ^new_pid}}}
-    refute_receive {:tick_event, %{agent: ^name, event: {:tick, ^new_pid}}}, 50
+    tick = {:"$gen_cast", {:notify, {:tick, new_pid}}}
+    assert_receive {:trace, ^new_pid, :receive, ^tick}
+    refute_receive {:trace, ^new_pid, :receive, ^tick}, 50
     assert replacement != ticker
     assert_receive {:started, _, task}, 1_000
     send(task, :release)

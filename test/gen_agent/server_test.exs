@@ -103,9 +103,7 @@ defmodule GenAgent.ServerTest do
     id = make_ref()
 
     events =
-      for family <- [:turn, :prompt],
-          phase <- [:start, :stop, :error, :cancelled],
-          do: [:gen_agent, family, phase]
+      for phase <- [:start, :stop, :error, :cancelled], do: [:gen_agent, :turn, phase]
 
     :ok =
       :telemetry.attach_many(
@@ -229,12 +227,11 @@ defmodule GenAgent.ServerTest do
       assert_receive {:test_agent, :handle_error, {ref, :one}}
       assert_receive {:test_agent, :handle_error, {^ref, :two}}
 
-      for {attempt, terminal} <- [{1, :error}, {2, :error}, {3, :stop}],
-          family <- [:turn, :prompt] do
-        assert_receive {:retry_telemetry, [:gen_agent, ^family, :start],
+      for {attempt, terminal} <- [{1, :error}, {2, :error}, {3, :stop}] do
+        assert_receive {:retry_telemetry, [:gen_agent, :turn, :start],
                         %{ref: ^ref, attempt: ^attempt}}
 
-        assert_receive {:retry_telemetry, [:gen_agent, ^family, ^terminal],
+        assert_receive {:retry_telemetry, [:gen_agent, :turn, ^terminal],
                         %{ref: ^ref, attempt: ^attempt}}
       end
 

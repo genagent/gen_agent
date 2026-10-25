@@ -227,7 +227,7 @@ defmodule GenAgent.LifecycleHooksTest do
       assert_receive {:rejected_reason, :pre_turn_invalid}
     end
 
-    test "a self-chain pre_turn crash reaches handle_error and prompt telemetry", %{
+    test "a self-chain pre_turn crash reaches handle_error and turn telemetry", %{
       task_sup: task_sup
     } do
       parent = self()
@@ -252,9 +252,9 @@ defmodule GenAgent.LifecycleHooksTest do
 
       :telemetry.attach(
         handler_id,
-        [:gen_agent, :prompt, :error],
+        [:gen_agent, :turn, :rejected],
         fn _event, _measurements, meta, _config ->
-          if meta.agent == name, do: send(parent, {:generated_prompt_error, meta.reason})
+          if meta.agent == name, do: send(parent, {:generated_prompt_error, meta.reason_kind})
         end,
         nil
       )
@@ -572,61 +572,6 @@ defmodule GenAgent.LifecycleHooksTest do
   # ---------------------------------------------------------------------------
 
   describe "telemetry metadata enrichment" do
-    test "prompt.start carries prompt, original_prompt, rewritten flag, agent_state",
-         %{task_sup: task_sup} do
-      parent = self()
-      handler_id = "lc-prompt-start-#{System.unique_integer([:positive])}"
-
-      :telemetry.attach(
-        handler_id,
-        [:gen_agent, :prompt, :start],
-        fn _event, _measurements, meta, _ ->
-          send(parent, {:tel_start, meta})
-        end,
-        nil
-      )
-
-      on_exit(fn -> :telemetry.detach(handler_id) end)
-
-      pre_turn = fn prompt, state -> {:ok, "[rewritten] " <> prompt, state} end
-
-      pid =
-        start_server(task_sup, [result_events("ok")], pre_turn: pre_turn)
-
-      assert {:ok, _} = ask(pid, "hello")
-
-      name = status(pid).name
-      assert_receive {:tel_start, %{agent: ^name} = meta}, 500
-      assert meta.prompt == "[rewritten] hello"
-      assert meta.original_prompt == "hello"
-      assert meta.rewritten == true
-      assert %TestAgent.State{} = meta.agent_state
-    end
-
-    test "prompt.start rewritten flag is false when pre_turn is identity",
-         %{task_sup: task_sup} do
-      parent = self()
-      handler_id = "lc-prompt-start-id-#{System.unique_integer([:positive])}"
-
-      :telemetry.attach(
-        handler_id,
-        [:gen_agent, :prompt, :start],
-        fn _event, _measurements, meta, _ -> send(parent, {:tel_start, meta}) end,
-        nil
-      )
-
-      on_exit(fn -> :telemetry.detach(handler_id) end)
-
-      pid = start_server(task_sup, [result_events("ok")])
-      assert {:ok, _} = ask(pid, "hello")
-
-      name = status(pid).name
-      assert_receive {:tel_start, %{agent: ^name} = meta}, 500
-      assert meta.rewritten == false
-      assert meta.prompt == "hello"
-      assert meta.original_prompt == "hello"
-    end
-
     test "halted event carries agent_state", %{task_sup: task_sup} do
       parent = self()
       handler_id = "lc-halted-#{System.unique_integer([:positive])}"
