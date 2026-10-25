@@ -53,6 +53,8 @@ config :gen_agent_ensemble,
 Workers are automatically named `"qa-1"`, `"qa-2"`, `"qa-3"` from
 the template's prefix.
 
+Token strings shown below are illustrative placeholders; use the returned values intact.
+
 ## Canonical workflow
 
 ### Fan-out batch
@@ -60,7 +62,7 @@ the template's prefix.
 ```elixir
 iex> questions = ["What is GenServer?", "What is a Supervisor?", "What is ETS?"]
 iex> tokens = for q <- questions, do: elem(E.tell("qa-pool", q), 1)
-["tok-3", "tok-4", "tok-5"]
+["tok-<opaque-a>", "tok-<opaque-b>", "tok-<opaque-c>"]
 
 iex> E.status("qa-pool")
 {:ok, %{busy: 3, free: 0, queued: 0, workers: ["qa-1", "qa-2", "qa-3"], ...}}
@@ -68,9 +70,9 @@ iex> E.status("qa-pool")
 iex> Process.sleep(5_000)
 iex> E.drain("qa-pool")
 [
-  {"tok-3", "A GenServer is..."},
-  {"tok-4", "A Supervisor is..."},
-  {"tok-5", "ETS is..."}
+  {"tok-<opaque-a>", "A GenServer is..."},
+  {"tok-<opaque-b>", "A Supervisor is..."},
+  {"tok-<opaque-c>", "ETS is..."}
 ]
 ```
 

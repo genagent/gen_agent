@@ -255,6 +255,10 @@ defmodule GenAgentEnsemble do
   limits are full (see "Admission limits" in the module documentation), and
   `{:error, {:halted, reason}}` without a token once the ensemble has halted
   (see "Halt").
+
+  Tokens are opaque strings with a `tok-` prefix. Keep the returned value intact;
+  do not parse it or infer ordering. The Ensemble API assumes a trusted host:
+  token randomness does not authorize callers or isolate users.
   """
   defdelegate tell(name, prompt), to: GenAgentEnsemble.Server
 

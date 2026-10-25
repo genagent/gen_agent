@@ -2247,7 +2247,7 @@ defmodule GenAgentEnsemble.Server do
   defp active_dispatch?(state, token), do: Map.has_key?(state.pending, token)
 
   defp mint_token do
-    "tok-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+    "tok-" <> Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
   end
 
   defp catch_exit(fun) do

@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Ensemble-issued tokens now use cryptographically strong opaque identifiers
+  with the `tok-` prefix. Tokens remain strings; repeatable `await/3`, destructive
+  `poll/2`, inbox draining and result retention are unchanged. The API assumes
+  a trusted host; random identifiers do not provide authorization.
+
 - Forward operations now send through `GenAgent.Client.notify/2` to the owned
   PID captured during validation, preventing delivery to a replacement registered
   under the same member key. A dead captured target reports bounded `:not_alive`;

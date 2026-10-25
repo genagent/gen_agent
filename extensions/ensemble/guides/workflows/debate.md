@@ -131,6 +131,8 @@ iex> E.await("redis-vs-postgres", tok, 120_000) |> E.puts()
 
 ### Inspect mid-debate
 
+The token shown below is an illustrative placeholder; use the returned value intact.
+
 ```elixir
 iex> E.status("redis-vs-postgres")
 {:ok, %{
@@ -142,7 +144,7 @@ iex> E.status("redis-vs-postgres")
   rounds: 6,
   queued: 0,
   in_flight: 1,
-  pending_tokens: ["tok-7"]
+  pending_tokens: ["tok-<opaque-d>"]
 }}
 ```
 

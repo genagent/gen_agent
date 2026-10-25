@@ -58,9 +58,11 @@ grows each turn because the backend resends the full message array.
 
 ### Async (fire-and-check-later)
 
+The token shown below is an illustrative placeholder; use the returned value intact.
+
 ```elixir
 iex> {:ok, token} = E.tell("solo", "explain ETS in one paragraph")
-{:ok, "tok-5"}
+{:ok, "tok-<opaque-c>"}
 iex> # ...do other work...
 iex> E.await("solo", token) |> E.puts()
 ETS (Erlang Term Storage) is an in-memory key-value store...
