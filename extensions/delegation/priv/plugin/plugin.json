@@ -1,0 +1,31 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "gen-agent-delegate",
+  "description": "Delegate bounded local tasks to Claude and Codex through GenAgent.",
+  "author": {
+    "name": "Josh Rotenberg"
+  },
+  "keywords": [
+    "claude",
+    "codex",
+    "delegation",
+    "local",
+    "genagent"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "GenAgent Delegate",
+        "shortDescription": "Claude and Codex task workers",
+        "longDescription": "Start, wait for, continue, and cancel bounded local tasks. Includes named behavior/schema profiles, environment diagnostics, and delegation guidance served as MCP resources.",
+        "developerName": "Josh Rotenberg",
+        "category": "Engineering",
+        "capabilities": [
+          "Read",
+          "Write"
+        ],
+        "defaultPrompt": "Delegate an independent review of this project."
+      }
+    }
+  }
+}
