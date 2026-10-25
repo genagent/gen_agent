@@ -56,7 +56,6 @@ defmodule GenAgent.Server do
       :max_pending_notifications,
       :max_pending_notification_bytes,
       halted: false,
-      halt_pending: false,
       self_chain: nil,
       mailbox: :queue.new(),
       ask_monitors: %{},
@@ -655,7 +654,6 @@ defmodule GenAgent.Server do
           %{request_ref: ref} -> ref
         end,
       halted: data.halted,
-      halt_pending: data.halt_pending,
       agent_state: data.agent_state
     }
 
@@ -681,7 +679,6 @@ defmodule GenAgent.Server do
     snapshot = %{
       phase: state,
       halted: data.halted,
-      halt_pending: data.halt_pending,
       pending_prompts: :queue.len(data.mailbox),
       pending_notifications: :queue.len(data.pending_events),
       self_chain_pending: not is_nil(data.self_chain),
@@ -766,26 +763,12 @@ defmodule GenAgent.Server do
   end
 
   # ---------------------------------------------------------------------------
-  # halt/resume -- pause dispatch without interrupting the active turn
+  # resume -- clear a callback-driven halt and dispatch queued work
   # ---------------------------------------------------------------------------
-
-  defp dispatch_event(:cast, :halt, :idle, %Data{} = data) do
-    {:keep_state, transition_to_halted(data)}
-  end
-
-  defp dispatch_event(:cast, :halt, :processing, %Data{} = data) do
-    {:keep_state, %{data | halt_pending: true}}
-  end
-
-  defp dispatch_event(:cast, :halt, _state, _data), do: :keep_state_and_data
 
   defp dispatch_event(:cast, :resume, :idle, %Data{halted: true} = data) do
     data = %{data | halted: false}
     {:keep_state, data, [{:next_event, :internal, :process_next}]}
-  end
-
-  defp dispatch_event(:cast, :resume, :processing, %Data{halt_pending: true} = data) do
-    {:keep_state, %{data | halt_pending: false}}
   end
 
   defp dispatch_event(:cast, :resume, _state, _data), do: :keep_state_and_data
@@ -2062,7 +2045,7 @@ defmodule GenAgent.Server do
 
   defp transition_to_halted(%Data{} = data) do
     # Release doomed tells before notification-generated prompts use capacity.
-    data = fail_halt_aware_queued(%{data | halted: true, halt_pending: false})
+    data = fail_halt_aware_queued(%{data | halted: true})
     data = drain_pending_events(data)
     :ok = safely_post_run(data.name, data.agent_module, data.agent_state)
     emit_halted(data.name, data.agent_state)
@@ -2216,7 +2199,7 @@ defmodule GenAgent.Server do
 
     case transition do
       :noreply ->
-        data = data |> drain_pending_events() |> finish_external_halt()
+        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       {:prompt, next_prompt} ->
@@ -2224,7 +2207,6 @@ defmodule GenAgent.Server do
           data
           |> accept_self_chain(next_prompt)
           |> drain_pending_events()
-          |> finish_external_halt()
 
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
@@ -2283,12 +2265,12 @@ defmodule GenAgent.Server do
 
     case transition do
       :noreply ->
-        data = data |> drain_pending_events() |> finish_external_halt()
+        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       {:prompt, next_prompt} ->
         data = if owned_retry?, do: data, else: accept_self_chain(data, next_prompt)
-        data = data |> drain_pending_events() |> finish_external_halt()
+        data = drain_pending_events(data)
         {:next_state, :idle, data, with_process_next(reply_actions)}
 
       :halt ->
@@ -2296,11 +2278,6 @@ defmodule GenAgent.Server do
         {:next_state, :idle, data, with_process_next(reply_actions)}
     end
   end
-
-  defp finish_external_halt(%Data{halt_pending: true} = data),
-    do: transition_to_halted(data)
-
-  defp finish_external_halt(%Data{} = data), do: %{data | halt_pending: false}
 
   defp record_or_enqueue_error(%Data{} = data, current, reason, {:prompt, prompt})
        when reason != :interrupted do

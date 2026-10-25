@@ -282,7 +282,6 @@ defmodule GenAgent do
     * `interrupt_request/3` -- acknowledge cancellation for a matching request ref.
     * `cancel_request/3` -- remove a queued tell by its request ref.
     * `resume/1` -- unhalt an agent and drain its mailbox.
-    * `halt/1` -- halt dispatch after any active turn finishes.
     * `reset_session/2` -- clear a backend's conversation context between turns.
     * `status/2` -- read the agent's current state.
     * `runtime_snapshot/2` -- read bounded runtime metadata.
@@ -1208,27 +1207,12 @@ defmodule GenAgent do
   end
 
   @doc """
-  Halt an agent from outside its callback module.
-
-  When idle, the agent enters the halted state and runs `post_run/1`.
-  An active turn is allowed to finish its callbacks first; the halt is
-  pending until then. Queued prompts remain paused until `resume/1`.
-  `resume/1` during the active turn cancels a pending external halt.
-  Calling `halt/1` again is idempotent. Asynchronous, like `resume/1`;
-  returns `:ok` immediately. `status/2` and `runtime_snapshot/2`
-  expose `:halt_pending` while the active turn is finishing.
-  """
-  @spec halt(name()) :: :ok
-  def halt(name) do
-    :gen_statem.cast(via(name), :halt)
-  end
-
-  @doc """
   Resume a halted agent.
 
-  Clears the `halted` flag and re-drains the mailbox, or cancels a
-  pending external halt if an active turn is still running. No-op
-  otherwise.
+  Clears the `halted` flag and re-drains the mailbox. No-op if the agent
+  is not halted. Halts come from callbacks returning `{:halt, state}`; to
+  halt from outside, send a `notify/2` event whose `c:handle_event/2`
+  returns `{:halt, state}`.
 
   Asynchronous. Returns `:ok` immediately.
   """
@@ -1270,7 +1254,6 @@ defmodule GenAgent do
             queued: non_neg_integer(),
             current_request: request_ref() | nil,
             halted: boolean(),
-            halt_pending: boolean(),
             agent_state: term()
           }
           | {:error, :not_found}
@@ -1282,7 +1265,6 @@ defmodule GenAgent do
   @type runtime_snapshot :: %{
           phase: :idle | :processing,
           halted: boolean(),
-          halt_pending: boolean(),
           pending_prompts: non_neg_integer(),
           pending_notifications: non_neg_integer(),
           self_chain_pending: boolean(),
@@ -1304,8 +1286,6 @@ defmodule GenAgent do
   counts notifications and ordinary OTP messages buffered during a turn;
   `self_chain_pending`
   reports a separately held callback-generated follow-up prompt.
-  `halt_pending` means an external halt was requested while a turn was
-  active and will take effect after that turn finishes.
   `current_request` is `nil` when idle and otherwise contains the
   volatile request ref, its origin (`:event` and `:self_chain` are
   callback-origin turns), 1-based attempt number, elapsed monotonic
