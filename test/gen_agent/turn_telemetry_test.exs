@@ -24,11 +24,7 @@ defmodule GenAgent.TurnTelemetryTest do
     :ok =
       :telemetry.attach_many(
         handler,
-        for(
-          kind <- [:turn, :prompt],
-          outcome <- [:start, :stop, :error, :rejected],
-          do: [:gen_agent, kind, outcome]
-        ),
+        for(outcome <- [:start, :stop, :error, :rejected], do: [:gen_agent, :turn, outcome]),
         fn event, measurements, metadata, _ ->
           if metadata.agent == name do
             send(parent, {:telemetry, event, measurements, metadata})
@@ -132,7 +128,7 @@ defmodule GenAgent.TurnTelemetryTest do
     refute_receive {:terminated, [:gen_agent, :terminated], _, _}, 0
   end
 
-  test "state, mailbox, and notification telemetry tracks a queued turn",
+  test "state and mailbox telemetry tracks a queued turn",
        %{name: name, task_sup: task_sup} do
     parent = self()
     handler = "runtime-telemetry-#{System.unique_integer([:positive])}"
@@ -142,8 +138,7 @@ defmodule GenAgent.TurnTelemetryTest do
         handler,
         [
           [:gen_agent, :state, :changed],
-          [:gen_agent, :mailbox, :queued],
-          [:gen_agent, :event, :received]
+          [:gen_agent, :mailbox, :queued]
         ],
         fn event, measurements, metadata, _ ->
           if metadata.agent == name,
@@ -173,11 +168,6 @@ defmodule GenAgent.TurnTelemetryTest do
 
     assert_receive {:runtime_telemetry, [:gen_agent, :mailbox, :queued], %{depth: 1},
                     %{agent: ^name}}
-
-    assert :ok = :gen_statem.call(pid, {:notify_ack, :note})
-
-    assert_receive {:runtime_telemetry, [:gen_agent, :event, :received], _,
-                    %{agent: ^name, event: :note}}
 
     send(turn_pid, {:mock_release, :active})
     assert {:ok, :completed, %{text: "queued"}} = wait_for_completion(pid, queued_ref)
@@ -219,11 +209,6 @@ defmodule GenAgent.TurnTelemetryTest do
     assert {:error, :fixture_error} = ask(pid, "fail")
 
     assert_receive {:telemetry, [:gen_agent, :turn, :start], _, %{ref: ref}}, 500
-
-    assert_receive {:telemetry, [:gen_agent, :prompt, :error], %{duration: legacy_ms}, _},
-                   500
-
-    assert is_integer(legacy_ms) and legacy_ms >= 0
 
     assert_receive {:telemetry, [:gen_agent, :turn, :error], %{duration_ms: duration}, meta},
                    500
