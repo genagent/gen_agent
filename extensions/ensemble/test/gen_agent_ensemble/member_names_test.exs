@@ -217,7 +217,7 @@ defmodule GenAgentEnsemble.MemberNamesTest do
         assert Map.fetch!(names, member) === key
         assert GenAgent.status(key).name === key
         assert Enum.any?(E.list(), &(&1 === session))
-        assert Enum.any?(GenAgent.list(), &(&1 === key))
+        assert Registry.lookup(GenAgent.Registry, key) != []
         GenAgent.whereis(key)
       end
 

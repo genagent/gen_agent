@@ -318,26 +318,13 @@ defmodule GenAgent.StreamToTest do
   end
 
   test "compact retention relays events omitted from retained history" do
-    {name, _pid} = start_agent(event_retention: :compact, max_events_per_turn: 1)
+    {name, _pid} = start_agent(max_events_per_turn: 1)
     assert {:ok, ref} = tell(name, "many", stream_to: self())
 
     for text <- ["a", "b", "c"], do: assert_text_event(name, ref, text)
 
     assert {:gen_agent, :event, ^name, ^ref, %Event{kind: :result}} = next_msg()
     assert {:gen_agent, :completion, ^name, ^ref, {:ok, _}} = next_msg()
-  end
-
-  test "lossless retention does not relay the event rejected for overflow" do
-    {name, _pid} = start_agent(event_retention: :lossless, max_events_per_turn: 2)
-    assert {:ok, ref} = tell(name, "many", stream_to: self())
-
-    assert_text_event(name, ref, "a")
-    assert_text_event(name, ref, "b")
-
-    assert {:gen_agent, :completion, ^name, ^ref, {:error, {:event_capture_overflow, _}}} =
-             next_msg()
-
-    refute_received {:gen_agent, _, _, _, _}
   end
 
   test "an unavailable task supervisor fails once with no events and no recipient" do

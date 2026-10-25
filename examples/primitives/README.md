@@ -9,7 +9,7 @@ keys, provider, CLI, or network calls.
 | [01_hello.exs](scripts/01_hello.exs) | Initialization, response fields, ask, tell, pending/completed poll, FIFO queueing, status, stop |
 | [02_requests.exs](scripts/02_requests.exs) | Completion recipient, exact-ref interruption, queued cancellation, prompt overload, watchdog, runtime snapshot, poll recovery |
 | [03_events.exs](scripts/03_events.exs) | Notification admission, event callback decisions, ordered deferral, notification overload, halt and resume |
-| [04_stream.exs](scripts/04_stream.exs) | Stream deltas to a sink, tool events, lossless event capture overflow |
+| [04_stream.exs](scripts/04_stream.exs) | Stream deltas to a sink, tool events, bounded event retention |
 | [05_chain_retry.exs](scripts/05_chain_retry.exs) | Response self-chaining, bounded retries for synchronous and terminal event errors |
 | [06_hooks.exs](scripts/06_hooks.exs) | Setup, prompt rewrite, skip, usage accounting, token budget halt |
 

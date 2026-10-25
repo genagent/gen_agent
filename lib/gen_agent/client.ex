@@ -124,17 +124,6 @@ defmodule GenAgent.Client do
   end
 
   @doc """
-  Poll the captured PID using `GenAgent.poll/3` result semantics.
-
-  Defaults to 5 seconds. `:not_found` can mean not yet processed, rejected,
-  unknown or evicted; it is not proof of cancellation. Native timeout/death
-  exits propagate, and a held callback delays this call.
-  """
-  @spec poll(pid(), GenAgent.request_ref(), timeout()) ::
-          {:ok, :pending} | {:ok, :completed, Response.t()} | {:error, GenAgent.error_reason()}
-  def poll(pid, ref, timeout \\ 5_000), do: call(pid, ref, :poll, timeout)
-
-  @doc """
   Cancel a queued request on the captured PID by exact ref.
 
   Uses `GenAgent.cancel_request/3` semantics and a 5 second default timeout.

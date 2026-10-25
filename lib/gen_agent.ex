@@ -129,8 +129,6 @@ defmodule GenAgent do
     * `:task_supervisor_unavailable` -- the prompt task could not start.
     * `:no_terminal_event` -- a backend stream ended without a terminal
       result or error event.
-    * `{:event_capture_overflow, diagnostics}` -- lossless event capture
-      exceeded its configured limit.
     * `:timeout`, `:interrupted`, `{:task_crashed, reason}` -- the watchdog,
       interruption, or prompt-task exit ended a turn.
     * `{:overloaded, info}` -- a pending input or generated prompt exceeded
@@ -358,7 +356,6 @@ defmodule GenAgent do
           | {:pre_turn_crashed, atom()}
           | :task_supervisor_unavailable
           | :no_terminal_event
-          | {:event_capture_overflow, map()}
           | :timeout
           | :interrupted
           | {:task_crashed, term()}
@@ -389,10 +386,6 @@ defmodule GenAgent do
   @doc """
   A prompt->response turn completed successfully. Decide what to do next.
 
-  `response.prompt` contains the prompt actually dispatched to the backend,
-  including any rewrite by `pre_turn/2`. The request ref and prompt can be
-  recorded together for a transcript.
-
   Returning `{:prompt, next_prompt, state}` completes the caller's request
   with this response, then starts an independent follow-up with a new request
   reference. Its outcome is visible to callbacks, not delivered to the original
@@ -418,8 +411,6 @@ defmodule GenAgent do
     * The backend returned a synchronous `{:error, reason}` from `c:GenAgent.Backend.prompt/2`.
     * The event stream ended without a terminal `:result` or `:error` event.
     * The backend's event stream emitted a terminal `:error` event.
-    * Lossless event capture exceeded a configured limit (delivered as
-      `{:event_capture_overflow, diagnostics}`).
     * The prompt task crashed (delivered as `{:task_crashed, reason}`).
     * The configured task supervisor was unavailable before the turn started
       (`:task_supervisor_unavailable`). An immediate retry returned here is
@@ -745,14 +736,12 @@ defmodule GenAgent do
   Event evidence is bounded by `:max_events_per_turn` (default `1_000`)
   and `:max_event_bytes_per_turn` (default `1_048_576`), measured as the
   sum of `:erlang.external_size/1` for retained `GenAgent.Event` values.
-  Both limits must be positive integers. With the default
-  `event_retention: :compact`, an oversized turn succeeds with a bounded
-  prefix in `Response.events` and `Response.event_coverage` reports omissions.
-  All normalized events still reach `c:handle_stream_event/2`, and the
-  terminal result, full response text, and usage remain available separately.
-  Use `event_retention: :lossless` to require a complete event list; an event
-  that exceeds either limit then fails the turn with
-  `{:event_capture_overflow, diagnostics}` before entering the callback.
+  Both limits must be positive integers. An oversized turn succeeds with a
+  bounded prefix in `Response.events` and `Response.event_coverage` reports
+  omissions. All normalized events still reach `c:handle_stream_event/2`,
+  and the terminal result, full response text, and usage remain available
+  separately. Applications that need every event can retain them in
+  `c:handle_stream_event/2`.
 
   Pending prompt and deferred notification queues have independent count
   and payload-byte limits: `:max_pending_prompts` and
@@ -794,7 +783,7 @@ defmodule GenAgent do
 
   The reserved keys `:name`, `:backend`, `:watchdog_ms`, `:shutdown`,
   `:max_tell_results`, `:max_tell_result_bytes`, `:max_events_per_turn`,
-  `:max_event_bytes_per_turn`, `:event_retention`, `:max_pending_prompts`,
+  `:max_event_bytes_per_turn`, `:max_pending_prompts`,
   `:max_pending_prompt_bytes`, `:max_pending_notifications`, and
   `:max_pending_notification_bytes` are consumed and not forwarded. Any
   other option, including `:task_supervisor`, is forwarded to
@@ -859,7 +848,6 @@ defmodule GenAgent do
         :max_tell_result_bytes,
         :max_events_per_turn,
         :max_event_bytes_per_turn,
-        :event_retention,
         :max_pending_prompts,
         :max_pending_prompt_bytes,
         :max_pending_notifications,
@@ -881,7 +869,6 @@ defmodule GenAgent do
       |> maybe_put(:max_tell_result_bytes, Keyword.get(server_opts, :max_tell_result_bytes))
       |> maybe_put(:max_events_per_turn, Keyword.get(server_opts, :max_events_per_turn))
       |> maybe_put(:max_event_bytes_per_turn, Keyword.get(server_opts, :max_event_bytes_per_turn))
-      |> maybe_put(:event_retention, Keyword.get(server_opts, :event_retention))
       |> maybe_put(:max_pending_prompts, Keyword.get(server_opts, :max_pending_prompts))
       |> maybe_put(:max_pending_prompt_bytes, Keyword.get(server_opts, :max_pending_prompt_bytes))
       |> maybe_put(
@@ -1019,10 +1006,8 @@ defmodule GenAgent do
   Events are relayed through the agent after `c:handle_stream_event/2`
   runs, so for one ref they arrive before the completion message when
   `stream_to` and `recipient` are the same process. Separate processes
-  have no shared arrival order. Streaming is off by default and
-  independent of `event_retention`: compact mode relays events that the
-  retained history omits, and lossless mode does not relay the event it
-  rejects for exceeding the capture limits.
+  have no shared arrival order. Streaming is off by default and relays
+  events that the bounded `Response.events` history omits.
   Caller-owned retries relay each attempt's events under the same request
   ref, so an intermediate `:error` event can precede later successful events
   and the single final completion message.
@@ -1378,18 +1363,6 @@ defmodule GenAgent do
       :undefined -> nil
       pid -> pid
     end
-  end
-
-  @doc """
-  Return an unordered list of registered agent names.
-
-  This is a point-in-time view of `GenAgent.Registry`; agents running without
-  registration are excluded. Returned agents are not guaranteed to remain
-  alive, and registry cleanup may briefly lag agent termination.
-  """
-  @spec list() :: [name()]
-  def list do
-    Registry.select(GenAgent.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
   end
 
   defp call(name, request, timeout) do
