@@ -9,6 +9,16 @@ defmodule GenAgentEnsemble.Strategies.PipelineTest do
   alias GenAgentEnsemble.Strategies.Pipeline
   alias GenAgentEnsemble.TestAgent
 
+  defmodule InitProbe do
+    use GenAgent
+
+    @impl true
+    def init_agent(opts) do
+      send(Keyword.fetch!(opts, :observer), :pipeline_stage_started)
+      {:ok, [], %{}}
+    end
+  end
+
   setup do
     name = "pipe-#{System.unique_integer([:positive])}"
     on_exit(fn -> safe_stop(name) end)
@@ -38,6 +48,77 @@ defmodule GenAgentEnsemble.Strategies.PipelineTest do
       strategy: Pipeline,
       opts: [stages: stages]
     )
+  end
+
+  defp invalid_stages do
+    [
+      {nil, "Pipeline :stages must be a non-empty proper list"},
+      {%{}, "Pipeline :stages must be a non-empty proper list"},
+      {[], "pipeline requires at least one stage"},
+      {[{"a", TestAgent, []} | :bad], "Pipeline :stages must be a non-empty proper list"},
+      {[:secret], "Pipeline :stages entry 0 must be {binary_name, module, keyword_opts}"},
+      {[{"a", TestAgent}],
+       "Pipeline :stages entry 0 must be {binary_name, module, keyword_opts}"},
+      {[{:a, TestAgent, []}],
+       "Pipeline :stages entry 0 must be {binary_name, module, keyword_opts}"},
+      {[{"a", nil, []}], "Pipeline :stages entry 0 must be {binary_name, module, keyword_opts}"},
+      {[{"a", true, []}], "Pipeline :stages entry 0 must be {binary_name, module, keyword_opts}"},
+      {[{"a", false, []}],
+       "Pipeline :stages entry 0 must be {binary_name, module, keyword_opts}"},
+      {[{"a", "Module", []}],
+       "Pipeline :stages entry 0 must be {binary_name, module, keyword_opts}"},
+      {[{"a", TestAgent, %{secret: :value}}],
+       "Pipeline :stages entry 0 must be {binary_name, module, keyword_opts}"},
+      {[{"a", TestAgent, [:secret]}],
+       "Pipeline :stages entry 0 must be {binary_name, module, keyword_opts}"},
+      {[{"a", TestAgent, [{:secret, :value} | :bad]}],
+       "Pipeline :stages entry 0 must be {binary_name, module, keyword_opts}"},
+      {[{"a", TestAgent, []}, {"a", TestAgent, []}],
+       "Pipeline :stages entry 1 duplicates a stage name"},
+      {[{"a", TestAgent, []}, :secret],
+       "Pipeline :stages entry 1 must be {binary_name, module, keyword_opts}"}
+    ]
+  end
+
+  test "init rejects malformed containers, specs and identities with bounded errors" do
+    for {stages, message} <- invalid_stages() do
+      assert_raise ArgumentError, message, fn -> Pipeline.init(stages: stages) end
+    end
+
+    assert_raise KeyError, fn -> Pipeline.init([]) end
+  end
+
+  test "invalid stages fail at the server initialization boundary", %{name: name} do
+    Process.flag(:trap_exit, true)
+
+    for {stages, _} <- invalid_stages() do
+      assert {:error, {:init_failed, :error, ArgumentError}} =
+               E.start_link(name: name, strategy: Pipeline, opts: [stages: stages])
+
+      assert GenAgent.whereis(E.member_name(name, "a")) == nil
+    end
+  end
+
+  test "valid prefix is not started when a later identity is invalid", %{name: name} do
+    Process.flag(:trap_exit, true)
+    first = {"a", InitProbe, [backend: Mock, observer: self()]}
+
+    for later <- [:bad, first] do
+      assert {:error, {:init_failed, :error, ArgumentError}} =
+               E.start_link(name: name, strategy: Pipeline, opts: [stages: [first, later]])
+    end
+
+    refute_received :pipeline_stage_started
+
+    assert {:error, {:init_failed, :error, KeyError}} =
+             E.start_link(name: name, strategy: Pipeline, opts: [])
+  end
+
+  test "init preserves valid specs and exact binary identities" do
+    stages = for name <- ["", <<255>>, "a", "A", "a/b"], do: {name, TestAgent, []}
+    assert {:ok, state, ^stages} = Pipeline.init(stages: stages)
+    assert state.stages == Enum.map(stages, &elem(&1, 0))
+    assert state.phase == :idle
   end
 
   test "each stage transforms the previous output", %{name: name} do

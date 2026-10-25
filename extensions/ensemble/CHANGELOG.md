@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Pipeline validates its non-empty proper stage list, tuple specs, binary names,
+  module atoms, keyword options and duplicate identities before starting children.
+  Invalid stage configuration now raises a bounded `ArgumentError` during
+  initialization instead of failing through tuple matching or later dispatch.
+
 - Ensemble-issued tokens now use cryptographically strong opaque identifiers
   with the `tok-` prefix. Tokens remain strings; repeatable `await/3`, destructive
   `poll/2`, inbox draining and result retention are unchanged. The API assumes
