@@ -120,7 +120,8 @@ defmodule GenAgent.Delegation.StoreTest do
         end
       end)
 
-    assert_receive :owned
+    # Opening and persisting the store can exceed ExUnit's default 100ms on CI.
+    assert_receive :owned, 5_000
     assert {:error, :store_locked} = Store.open(dir)
     Process.exit(owner, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^owner, :killed}
