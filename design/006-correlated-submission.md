@@ -33,7 +33,6 @@ transition, before returning it. No synthetic `gen_statem` caller or extra
 idle mailbox hop is needed. Existing followup actions, state timeouts,
 telemetry and tell-kind lifecycle handling remain in place.
 
-Draining takes precedence: admission error `:draining`, no completion.
 Already halted plus `on_halt: :fail` rejects with `:halted`; ordinary halted
 work queues until resume. Queued admission uses existing count, serialized
 prompt-byte, FIFO and overload rules. Idle nonhalted work dispatches

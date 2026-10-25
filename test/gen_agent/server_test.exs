@@ -149,52 +149,6 @@ defmodule GenAgent.ServerTest do
       refute_receive {:gen_agent, :completion, "test", ^ref, _}
     end
 
-    test "draining a halted pending retry settles its original caller", %{task_sup: sup} do
-      for mode <- [:ask, :tell, :pid] do
-        observer = self()
-
-        pid =
-          start_server(sup, [retry_gate(self(), :first, [Event.new(:error, %{reason: :again})])],
-            error_handler: fn _, _, s -> {:prompt, "retry", s} end,
-            event_handler: fn :halt, s ->
-              send(observer, :halted)
-              {:halt, s}
-            end
-          )
-
-        caller = if mode == :ask, do: Task.async(fn -> ask(pid, "go") end)
-
-        ref =
-          case mode do
-            :ask ->
-              nil
-
-            :tell ->
-              {:ok, ref} = :gen_statem.call(pid, {:tell_with_completion, "go", self(), :queue})
-              ref
-
-            :pid ->
-              submit_completion(pid)
-          end
-
-        assert_receive {:retry_gate, :first, task, _}
-        notify(pid, :halt)
-        send(task, :release)
-        assert_receive :halted
-        assert status(pid).halted
-        assert :gen_statem.call(pid, :runtime_snapshot).self_chain_pending
-        assert :ok = :gen_statem.call(pid, :drain)
-
-        if caller do
-          assert {:error, :draining} = Task.await(caller)
-        else
-          assert_receive {:gen_agent, :completion, "test", ^ref, {:error, :draining}}
-        end
-
-        refute_receive {:retry_gate, _, _, _}
-      end
-    end
-
     test "orderly stop replies to an ask waiting in a halted retry", %{task_sup: sup} do
       observer = self()
 

@@ -329,28 +329,6 @@ defmodule GenAgent.ClientTest do
     empty_pending(pid)
   end
 
-  test "drain fails admitted queued work and rejects later submissions while active finishes" do
-    {name, pid} = start_agent()
-    monitor = Process.monitor(pid)
-    {:submitted, active} = Client.submit_with_completion(pid, "held")
-    accept(name, active)
-    assert_receive {:backend, "held", task}
-    {:submitted, queued} = Client.submit_with_completion(pid, "queued", self(), stream_to: self())
-    accept(name, queued)
-    # The existing server drain call is an explicit admission barrier; public
-    # GenAgent.drain additionally waits for exit.
-    assert :ok = :gen_statem.call(pid, :drain)
-    assert {:gen_agent, :completion, ^name, ^queued, {:error, :draining}} = next_message()
-    {:submitted, rejected} = Client.submit_with_completion(pid, "rejected")
-    assert {:gen_agent, :admission, ^name, ^rejected, {:error, :draining}} = next_message()
-    assert {:error, :not_found} = Client.poll(pid, rejected)
-    empty_pending(pid)
-    send(task, :release)
-    complete(name, active, "held")
-    assert {:DOWN, ^monitor, :process, ^pid, :normal} = next_message()
-    refute_received {:gen_agent, _, ^name, ^rejected, _}
-  end
-
   test "queued cancellation and exact interruption preserve unrelated refs" do
     {name, pid} = start_agent()
     {:submitted, active} = Client.submit_with_completion(pid, "held")

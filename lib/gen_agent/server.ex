@@ -57,7 +57,6 @@ defmodule GenAgent.Server do
       :max_pending_notification_bytes,
       halted: false,
       halt_pending: false,
-      draining: false,
       self_chain: nil,
       mailbox: :queue.new(),
       ask_monitors: %{},
@@ -406,10 +405,6 @@ defmodule GenAgent.Server do
   # Internal: :process_next -- decide what to do on entry to :idle
   # ---------------------------------------------------------------------------
 
-  defp dispatch_event(:internal, :process_next, :idle, %Data{draining: true} = data) do
-    {:stop, :normal, data}
-  end
-
   defp dispatch_event(:internal, :process_next, :idle, %Data{halted: true}) do
     :keep_state_and_data
   end
@@ -455,37 +450,6 @@ defmodule GenAgent.Server do
 
   defp dispatch_event(:info, :retry_generated_prompt, :processing, _data),
     do: :keep_state_and_data
-
-  # Stop admitting work before waiting for the active turn to finish.
-  defp dispatch_event({:call, from}, :drain, state, %Data{} = data) do
-    {data, queued_replies} = if data.draining, do: {data, []}, else: begin_drain(data)
-    actions = queued_replies ++ [{:reply, from, :ok}]
-
-    if state == :idle do
-      {:keep_state, data, actions ++ [{:next_event, :internal, :process_next}]}
-    else
-      {:keep_state, data, actions}
-    end
-  end
-
-  defp dispatch_event({:call, from}, {:ask, _prompt}, _state, %Data{draining: true} = data),
-    do: reject_during_drain(data, from)
-
-  defp dispatch_event({:call, from}, {:tell, _prompt}, _state, %Data{draining: true} = data),
-    do: reject_during_drain(data, from)
-
-  defp dispatch_event(
-         {:call, from},
-         {:notify_ack, _event},
-         _state,
-         %Data{draining: true} = data
-       ),
-       do: reject_during_drain(data, from)
-
-  defp dispatch_event(:cast, {:notify, _event}, _state, %Data{draining: true} = data) do
-    emit_input_rejected(data.name, :draining)
-    :keep_state_and_data
-  end
 
   # ---------------------------------------------------------------------------
   # ask -- synchronous prompt
@@ -653,7 +617,7 @@ defmodule GenAgent.Server do
     {:keep_state_and_data, [{:reply, from, {:error, :not_current}}]}
   end
 
-  defp dispatch_event({:call, from}, :reset_session, :idle, %Data{draining: false} = data) do
+  defp dispatch_event({:call, from}, :reset_session, :idle, %Data{} = data) do
     result =
       if function_exported?(data.backend, :reset_session, 1) do
         try do
@@ -677,9 +641,6 @@ defmodule GenAgent.Server do
     end
   end
 
-  defp dispatch_event({:call, from}, :reset_session, _state, %Data{draining: true}),
-    do: {:keep_state_and_data, [{:reply, from, {:error, :draining}}]}
-
   defp dispatch_event({:call, from}, :reset_session, _state, _data),
     do: {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
 
@@ -695,7 +656,6 @@ defmodule GenAgent.Server do
         end,
       halted: data.halted,
       halt_pending: data.halt_pending,
-      draining: data.draining,
       agent_state: data.agent_state
     }
 
@@ -722,7 +682,6 @@ defmodule GenAgent.Server do
       phase: state,
       halted: data.halted,
       halt_pending: data.halt_pending,
-      draining: data.draining,
       pending_prompts: :queue.len(data.mailbox),
       pending_notifications: :queue.len(data.pending_events),
       self_chain_pending: not is_nil(data.self_chain),
@@ -810,11 +769,11 @@ defmodule GenAgent.Server do
   # halt/resume -- pause dispatch without interrupting the active turn
   # ---------------------------------------------------------------------------
 
-  defp dispatch_event(:cast, :halt, :idle, %Data{draining: false} = data) do
+  defp dispatch_event(:cast, :halt, :idle, %Data{} = data) do
     {:keep_state, transition_to_halted(data)}
   end
 
-  defp dispatch_event(:cast, :halt, :processing, %Data{draining: false} = data) do
+  defp dispatch_event(:cast, :halt, :processing, %Data{} = data) do
     {:keep_state, %{data | halt_pending: true}}
   end
 
@@ -1019,9 +978,6 @@ defmodule GenAgent.Server do
 
   defp dispatch_unhandled_info(message, state, data) do
     cond do
-      data.draining ->
-        :keep_state_and_data
-
       not function_exported?(data.agent_module, :handle_info, 2) ->
         Logger.debug("GenAgent #{inspect(data.name)} received an unexpected info message")
         :keep_state_and_data
@@ -1048,46 +1004,6 @@ defmodule GenAgent.Server do
 
         result
     end
-  end
-
-  defp reject_during_drain(data, from) do
-    emit_input_rejected(data.name, :draining)
-    {:keep_state_and_data, [{:reply, from, {:error, :draining}}]}
-  end
-
-  defp begin_drain(%Data{} = data) do
-    {data, replies} =
-      Enum.reduce(:queue.to_list(data.mailbox), {data, []}, fn {ref, kind, _prompt},
-                                                               {data, replies} ->
-        emit_turn_rejected(data.name, ref, kind, :draining)
-        {data, reply} = record_error(data, %{request_ref: ref, kind: kind}, :draining)
-        {data, Enum.reverse(reply, replies)}
-      end)
-
-    {data, queued_replies} =
-      case data.self_chain do
-        {:retry, _prompt, kind, ref, attempt} ->
-          emit_turn_rejected(data.name, ref, kind, :draining, attempt)
-          {data, reply} = record_error(data, %{request_ref: ref, kind: kind}, :draining)
-          {data, Enum.reverse(reply, replies)}
-
-        _other ->
-          {data, replies}
-      end
-
-    Enum.each(Map.keys(data.ask_monitors), &Process.demonitor(&1, [:flush]))
-
-    {%{
-       data
-       | draining: true,
-         mailbox: :queue.new(),
-         ask_monitors: %{},
-         pending_prompt_bytes: 0,
-         pending_events: :queue.new(),
-         pending_notification_bytes: 0,
-         self_chain: nil,
-         stream_recipients: %{}
-     }, Enum.reverse(queued_replies)}
   end
 
   defp registered_here?(name) do
@@ -1235,11 +1151,6 @@ defmodule GenAgent.Server do
   # Both transports share this admission decision. The caller owns only the
   # correlation ref and how to report admission; accepted work follows the
   # existing tell lifecycle, including immediate pre_turn completion.
-  defp admit_completion(%Data{draining: true} = data, _state, _ref, _prompt, _kind, _) do
-    emit_input_rejected(data.name, :draining)
-    {:keep_state_and_data, {:error, :draining}}
-  end
-
   defp admit_completion(%Data{halted: true}, :idle, _ref, _prompt, {:tell, _, :fail}, _) do
     {:keep_state_and_data, {:error, :halted}}
   end
@@ -2386,12 +2297,12 @@ defmodule GenAgent.Server do
     end
   end
 
-  defp finish_external_halt(%Data{halt_pending: true, draining: false} = data),
+  defp finish_external_halt(%Data{halt_pending: true} = data),
     do: transition_to_halted(data)
 
   defp finish_external_halt(%Data{} = data), do: %{data | halt_pending: false}
 
-  defp record_or_enqueue_error(%Data{draining: false} = data, current, reason, {:prompt, prompt})
+  defp record_or_enqueue_error(%Data{} = data, current, reason, {:prompt, prompt})
        when reason != :interrupted do
     if request_origin(current.kind) in [:ask, :tell] do
       retry = {:retry, prompt, current.kind, current.request_ref, current.attempt + 1}
