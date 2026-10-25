@@ -65,7 +65,11 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
 
   defp validate_stages!([]), do: raise(ArgumentError, "pipeline requires at least one stage")
 
-  defp validate_stages!(stages) when is_list(stages) and length(stages) > 0 do
+  defp validate_stages!(stages) do
+    unless proper_list?(stages) do
+      raise ArgumentError, "Pipeline :stages must be a non-empty proper list"
+    end
+
     stages
     |> Enum.with_index()
     |> Enum.reduce(MapSet.new(), fn {spec, index}, names ->
@@ -79,8 +83,9 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
     end)
   end
 
-  defp validate_stages!(_),
-    do: raise(ArgumentError, "Pipeline :stages must be a non-empty proper list")
+  defp proper_list?([]), do: true
+  defp proper_list?([_ | tail]), do: proper_list?(tail)
+  defp proper_list?(_), do: false
 
   # Report only the index: stage names and options may contain sensitive data.
   defp validate_stage!({name, module, opts}, index)
