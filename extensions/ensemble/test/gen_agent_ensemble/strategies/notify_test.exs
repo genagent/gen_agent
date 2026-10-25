@@ -74,10 +74,21 @@ defmodule GenAgentEnsemble.Strategies.NotifyTest do
     ref
   end
 
+  # Core 0.11 reports buffered notifications in status/2. The published core
+  # used by the Hex archive job only has them in runtime_snapshot/2.
+  defp member_status(member_name) do
+    if function_exported?(GenAgent, :runtime_snapshot, 2) do
+      snapshot = apply(GenAgent, :runtime_snapshot, [member_name, :infinity])
+      %{state: snapshot.phase, pending_notifications: snapshot.pending_notifications}
+    else
+      GenAgent.status(member_name)
+    end
+  end
+
   # The turn stays gated throughout, so the phase must remain :processing.
   defp await_buffered_notifications(member_name, count, deadline \\ nil) do
     deadline = deadline || System.monotonic_time(:millisecond) + 2_000
-    snapshot = GenAgent.status(member_name)
+    snapshot = member_status(member_name)
     assert %{state: :processing} = snapshot
 
     cond do
