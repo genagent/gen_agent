@@ -48,7 +48,7 @@ defmodule GenAgent.Backends.OpenAIHTTPTest do
              "store" => true
            }
 
-    assert request.options[:receive_timeout] == 60_000
+    assert request.options[:receive_timeout] == 180_000
     refute Map.has_key?(request.options, :connect_options)
     refute Map.has_key?(request.options, :finch)
     assert request.options[:retry] == false

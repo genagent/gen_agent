@@ -38,7 +38,7 @@ primitive and is a much cleaner fit for `GenAgent`:
   `previous_response_id` means the session tracks one id across turns.
   With `store: false`, it keeps input and output items locally and
   resends them on each turn.
-- Reasoning models (o1/o3/o4/gpt-5) surface reasoning items in the
+- Reasoning models surface reasoning items in the
   output array; this backend ignores them for text extraction but
   surfaces `reasoning_tokens` in the `:usage` event so patterns
   can reason about cost.
@@ -172,6 +172,16 @@ every turn after the first.
 
 ## Backend options
 
+Default refresh (verified against official OpenAI documentation on 2026-10-24):
+[OpenAI's deprecation notice](https://developers.openai.com/api/docs/deprecations)
+lists GPT-5 and its snapshot for shutdown December 11, 2026, recommending
+`gpt-5.6-sol`. The [replacement model](https://developers.openai.com/api/docs/models/gpt-5.6-sol)
+supports the Responses API and `reasoning.effort`. This selects the documented
+replacement rather than tracking the newest flagship. The output limit remains
+unset; the 180-second receive timeout gives reasoning turns more headroom without
+guaranteeing completion. Explicit model, limit, and timeout settings pass through
+unchanged. Re-evaluate cost and latency for your workload before upgrading.
+
 - `:api_key` -- OpenAI API key. Defaults to
   `System.get_env("OPENAI_API_KEY")`. Starting without a non-empty key
   returns `{:error, :missing_api_key}` (through `GenAgent.start_agent/2`,
@@ -183,10 +193,10 @@ every turn after the first.
 - `:headers` -- additional headers as a string-keyed map or list of
   `{name, value}` pairs. Auth, content type, and transport headers cannot
   be overridden. Values must contain only printable ASCII or horizontal tabs.
-- `:request_fields` -- extra JSON body fields such as `%{temperature: 0.2}`.
+- `:request_fields` -- extra JSON body fields such as `%{metadata: %{task: "example"}}`.
   Backend-owned fields (input, storage, continuation, reasoning, streaming,
   and tools) cannot be overridden.
-- `:model` -- model name. Defaults to `"gpt-5"`.
+- `:model` -- model name. Defaults to `"gpt-5.6-sol"`.
 - `:store` -- whether OpenAI stores responses for server-side continuation.
   Defaults to `true`. Set `false` to replay local context each turn.
 - `:system_prompt` -- system prompt (string). Resent every turn as API
@@ -202,7 +212,7 @@ every turn after the first.
   then uses `"disabled"`. `"auto"` drops older conversation items to fit
   the context window.
 - `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
-  to `60_000`. The 60-second default can be short for long reasoning turns.
+  to `180_000`. Increase this for long reasoning turns; this is a receive timeout, not a total turn deadline.
 - `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults
   to `nil` (Req's default). Configure it when starting a named Finch pool;
   `:connect_timeout` cannot be combined with `finch: [name: MyFinch]`.

@@ -13,7 +13,7 @@ defmodule GenAgent.Backends.AnthropicLiveTest do
   use ExUnit.Case, async: false
 
   @moduletag :live
-  @moduletag timeout: 120_000
+  @moduletag timeout: 600_000
 
   case System.get_env("ANTHROPIC_API_KEY") do
     nil -> @moduletag skip: "ANTHROPIC_API_KEY not set"
@@ -50,7 +50,6 @@ defmodule GenAgent.Backends.AnthropicLiveTest do
         GenAgent.start_agent(LiveAnthropicAgent,
           name: name,
           backend: GenAgent.Backends.Anthropic,
-          max_tokens: 64,
           system: "You are a terse assistant. Respond with the minimum required."
         )
 
@@ -62,7 +61,7 @@ defmodule GenAgent.Backends.AnthropicLiveTest do
       end)
 
       {:ok, response} =
-        GenAgent.ask(name, "Respond with exactly the word 'pong' and nothing else.")
+        GenAgent.ask(name, "Respond with exactly the word 'pong' and nothing else.", 240_000)
 
       IO.puts("\n=== Anthropic live response ===")
       IO.puts("text: #{inspect(response.text)}")
@@ -89,7 +88,6 @@ defmodule GenAgent.Backends.AnthropicLiveTest do
         GenAgent.start_agent(LiveAnthropicAgent,
           name: name,
           backend: GenAgent.Backends.Anthropic,
-          max_tokens: 64,
           system: "You are a terse assistant. Respond with the minimum required."
         )
 
@@ -103,13 +101,15 @@ defmodule GenAgent.Backends.AnthropicLiveTest do
       {:ok, r1} =
         GenAgent.ask(
           name,
-          "Remember the number 42. Respond with exactly 'ok' and nothing else."
+          "Remember the number 42. Respond with exactly 'ok' and nothing else.",
+          240_000
         )
 
       {:ok, r2} =
         GenAgent.ask(
           name,
-          "What number did I ask you to remember? Respond with just the number."
+          "What number did I ask you to remember? Respond with just the number.",
+          240_000
         )
 
       IO.puts("\n=== Anthropic multi-turn ===")

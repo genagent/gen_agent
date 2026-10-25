@@ -50,7 +50,7 @@ defmodule GenAgent.Backends.OpenAI do
 
   ## Reasoning models
 
-  For reasoning models (o1/o3/o4/gpt-5), the response body contains
+  For reasoning models, the response body contains
   `output[]` items with `type: "reasoning"` alongside the
   `type: "message"` item. This backend ignores the reasoning items
   entirely when extracting text -- it walks `output[]` looking for
@@ -80,10 +80,10 @@ defmodule GenAgent.Backends.OpenAI do
       names are matched case-insensitively. Values must contain only printable
       ASCII or horizontal tabs.
     * `:request_fields` -- map of additional JSON request fields, such as
-      `%{temperature: 0.2}`. Fields managed by the backend, including input,
+      `%{metadata: %{task: "example"}}`. Fields managed by the backend, including input,
       storage, continuation, reasoning, streaming, and tools, cannot be
       overridden.
-    * `:model` -- model name. Defaults to `"gpt-5"`.
+    * `:model` -- model name. Defaults to `"gpt-5.6-sol"`.
     * `:store` -- whether OpenAI stores responses for server-side continuation.
       Defaults to `true`. With `false`, completed turns are held in the local
       session and resent on each request; prompts grow with the conversation.
@@ -100,7 +100,7 @@ defmodule GenAgent.Backends.OpenAI do
       Omitted by default, which uses the API's `"disabled"` default.
       `"auto"` drops older conversation items when the context window fills.
     * `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults to
-      `60_000`; increase it for long-context or slow reasoning turns.
+      `180_000`; increase it for long-context or slow reasoning turns.
     * `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults to
       Req's default when unset. With a named Finch pool, configure this when
       starting Finch instead; the two session options cannot be combined.
@@ -129,8 +129,8 @@ defmodule GenAgent.Backends.OpenAI do
   @compile {:no_warn_undefined, Error}
 
   @default_base_url "https://api.openai.com/v1"
-  @default_model "gpt-5"
-  @default_receive_timeout 60_000
+  @default_model "gpt-5.6-sol"
+  @default_receive_timeout 180_000
   @conversation_error_codes [
     "previous_response_not_found",
     "context_length_exceeded",

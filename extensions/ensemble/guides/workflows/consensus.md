@@ -286,7 +286,7 @@ iex> E.await("arch-review", tok, 600_000) |> E.puts()
 - **Heterogeneous backends == heterogeneous timeouts.** Sonnet
   responses through `gen_agent_anthropic` need `:receive_timeout:
   180_000` to reliably complete long-context rounds. OpenAI's
-  gpt-5-mini is a reasoning model and can burn output tokens on
+  gpt-5.6-terra is a reasoning model and can burn output tokens on
   hidden reasoning -- set `:max_output_tokens` high enough to
   leave room for the actual message.
 

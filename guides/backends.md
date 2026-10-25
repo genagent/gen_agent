@@ -295,8 +295,8 @@ does not establish the value.
 | Module | `GenAgent.Backends.Claude` | `GenAgent.Backends.Codex` | `GenAgent.Backends.Anthropic` | `GenAgent.Backends.OpenAI` |
 | Transport | `claude` CLI, stream-json, via `ClaudeWrapper.stream/2` | `codex exec` NDJSON via `CodexWrapper.Exec` and `ExecResume` | `POST /v1/messages` via `Req` | `POST /v1/responses` via `Req` |
 | System prompt option | `:system_prompt` (also `:append_system_prompt`) | None. Use `AGENTS.md` or Codex configuration | `:system` | `:instructions`, resent every turn |
-| Default model | Not set by the backend; CLI default not documented | Not set by the backend; CLI default not documented | `"claude-sonnet-4-5"` | `"gpt-5"` |
-| Output token option | None | None | `:max_tokens`, default `1024` | `:max_output_tokens`, default unset |
+| Default model | Not set by the backend; CLI default not documented | Not set by the backend; CLI default not documented | `"claude-sonnet-5-5"` | `"gpt-5.6-sol"` |
+| Output token option | None | None | `:max_output_tokens` (`:max_tokens` alias), default `8192` | `:max_output_tokens`, default unset |
 | Session continuity | CLI `session_id`, passed as `--resume` on later turns | Codex `thread_id`, continued with `codex exec resume` | Full messages array kept in the session and resent each turn | `previous_response_id` with `store: true` (default); local input/output history resent with `store: false` |
 | Checkpoints (`prompt/3`) | Yes, from `system`, `result`, or `error` events | Yes, from `thread.started`, `turn.completed`, `turn.failed`, and `error` events | No | No |
 | Text as deltas | Yes, with `:include_partial_messages` (on by default) | No. One `:text` per completed message, with `message_boundary: true` | No. Text only on `:result` | No. Text only on `:result` |
@@ -313,7 +313,7 @@ does not establish the value.
   `GenAgent.Backends.Codex` dispatches through `:exec_fn`, default
   `Exec.stream/2` on the first turn and `ExecResume.stream/2` after a
   thread ID is known. The HTTP backends call `Req.post/2` with
-  `retry: false` and a `:receive_timeout` default of `60_000`, through
+  `retry: false` and a `:receive_timeout` default of `180_000`, through
   the replaceable `:http_fn` option.
 - **System prompt.** The Claude backend forwards query options to
   `ClaudeWrapper.Query.apply_opts/2`. The Codex moduledoc states it

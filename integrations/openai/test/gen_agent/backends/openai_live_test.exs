@@ -13,7 +13,7 @@ defmodule GenAgent.Backends.OpenAILiveTest do
   use ExUnit.Case, async: false
 
   @moduletag :live
-  @moduletag timeout: 120_000
+  @moduletag timeout: 600_000
 
   case System.get_env("OPENAI_API_KEY") do
     nil -> @moduletag skip: "OPENAI_API_KEY not set"
@@ -52,8 +52,6 @@ defmodule GenAgent.Backends.OpenAILiveTest do
         GenAgent.start_agent(LiveOpenAIAgent,
           name: name,
           backend: GenAgent.Backends.OpenAI,
-          model: "gpt-5-mini",
-          max_output_tokens: 1024,
           instructions: "You are a terse assistant. Respond with the minimum required."
         )
 
@@ -65,7 +63,7 @@ defmodule GenAgent.Backends.OpenAILiveTest do
       end)
 
       {:ok, response} =
-        GenAgent.ask(name, "Respond with exactly the word 'pong' and nothing else.")
+        GenAgent.ask(name, "Respond with exactly the word 'pong' and nothing else.", 240_000)
 
       IO.puts("\n=== OpenAI live response ===")
       IO.puts("text: #{inspect(response.text)}")
@@ -92,8 +90,6 @@ defmodule GenAgent.Backends.OpenAILiveTest do
         GenAgent.start_agent(LiveOpenAIAgent,
           name: name,
           backend: GenAgent.Backends.OpenAI,
-          model: "gpt-5-mini",
-          max_output_tokens: 1024,
           instructions: "You are a terse assistant. Respond with the minimum required."
         )
 
@@ -107,13 +103,15 @@ defmodule GenAgent.Backends.OpenAILiveTest do
       {:ok, r1} =
         GenAgent.ask(
           name,
-          "Remember the number 42. Respond with exactly 'ok' and nothing else."
+          "Remember the number 42. Respond with exactly 'ok' and nothing else.",
+          240_000
         )
 
       {:ok, r2} =
         GenAgent.ask(
           name,
-          "What number did I ask you to remember? Respond with just the number."
+          "What number did I ask you to remember? Respond with just the number.",
+          240_000
         )
 
       IO.puts("\n=== OpenAI multi-turn ===")

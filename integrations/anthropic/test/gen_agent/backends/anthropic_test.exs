@@ -32,6 +32,37 @@ defmodule GenAgent.Backends.AnthropicTest do
     end
   end
 
+  test "implicit defaults reach the request without adding reasoning settings" do
+    ref = make_ref()
+    {:ok, session} = Anthropic.start_session(http_fn: recording_fn(ref, ok_response("hi")))
+    assert {:ok, _events, _session} = Anthropic.prompt(session, "ping")
+    assert_receive {^ref, request}
+    assert request.body.model == "claude-sonnet-5-5"
+    assert request.body.max_tokens == 8192
+    assert request.receive_timeout == 180_000
+    refute Map.has_key?(request.body, :thinking)
+    refute Map.has_key?(request.body, :reasoning)
+  end
+
+  test "explicit model, canonical and legacy limits, and timeouts reach requests unchanged" do
+    for limit <- [:max_output_tokens, :max_tokens], timeout <- [0, 17, :infinity] do
+      ref = make_ref()
+
+      opts = [
+        model: "caller-model",
+        receive_timeout: timeout,
+        http_fn: recording_fn(ref, ok_response("hi"))
+      ]
+
+      {:ok, session} = Anthropic.start_session(Keyword.put(opts, limit, 64))
+      assert {:ok, _events, _session} = Anthropic.prompt(session, "ping")
+      assert_receive {^ref, request}
+      assert request.body.model == "caller-model"
+      assert request.body.max_tokens == 64
+      assert request.receive_timeout == timeout
+    end
+  end
+
   describe "start_session/1" do
     test "validates Finch pool options and rejects a named-pool connect timeout" do
       for finch <- [
@@ -155,8 +186,8 @@ defmodule GenAgent.Backends.AnthropicTest do
 
     test "uses defaults for model and max_tokens" do
       {:ok, session} = Anthropic.start_session(http_fn: ok_response("hi"))
-      assert session.model == "claude-sonnet-4-5"
-      assert session.max_tokens == 1024
+      assert session.model == "claude-sonnet-5-5"
+      assert session.max_tokens == 8192
       assert session.cache == false
     end
 
@@ -372,9 +403,9 @@ defmodule GenAgent.Backends.AnthropicTest do
                Anthropic.start_session(system_prompt: "new", system: "old")
     end
 
-    test "receive_timeout defaults to 60_000" do
+    test "receive_timeout defaults to 180_000" do
       {:ok, session} = Anthropic.start_session(http_fn: ok_response("hi"))
-      assert session.receive_timeout == 60_000
+      assert session.receive_timeout == 180_000
     end
 
     test "accepts explicit :receive_timeout and :connect_timeout" do
@@ -503,7 +534,7 @@ defmodule GenAgent.Backends.AnthropicTest do
       {:ok, _events, _session} = Anthropic.prompt(session, "hi")
 
       assert_receive {^ref, request}
-      assert request.receive_timeout == 60_000
+      assert request.receive_timeout == 180_000
       assert request.connect_timeout == nil
     end
 

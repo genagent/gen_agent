@@ -23,8 +23,11 @@ defmodule GenAgent.Backends.Anthropic do
   2. When the state machine delivers the terminal `:result` event,
      it calls `update_session/2` with the event's data, and this
      backend appends the assistant's message to `session.messages`.
-     With extended thinking enabled, it replays the complete assistant
-     content blocks on later turns while result events expose only answer text.
+     When the caller explicitly sets `request_fields.thinking`, it retains
+     the complete assistant content blocks for later turns with non-blank
+     answers; result events expose only answer text. Without that field,
+     including with the default model's adaptive thinking, it retains only
+     answer text.
      If the response is empty, it removes the unanswered user message instead.
   3. The next `prompt/2` sends the updated history to the API.
 
@@ -56,13 +59,13 @@ defmodule GenAgent.Backends.Anthropic do
       overridden; names are matched case-insensitively. Values must contain
       only printable ASCII or horizontal tabs.
     * `:request_fields` -- map of additional JSON request fields, such as
-      `%{temperature: 0.2}`. For extended thinking, use a supported model with
-      `max_output_tokens: 2048` and
-      `request_fields: %{thinking: %{type: "enabled", budget_tokens: 1024}}`.
+      `%{metadata: %{user_id: "example-user"}}`. The default model uses adaptive thinking;
+      `request_fields: %{output_config: %{effort: "medium"}}` adjusts effort.
+      Sonnet 5.5 rejects thinking budgets and sampling parameters.
       Fields managed by the backend, including messages, model, token limit,
       caching, streaming, and tools, cannot be overridden.
-    * `:model` -- model name. Defaults to `"claude-sonnet-4-5"`.
-    * `:max_output_tokens` -- max tokens per turn. Defaults to `1024`.
+    * `:model` -- model name. Defaults to `"claude-sonnet-5-5"`.
+    * `:max_output_tokens` -- max tokens per turn. Defaults to `8192` (thinking plus answer tokens).
       `:max_tokens` remains a deprecated alias.
     * `:system_prompt` -- system prompt (string). `:system` and
       `:instructions` remain deprecated aliases.
@@ -73,10 +76,8 @@ defmodule GenAgent.Backends.Anthropic do
       pairs in subsequent requests. Defaults to `:infinity`; `0` keeps no
       prior turns. Older pairs are dropped after each successful turn.
     * `:receive_timeout` -- HTTP receive timeout in milliseconds.
-      Defaults to `60_000`. Long-context turns (big messages array,
-      slow models) can blow through Req's 15s default, so the backend
-      picks a safer default. Set higher for large debates or longer
-      generations.
+      Defaults to `180_000`; increase it for long-context or slow reasoning
+      turns. This is a receive timeout, not a total turn deadline.
     * `:connect_timeout` -- HTTP connect timeout in milliseconds.
       Defaults to Req's default when unset. With a named Finch pool,
       configure this when starting Finch; the two session options cannot
@@ -107,9 +108,9 @@ defmodule GenAgent.Backends.Anthropic do
 
   @default_base_url "https://api.anthropic.com/v1"
   @default_api_version "2023-06-01"
-  @default_model "claude-sonnet-4-5"
-  @default_max_tokens 1024
-  @default_receive_timeout 60_000
+  @default_model "claude-sonnet-5-5"
+  @default_max_tokens 8192
+  @default_receive_timeout 180_000
   @known_options [
     :api_key,
     :base_url,
