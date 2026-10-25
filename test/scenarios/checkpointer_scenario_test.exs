@@ -190,7 +190,7 @@ defmodule GenAgent.Scenarios.CheckpointerTest do
       GenAgent.notify(name, {:review, s1.review_token, :approve})
       GenAgent.notify(name, {:review, s1.review_token, :finish})
       GenAgent.notify(name, {:review, s1.review_token, {:revise, "too early"}})
-      assert GenAgent.runtime_snapshot(name).pending_notifications == 3
+      assert GenAgent.status(name).pending_notifications == 3
 
       finish_turn(task, {:ok, "draft 2"})
       s2 = await_phase(name, :awaiting_review)
@@ -199,7 +199,7 @@ defmodule GenAgent.Scenarios.CheckpointerTest do
       assert s2.draft == "draft 2"
       assert is_reference(s2.review_token)
       assert GenAgent.status(name).state == :idle
-      assert GenAgent.runtime_snapshot(name).pending_notifications == 0
+      assert GenAgent.status(name).pending_notifications == 0
       refute GenAgent.status(name).halted
       refute_receive {:turn, _, _}, 50
 

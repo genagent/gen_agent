@@ -29,7 +29,7 @@ status and final success line, not compare the whole output.
 | F | Kill the caller-owned task supervisor in a `:rest_for_one` tree. Both supervisor pids are replaced, the temporary agent exits, and the replacement dynamic supervisor has no agents. The agent is idle here to isolate tree behavior from retry dispatch. |
 | G | Stop the owner tree while a turn is held. Both termination callbacks run, the prompt task dies, and `whereis/1` becomes nil. |
 | H | Override the default temporary child spec with `Supervisor.child_spec(spec, restart: :permanent)`, complete a turn, then kill the agent. The same name resolves to a new pid with empty response history, a new backend session id, and zero previous backend turns. |
-| I | During a held turn, buffer five notifications and two additional prompts. The sixth `notify_ack/3` and third queued `tell/3` return overload errors. Assert the queue, `limit: :count`, `pending_count`, and `max_count` fields. `runtime_snapshot/2` shows five pending notifications, two pending prompts, the running request, and no self-chain. Release the turn and verify that both queued prompts complete and the counts drain to zero. |
+| I | During a held turn, buffer five notifications and two additional prompts. The sixth `notify_ack/3` and third queued `tell/3` return overload errors. Assert the queue, `limit: :count`, `pending_count`, and `max_count` fields. `status/2` shows five pending notifications, two pending prompts, the running request, and no self-chain. Release the turn and verify that both queued prompts complete and the counts drain to zero. |
 
 The backend yields two text events and a terminal result. The `"hold"` prompt
 waits for an explicit release between its text events; `"crash"` raises on

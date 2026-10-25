@@ -638,48 +638,34 @@ defmodule GenAgent.Server do
     do: {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
 
   defp dispatch_event({:call, from}, :status, state, %Data{} = data) do
+    {current_request, current_turn} =
+      case data.current_request do
+        nil ->
+          {nil, nil}
+
+        current ->
+          {current.request_ref,
+           %{
+             origin: request_origin(current.kind),
+             attempt: current.attempt,
+             elapsed_ms: max(System.monotonic_time(:millisecond) - current.started_at, 0),
+             watchdog_ms: data.watchdog_ms
+           }}
+      end
+
     status = %{
       state: state,
       name: data.name,
       queued: :queue.len(data.mailbox),
-      current_request:
-        case data.current_request do
-          nil -> nil
-          %{request_ref: ref} -> ref
-        end,
+      pending_notifications: :queue.len(data.pending_events),
+      self_chain_pending: not is_nil(data.self_chain),
+      current_request: current_request,
+      current_turn: current_turn,
       halted: data.halted,
       agent_state: data.agent_state
     }
 
     {:keep_state_and_data, [{:reply, from, status}]}
-  end
-
-  defp dispatch_event({:call, from}, :runtime_snapshot, state, %Data{} = data) do
-    current_request =
-      case data.current_request do
-        nil ->
-          nil
-
-        current ->
-          %{
-            ref: current.request_ref,
-            origin: request_origin(current.kind),
-            attempt: current.attempt,
-            elapsed_ms: max(System.monotonic_time(:millisecond) - current.started_at, 0),
-            watchdog_ms: data.watchdog_ms
-          }
-      end
-
-    snapshot = %{
-      phase: state,
-      halted: data.halted,
-      pending_prompts: :queue.len(data.mailbox),
-      pending_notifications: :queue.len(data.pending_events),
-      self_chain_pending: not is_nil(data.self_chain),
-      current_request: current_request
-    }
-
-    {:keep_state_and_data, [{:reply, from, snapshot}]}
   end
 
   # ---------------------------------------------------------------------------

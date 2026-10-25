@@ -102,11 +102,11 @@ defmodule GenAgent.HeartbeatGuideTest do
     halt(name)
     :ok = GenAgent.notify_ack(name, {:observation, :one})
     :ok = GenAgent.notify_ack(name, :tick)
-    assert GenAgent.runtime_snapshot(name).pending_prompts == 0
+    assert GenAgent.status(name).queued == 0
     :ok = GenAgent.notify_ack(name, {:observation, :two})
     :ok = GenAgent.notify_ack(name, :tick)
     for _ <- 1..3, do: assert(:ok == GenAgent.notify_ack(name, :tick))
-    assert GenAgent.runtime_snapshot(name).pending_prompts == 1
+    assert GenAgent.status(name).queued == 1
     assert state(name).in_flight == [:one, :two]
     GenAgent.resume(name)
     assert_receive {:started, _, task}
@@ -115,7 +115,7 @@ defmodule GenAgent.HeartbeatGuideTest do
     :ok = GenAgent.notify_ack(name, {:observation, :three})
     :ok = GenAgent.notify_ack(name, :tick)
     assert state(name).observations == [:three]
-    assert GenAgent.runtime_snapshot(name).pending_prompts == 0
+    assert GenAgent.status(name).queued == 0
     refute_receive {:started, _, _}
   end
 
@@ -140,7 +140,7 @@ defmodule GenAgent.HeartbeatGuideTest do
     :ok = GenAgent.notify_ack(name, {:observation, :accepted})
     assert {:error, {:overloaded, _}} = GenAgent.notify_ack(name, {:observation, :rejected})
     assert :ok = GenAgent.notify(name, {:observation, :dropped})
-    assert GenAgent.runtime_snapshot(name).pending_notifications == 1
+    assert GenAgent.status(name).pending_notifications == 1
     send(task, :release)
     await(fn -> length(state(name).summaries) == 1 end)
     assert state(name).observations == [:accepted]

@@ -52,7 +52,7 @@ defmodule GenAgent.ReadmeRequestsGuideTest do
              evaluate("try do\n  with {:ok, ref}", name)
 
     assert GenAgent.poll(name, ref) == {:error, :cancelled}
-    assert GenAgent.runtime_snapshot(name).pending_prompts == 0
+    assert GenAgent.status(name).queued == 0
   end
 
   test "missing agent is returned on submission" do

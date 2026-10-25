@@ -106,7 +106,7 @@ defmodule GenAgent do
   or `c:pre_turn/2` can return `{:halt, state}` to go idle but freeze the
   mailbox. An ordinary `ask/3`, `tell/3`, or `tell_with_completion/4`
   admitted while halted waits in the queue until `resume/1` is called.
-  Inspect `status/2` or `runtime_snapshot/2` to distinguish a halted
+  Inspect `status/2` to distinguish a halted
   queue from an active turn. The five-argument
   `tell_with_completion/5` supports `on_halt: :fail` for callers that
   cannot resume the agent.
@@ -225,7 +225,7 @@ defmodule GenAgent do
 
   Anything that runs in the agent process blocks the agent from handling
   other messages while it runs. Synchronous calls such as `status/2`,
-  `poll/3`, `tell/3`, `runtime_snapshot/2` and `notify_ack/3` are handled
+  `poll/3`, `tell/3` and `notify_ack/3` are handled
   by that process, so they wait until the callback returns. Their default
   timeout is `:infinity`, so a caller waits as long as the callback takes
   unless it passes a shorter timeout. Asynchronous casts such as
@@ -282,7 +282,6 @@ defmodule GenAgent do
     * `resume/1` -- unhalt an agent and drain its mailbox.
     * `reset_session/2` -- clear a backend's conversation context between turns.
     * `status/2` -- read the agent's current state.
-    * `runtime_snapshot/2` -- read bounded runtime metadata.
     * `stop/1` -- terminate the agent.
     * `stop/2` -- terminate an agent under its caller-owned supervisor.
     * `whereis/1` -- look up an agent's pid.
@@ -507,7 +506,7 @@ defmodule GenAgent do
   Runs in the agent process, so it blocks the first turn until it
   returns -- but does NOT block `start_agent/2` from returning to the
   caller. Every synchronous call to the agent (`status/2`, `poll/3`,
-  `tell/3`, `runtime_snapshot/2`, and so on) waits until the hook
+  `tell/3`, and so on) waits until the hook
   returns, and their default timeout is `:infinity`. `notify/2` and
   `whereis/1` do not wait. This is the right home for slow async setup that would
   otherwise freeze the starter: cloning a repo, creating a worktree,
@@ -542,7 +541,7 @@ defmodule GenAgent do
 
   The hook runs synchronously in the agent process before the prompt task
   is started. While it runs, synchronous calls to the agent (`status/2`,
-  `poll/3`, `tell/3`, `runtime_snapshot/2`, and so on) wait, with a
+  `poll/3`, `tell/3`, and so on) wait, with a
   default timeout of `:infinity`. Sleeping here therefore delays those
   calls on every dispatch and may prevent orderly shutdown before the
   child spec's `:shutdown` timeout. `notify/2` and `whereis/1` do not wait.
@@ -893,8 +892,8 @@ defmodule GenAgent do
   transparently and unblocks when its queued turn finishes.
 
   If the agent is halted, the ask is queued until `resume/1` is called;
-  the watchdog does not bound this idle wait. Use `status/2` or
-  `runtime_snapshot/2` to check whether the agent is halted. A caller
+  the watchdog does not bound this idle wait. Use `status/2`
+  to check whether the agent is halted. A caller
   timeout does not cancel a live caller's queued ask; it can still run
   after `resume/1` without that caller receiving the result.
 
@@ -932,7 +931,7 @@ defmodule GenAgent do
   `poll/2` to check on the result. The same queueing semantics as `ask/2`
   apply: a tell accepted while halted remains pending until `resume/1`.
   `poll/3` reports `{:ok, :pending}` during that wait; inspect `status/2`
-  or `runtime_snapshot/2` to tell why it is pending. When a pending queue
+  to tell why it is pending. When a pending queue
   limit is reached, returns `{:error, {:overloaded, info}}` without an
   accepted ref.
   For submission without waiting for admission or an idle callback, capture
@@ -968,8 +967,8 @@ defmodule GenAgent do
   completes, unless cancelled with `cancel_request/3`. Requests accepted
   while halted remain queued until `resume/1` unless the five-argument
   form opts into `on_halt: :fail`. The ref stays `{:ok, :pending}` from
-  `poll/3` during the halted wait. Inspect `status/2` or
-  `runtime_snapshot/2` to distinguish a halted queue from an active turn.
+  `poll/3` during the halted wait. Inspect `status/2` to
+  distinguish a halted queue from an active turn.
   A cancelled queued request delivers
   `{:gen_agent, :completion, name, ref, {:error, :cancelled}}`
   without running turn lifecycle callbacks. `pre_turn/2` skip, halt and
@@ -1060,7 +1059,7 @@ defmodule GenAgent do
 
     * `{:ok, :pending}` if the request is queued, in-flight, or between
       caller-owned retry attempts. This also includes work queued while
-      halted until `resume/1`; use `status/2` or `runtime_snapshot/2`
+      halted until `resume/1`; use `status/2`
       to distinguish a halted queue from an active turn.
     * `{:ok, :completed, response}` if the turn finished successfully.
     * `{:error, reason}` if the turn failed, including `{:error, :cancelled}`
@@ -1215,15 +1214,41 @@ defmodule GenAgent do
     call(name, :reset_session, timeout)
   end
 
+  @typedoc "Bounded metadata about the active turn, as reported by `status/2`."
+  @type current_turn :: %{
+          origin: :ask | :tell | :event | :self_chain,
+          attempt: pos_integer(),
+          elapsed_ms: non_neg_integer(),
+          watchdog_ms: pos_integer() | :infinity
+        }
+
   @doc """
   Read an agent's current status.
 
-  This compatibility API includes the full callback-maintained
-  `agent_state`. While a turn is processing, that value is the server's
-  latest retained state, not a live read of state inside the prompt task.
-  Use `runtime_snapshot/2` for a bounded metadata-only view.
-  The legacy keys `:state` and `:queued` correspond to `:phase` and
-  `:pending_prompts` in `runtime_snapshot/2`, respectively.
+  * `:state` -- `:idle` or `:processing`.
+  * `:queued` -- prompts waiting in the mailbox.
+  * `:pending_notifications` -- notifications and ordinary OTP messages
+    buffered during a turn.
+  * `:self_chain_pending` -- whether a callback-generated follow-up prompt
+    or caller-owned retry is held separately from the mailbox.
+  * `:current_request` -- the active request ref, or `nil` when idle.
+  * `:current_turn` -- `nil` when idle, otherwise the active turn's origin
+    (`:event` and `:self_chain` are callback-origin turns), 1-based attempt
+    number, elapsed monotonic milliseconds since dispatch, and the
+    configured watchdog duration. Elapsed time is an observation, not an
+    exact countdown to the watchdog firing.
+  * `:halted` -- whether dispatch is paused until `resume/1`.
+  * `:agent_state` -- the full callback-maintained state. While a turn is
+    processing, this is the server's latest retained state, not a live
+    read of state inside the prompt task.
+
+  Every field except `:agent_state` is bounded metadata: no prompts,
+  caller identities, backend sessions, events or queued payloads. Strip
+  `:agent_state` before exporting status outside a trusted process.
+
+  The result is a point-in-time view of this BEAM process, not durable
+  application state, admission authority, or proof that external provider
+  work has settled. The default call timeout is `:infinity`.
   Returns `{:error, :not_found}` if the agent name is not registered.
   """
   @spec status(name(), timeout()) ::
@@ -1231,57 +1256,16 @@ defmodule GenAgent do
             state: :idle | :processing,
             name: term(),
             queued: non_neg_integer(),
+            pending_notifications: non_neg_integer(),
+            self_chain_pending: boolean(),
             current_request: request_ref() | nil,
+            current_turn: current_turn() | nil,
             halted: boolean(),
             agent_state: term()
           }
           | {:error, :not_found}
   def status(name, timeout \\ @default_call_timeout) do
     call(name, :status, timeout)
-  end
-
-  @typedoc "Bounded, metadata-only observation of one agent's runtime state."
-  @type runtime_snapshot :: %{
-          phase: :idle | :processing,
-          halted: boolean(),
-          pending_prompts: non_neg_integer(),
-          pending_notifications: non_neg_integer(),
-          self_chain_pending: boolean(),
-          current_request:
-            nil
-            | %{
-                ref: request_ref(),
-                origin: :ask | :tell | :event | :self_chain,
-                attempt: pos_integer(),
-                elapsed_ms: non_neg_integer(),
-                watchdog_ms: non_neg_integer() | :infinity
-              }
-        }
-
-  @doc """
-  Read a bounded, metadata-only runtime snapshot of an agent.
-
-  `pending_prompts` counts the prompt mailbox; `pending_notifications`
-  counts notifications and ordinary OTP messages buffered during a turn;
-  `self_chain_pending`
-  reports a separately held callback-generated follow-up prompt.
-  `current_request` is `nil` when idle and otherwise contains the
-  volatile request ref, its origin (`:event` and `:self_chain` are
-  callback-origin turns), 1-based attempt number, elapsed monotonic
-  milliseconds since dispatch,
-  and the configured watchdog duration. It excludes prompts, caller
-  identities, callback state, backend sessions, events, and queued
-  payloads. Elapsed time is an observation, not an exact countdown to
-  the watchdog firing.
-
-  The snapshot is a point-in-time view of this BEAM coordinator, not
-  durable application state, admission authority, or proof that external
-  provider work has settled. The default call timeout is `:infinity`.
-  Returns `{:error, :not_found}` if the agent name is not registered.
-  """
-  @spec runtime_snapshot(name(), timeout()) :: runtime_snapshot() | {:error, :not_found}
-  def runtime_snapshot(name, timeout \\ @default_call_timeout) do
-    call(name, :runtime_snapshot, timeout)
   end
 
   @doc """

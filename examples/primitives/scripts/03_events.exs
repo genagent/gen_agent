@@ -54,7 +54,7 @@ assert %{state: :processing, agent_state: %{history: before_turn}} =
          GenAgent.status(:events, 5_000)
 
 assert before_turn == [:initial, :prompt, {:response, "from event"}]
-assert %{pending_notifications: 2} = GenAgent.runtime_snapshot(:events, 5_000)
+assert %{pending_notifications: 2} = GenAgent.status(:events, 5_000)
 send(task, {:release, token})
 assert_receive {:response, ^busy, "busy"}, 5_000
 assert {:ok, :completed, _response} = GenAgent.poll(:events, busy, 5_000)

@@ -125,7 +125,7 @@ defmodule GenAgent.CancelRequestTest do
 
     assert {:ok, :cancelled} = GenAgent.cancel_request(name, ref_b)
     assert {:error, :cancelled} = GenAgent.poll(name, ref_b)
-    assert GenAgent.runtime_snapshot(name).pending_prompts == 0
+    assert GenAgent.status(name).queued == 0
     send(task_a, {:release, :a})
     assert_receive {:completed, ^ref_a}
     refute_receive {:turn_started, :b, _}, 50
@@ -195,12 +195,12 @@ defmodule GenAgent.CancelRequestTest do
     assert_receive {:turn_started, :a, task_a}
 
     caller = spawn(fn -> GenAgent.ask(name, "ask") end)
-    eventually(fn -> GenAgent.runtime_snapshot(name).pending_prompts == 1 end)
+    eventually(fn -> GenAgent.status(name).queued == 1 end)
     [{ask_ref, {:ask, _}, "ask"}] = :queue.to_list(server_data(name).mailbox)
     assert {:error, :not_found} = GenAgent.cancel_request(name, ask_ref)
     assert {:error, :not_found} = GenAgent.cancel_request(name, make_ref())
     Process.exit(caller, :kill)
-    eventually(fn -> GenAgent.runtime_snapshot(name).pending_prompts == 0 end)
+    eventually(fn -> GenAgent.status(name).queued == 0 end)
 
     send(task_a, {:release, :a})
     assert_receive {:completed, ^ref_a}
@@ -230,10 +230,10 @@ defmodule GenAgent.CancelRequestTest do
     name = start_agent([blocked_turn(:a)])
     assert :ok = GenAgent.notify_ack(name, :halt)
     assert {:ok, ref} = GenAgent.tell(name, "queued")
-    assert GenAgent.runtime_snapshot(name).pending_prompts == 1
+    assert GenAgent.status(name).queued == 1
     assert {:ok, :cancelled} = GenAgent.cancel_request(name, ref)
     assert :ok = GenAgent.resume(name)
-    assert GenAgent.runtime_snapshot(name).pending_prompts == 0
+    assert GenAgent.status(name).queued == 0
     refute_receive {:turn_started, :a, _}, 50
     assert backend_history(name) == []
   end
@@ -253,7 +253,7 @@ defmodule GenAgent.CancelRequestTest do
     assert {:error, {:overloaded, %{queue: :prompts}}} = GenAgent.tell(name, prompt)
     assert {:ok, :cancelled} = GenAgent.cancel_request(name, ref_b)
     assert {:ok, ref_c} = GenAgent.tell(name, prompt)
-    assert GenAgent.runtime_snapshot(name).pending_prompts == 1
+    assert GenAgent.status(name).queued == 1
     send(task_a, {:release, :a})
     assert_receive {:turn_started, :c, task_c}
     send(task_c, {:release, :c})
@@ -267,12 +267,12 @@ defmodule GenAgent.CancelRequestTest do
     assert_receive {:turn_started, :a, task_a}
     caller = spawn(fn -> GenAgent.ask(name, "orphan") end)
     monitor = Process.monitor(caller)
-    eventually(fn -> GenAgent.runtime_snapshot(name).pending_prompts == 1 end)
+    eventually(fn -> GenAgent.status(name).queued == 1 end)
     [{ask_ref, {:ask, _}, "orphan"}] = :queue.to_list(server_data(name).mailbox)
 
     Process.exit(caller, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}
-    eventually(fn -> GenAgent.runtime_snapshot(name).pending_prompts == 0 end)
+    eventually(fn -> GenAgent.status(name).queued == 0 end)
     assert server_data(name).ask_monitors == %{}
 
     assert_receive {:telemetry, [:gen_agent, :turn, :cancelled], %{system_time: time},
@@ -309,7 +309,7 @@ defmodule GenAgent.CancelRequestTest do
 
     assert_receive {:ask_result, {:exit, _}}, 1_000
     assert Process.alive?(caller)
-    assert GenAgent.runtime_snapshot(name).pending_prompts == 1
+    assert GenAgent.status(name).queued == 1
     send(task_a, {:release, :a})
     assert_receive {:completed, ^ref_a}
     assert_receive {:turn_started, :ask, task_ask}
