@@ -44,11 +44,11 @@ defmodule GenAgent.Backends.AnthropicHTTPTest do
 
     assert Jason.decode!(request.body) == %{
              "model" => "claude-test",
-             "max_tokens" => 1024,
+             "max_tokens" => 8192,
              "messages" => [%{"role" => "user", "content" => "ping"}]
            }
 
-    assert request.options[:receive_timeout] == 60_000
+    assert request.options[:receive_timeout] == 180_000
     refute Map.has_key?(request.options, :connect_options)
     refute Map.has_key?(request.options, :finch)
     assert request.options[:retry] == false

@@ -98,9 +98,11 @@ terminal `:result` event carries non-blank text. If that text is empty or
 only whitespace, the unanswered user message is removed. Refusals and
 incomplete responses also leave prior history intact, so a later turn does
 not resend a failed prompt.
-When extended thinking is enabled, the backend retains the full assistant
-content blocks, including signatures and redacted blocks, for the next turn;
-the result event still exposes only the answer text.
+When the caller explicitly sets `request_fields.thinking`, the backend retains
+full assistant content blocks, including signatures and redacted blocks, for
+later turns with non-blank answers; the result event still exposes only answer
+text. Without that field, including with the default model's adaptive thinking,
+the backend retains only answer text.
 
 Set `:max_history_turns` to a nonnegative integer to retain only that many
 completed user/assistant pairs for the next request. The default,
@@ -128,6 +130,16 @@ the injected `:http_fn`.
 
 ## Backend options
 
+Default refresh (verified against official documentation on 2026-10-24):
+[Anthropic's deprecation notice](https://platform.claude.com/docs/en/about-claude/model-deprecations)
+recommends Sonnet 5.5 for Sonnet 4.5, whose retirement is November 30, 2026.
+[Sonnet 5.5's migration guide](https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide)
+confirms adaptive thinking runs when `thinking` is omitted and shares the output
+budget with answer text. The 8,192-token budget and 180-second receive timeout
+provide more headroom; they do not guarantee completion. Larger budgets can
+increase cost. Explicit models, token limits (including the legacy alias), and
+timeouts pass through unchanged.
+
 - `:api_key` -- Anthropic API key. Defaults to
   `System.get_env("ANTHROPIC_API_KEY")`. Starting without a non-empty key
   returns `{:error, :missing_api_key}` (through `GenAgent.start_agent/2`,
@@ -141,13 +153,15 @@ the injected `:http_fn`.
   `{name, value}` pairs. Auth, version, content type, and transport headers
   cannot be overridden. Values must contain only printable ASCII or
   horizontal tabs.
-- `:request_fields` -- extra JSON body fields such as `%{temperature: 0.2}`.
-  For extended thinking, use a supported model with `max_output_tokens: 2048`
-  and `request_fields: %{thinking: %{type: "enabled", budget_tokens: 1024}}`.
+- `:request_fields` -- extra JSON body fields such as `%{metadata: %{user_id: "example-user"}}`.
+  The default model uses adaptive thinking. For example, set
+  `request_fields: %{output_config: %{effort: "medium"}}` to adjust effort.
+  Thinking budgets and sampling parameters are model-specific; Sonnet 5.5
+  rejects `budget_tokens`, `temperature`, `top_p`, and `top_k`.
   Backend-owned fields (messages, model, token limit, caching, streaming,
   and tools) cannot be overridden.
-- `:model` -- model name. Defaults to `"claude-sonnet-4-5"`.
-- `:max_output_tokens` -- max tokens per turn. Defaults to `1024`.
+- `:model` -- model name. Defaults to `"claude-sonnet-5-5"`.
+- `:max_output_tokens` -- max tokens per turn. Defaults to `8192` (thinking plus answer tokens).
   `:max_tokens` remains a deprecated alias.
 - `:system_prompt` -- system prompt (string). `:system` and
   `:instructions` remain deprecated aliases.
@@ -160,7 +174,7 @@ the injected `:http_fn`.
 - `:max_history_turns` -- completed user/assistant pairs retained between
   turns. Defaults to `:infinity`; `0` retains none.
 - `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
-  to `60_000`. The 60-second default can be short for long reasoning turns.
+  to `180_000`. Increase this for long reasoning turns; this is a receive timeout, not a total turn deadline.
 - `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults
   to `nil` (Req's default). Configure it when starting a named Finch pool;
   `:connect_timeout` cannot be combined with `finch: [name: MyFinch]`.

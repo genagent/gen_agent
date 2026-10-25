@@ -57,6 +57,37 @@ defmodule GenAgent.Backends.OpenAITest do
     end
   end
 
+  test "implicit defaults reach the request without adding reasoning settings" do
+    ref = make_ref()
+    {:ok, session} = OpenAI.start_session(http_fn: recording_fn(ref, ok_response("hi")))
+    assert {:ok, _events, _session} = OpenAI.prompt(session, "ping")
+    assert_receive {^ref, request}
+    assert request.body.model == "gpt-5.6-sol"
+    refute Map.has_key?(request.body, :max_output_tokens)
+    assert request.receive_timeout == 180_000
+    refute Map.has_key?(request.body, :thinking)
+    refute Map.has_key?(request.body, :reasoning)
+  end
+
+  test "explicit model, canonical and legacy limits, and timeouts reach requests unchanged" do
+    for limit <- [:max_output_tokens, :max_tokens], timeout <- [0, 17, :infinity] do
+      ref = make_ref()
+
+      opts = [
+        model: "caller-model",
+        receive_timeout: timeout,
+        http_fn: recording_fn(ref, ok_response("hi"))
+      ]
+
+      {:ok, session} = OpenAI.start_session(Keyword.put(opts, limit, 64))
+      assert {:ok, _events, _session} = OpenAI.prompt(session, "ping")
+      assert_receive {^ref, request}
+      assert request.body.model == "caller-model"
+      assert request.body.max_output_tokens == 64
+      assert request.receive_timeout == timeout
+    end
+  end
+
   describe "start_session/1" do
     test "validates Finch pool options and rejects a named-pool connect timeout" do
       for finch <- [
@@ -181,7 +212,7 @@ defmodule GenAgent.Backends.OpenAITest do
 
     test "uses default model" do
       {:ok, session} = OpenAI.start_session(http_fn: ok_response("hi"))
-      assert session.model == "gpt-5"
+      assert session.model == "gpt-5.6-sol"
       assert session.store == true
     end
 
@@ -197,9 +228,9 @@ defmodule GenAgent.Backends.OpenAITest do
       end
     end
 
-    test "receive_timeout defaults to 60_000 and connect_timeout uses Req's default" do
+    test "receive_timeout defaults to 180_000 and connect_timeout uses Req's default" do
       {:ok, session} = OpenAI.start_session(http_fn: ok_response("hi"))
-      assert session.receive_timeout == 60_000
+      assert session.receive_timeout == 180_000
       assert session.connect_timeout == nil
     end
 
@@ -398,7 +429,7 @@ defmodule GenAgent.Backends.OpenAITest do
       {:ok, _events, _session} = OpenAI.prompt(session, "ping")
 
       assert_receive {^ref, request}
-      assert request.receive_timeout == 60_000
+      assert request.receive_timeout == 180_000
       assert request.connect_timeout == nil
     end
 

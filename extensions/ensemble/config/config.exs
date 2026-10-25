@@ -156,7 +156,7 @@ config :gen_agent_ensemble,
     #            "points. 3-5 tight sentences. Concede explicitly when the other side is right."},
     #       {"openai", GenAgentEnsemble.Agents.Simple,
     #        backend: GenAgent.Backends.OpenAI,
-    #        model: "gpt-5-mini",
+    #        model: "gpt-5.6-terra",
     #        max_output_tokens: 2048,
     #        instructions:
     #          "You are a senior engineer arguing one side of an architecture decision. " <>
