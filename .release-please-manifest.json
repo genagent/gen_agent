@@ -4,5 +4,5 @@
   "integrations/codex": "0.6.2",
   "integrations/anthropic": "0.5.2",
   "integrations/openai": "0.5.2",
-  "extensions/ensemble": "0.7.4"
+  "extensions/ensemble": "0.7.5"
 }
