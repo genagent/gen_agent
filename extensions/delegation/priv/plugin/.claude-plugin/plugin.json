@@ -1,0 +1,7 @@
+{
+  "name": "gen-agent-delegate",
+  "description": "Delegate bounded local tasks to Claude and Codex through GenAgent.",
+  "author": {
+    "name": "Josh Rotenberg"
+  }
+}

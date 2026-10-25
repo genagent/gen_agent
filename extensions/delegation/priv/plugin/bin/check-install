@@ -1,0 +1,152 @@
+#!/bin/sh
+# Read-only preflight for an extracted GenAgent Delegate bundle.
+#
+# Exit codes: 0 ready; 1 platform/native/runtime unavailable; 2 runtime works
+# but a provider CLI prerequisite (executable, version, authentication) fails.
+# stdout is one JSON document. No model call, login, configuration change,
+# state directory or task-manager lock is used.
+set -eu
+
+# Current native build requires macOS 27 on arm64.
+min_macos_major=27
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+runtime="$root/runtime/bin/delegation_spike"
+
+json_string() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n\t' '  '
+}
+
+fail() {
+  printf '{"ready":false,"stage":"%s","bundle_root":"%s","message":"%s"}\n' \
+    "$1" "$(json_string "$root")" "$(json_string "$2")"
+  exit 1
+}
+
+os=$(uname -s)
+arch=$(uname -m)
+[ "$os" = "Darwin" ] || fail platform "Requires Darwin; found $os."
+[ "$arch" = "arm64" ] || fail platform "Requires arm64; found $arch (a Rosetta shell reports x86_64)."
+
+macos=$(sw_vers -productVersion 2>/dev/null || echo unknown)
+major=${macos%%.*}
+case $major in
+  '' | *[!0-9]*) fail platform "Could not determine the macOS version (got $macos)." ;;
+esac
+[ "$major" -ge "$min_macos_major" ] ||
+  fail platform "Requires macOS $min_macos_major or later; found $macos."
+
+[ -f "$runtime" ] && [ -x "$runtime" ] ||
+  fail release "Missing or non-executable $runtime. Re-extract the complete archive with tar -xzp."
+[ -x "$root/bin/gen-agent-delegate" ] ||
+  fail release "bin/gen-agent-delegate is not executable. Re-extract with permissions preserved."
+[ -f "$root/bin/runtime-crypto.sh" ] ||
+  fail release "Missing bin/runtime-crypto.sh. Re-extract the complete archive."
+
+lock_tool=
+for tool in lockf flock; do
+  if command -v "$tool" >/dev/null 2>&1; then
+    lock_tool=$tool
+    break
+  fi
+done
+[ -n "$lock_tool" ] || fail locks "Neither lockf nor flock is on PATH."
+
+# Select this bundled release, never the OTP release hosting the caller.
+unset RELEASE_NAME RELEASE_VSN RELEASE_COOKIE RELEASE_NODE RELEASE_TMP \
+  RELEASE_VM_ARGS RELEASE_REMOTE_VM_ARGS RELEASE_SYS_CONFIG RELEASE_MODE \
+  RELEASE_BOOT_SCRIPT RELEASE_BOOT_SCRIPT_CLEAN RELEASE_PROG RELEASE_COMMAND \
+  RELEASE_ROOT BINDIR ROOTDIR ERL_ROOTDIR
+
+export RELEASE_DISTRIBUTION=none
+export CHECK_BUNDLE_ROOT="$root"
+export CHECK_MACOS="$macos"
+export CHECK_ARCH="$arch"
+export CHECK_LOCK_TOOL="$lock_tool"
+
+code=$(cat <<'EOF'
+defmodule GenAgent.Delegation.CheckInstall do
+  # SHA-256 of "abc" (FIPS 180-2 vector).
+  @abc "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+  def run do
+    base = %{
+      "bundle_root" => System.get_env("CHECK_BUNDLE_ROOT"),
+      "platform" => %{
+        "os" => "Darwin",
+        "arch" => System.get_env("CHECK_ARCH"),
+        "macos" => System.get_env("CHECK_MACOS")
+      },
+      "lock_tool" => System.get_env("CHECK_LOCK_TOOL")
+    }
+
+    case native() do
+      {:ok, native} ->
+        case GenAgent.Delegation.Diagnostics.check(%{}) do
+          {:ok, diagnostics} ->
+            ready = diagnostics["ready"] == true
+            finish(Map.merge(base, %{"ready" => ready, "stage" => "providers", "native" => native, "diagnostics" => diagnostics}), if(ready, do: 0, else: 2))
+
+          {:error, error} ->
+            finish(Map.merge(base, %{"ready" => false, "stage" => "diagnostics", "native" => native, "error" => inspect(error)}), 1)
+        end
+
+      {:error, reason} ->
+        finish(Map.merge(base, %{"ready" => false, "stage" => "native", "error" => reason}), 1)
+    end
+  end
+
+  defp native do
+    with {:ok, _} <- Application.ensure_all_started(:crypto),
+         digest = :crypto.hash(:sha256, "abc") |> Base.encode16(case: :lower),
+         true <- digest == @abc,
+         _ = :crypto.strong_rand_bytes(8),
+         {:ok, _} <- Application.ensure_all_started(:gen_agent_delegation) do
+      {lib_name, _, lib_version} = lib_info()
+
+      {:ok,
+       %{
+         "package_version" => to_string(Application.spec(:gen_agent_delegation, :vsn)),
+         "otp_release" => to_string(:erlang.system_info(:otp_release)),
+         "crypto_version" => to_string(Application.spec(:crypto, :vsn)),
+         "crypto_library" => lib_name,
+         "crypto_library_version" => lib_version,
+         "sha256_selftest" => "passed"
+       }}
+    else
+      false -> {:error, "SHA-256 self-test returned a wrong digest"}
+      {:error, reason} -> {:error, "application start failed: " <> inspect(reason)}
+    end
+  rescue
+    error -> {:error, "native crypto failed: " <> Exception.message(error)}
+  catch
+    kind, reason -> {:error, "native crypto failed: " <> inspect({kind, reason})}
+  end
+
+  defp lib_info do
+    case :crypto.info_lib() do
+      [{name, number, text} | _] -> {to_string(name), number, to_string(text)}
+      _ -> {"unknown", 0, "unknown"}
+    end
+  end
+
+  defp finish(report, status) do
+    IO.puts(Jason.encode!(report, pretty: true))
+    System.halt(status)
+  end
+end
+
+GenAgent.Delegation.CheckInstall.run()
+EOF
+)
+
+set +e
+. "$root/bin/runtime-crypto.sh"
+configure_runtime_crypto "$root" || fail native "Could not select bundled OpenSSL modules."
+report=$("$runtime" eval "$runtime_crypto_restore $code")
+status=$?
+set -e
+case $report in
+  \{*) printf '%s\n' "$report"; exit "$status" ;;
+  *) fail runtime "Runtime did not return a JSON report; inspect stderr for native startup failure." ;;
+esac

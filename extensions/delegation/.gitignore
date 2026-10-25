@@ -1,0 +1,7 @@
+/_build/
+/deps/
+/doc/
+/cover/
+/tmp/
+erl_crash.dump
+gen_agent_delegation-*.tar
