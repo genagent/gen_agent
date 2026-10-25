@@ -21,7 +21,12 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
   ## Options
 
     * `:stages` (required) -- a list of `{name, module, opts}` specs,
-      one per stage, in order. Must be non-empty.
+      one per stage, in order. Must be a non-empty proper list. Names must be
+      distinct binaries (including empty and non-UTF-8 binaries); modules must
+      be atoms other than `nil`, `true`, or `false`, and opts must be keyword
+      lists. Invalid containers, specs, and duplicate names raise `ArgumentError`
+      during initialization, before any stage starts. Missing `:stages` raises
+      `KeyError`. Backend and child-start validation remains the server's responsibility.
 
   ## Concurrency
 
@@ -50,12 +55,49 @@ defmodule GenAgentEnsemble.Strategies.Pipeline do
   def init(opts) do
     stages = Keyword.fetch!(opts, :stages)
 
-    if stages == [], do: raise(ArgumentError, "pipeline requires at least one stage")
+    validate_stages!(stages)
 
     stage_names = Enum.map(stages, fn {name, _, _} -> name end)
 
     state = %__MODULE__{stages: stage_names, queue: Queue.new()}
     {:ok, state, stages}
+  end
+
+  defp validate_stages!([]), do: raise(ArgumentError, "pipeline requires at least one stage")
+
+  defp validate_stages!(stages) do
+    unless proper_list?(stages) do
+      raise ArgumentError, "Pipeline :stages must be a non-empty proper list"
+    end
+
+    stages
+    |> Enum.with_index()
+    |> Enum.reduce(MapSet.new(), fn {spec, index}, names ->
+      name = validate_stage!(spec, index)
+
+      if MapSet.member?(names, name) do
+        raise ArgumentError, "Pipeline :stages entry #{index} duplicates a stage name"
+      end
+
+      MapSet.put(names, name)
+    end)
+  end
+
+  defp proper_list?([]), do: true
+  defp proper_list?([_ | tail]), do: proper_list?(tail)
+  defp proper_list?(_), do: false
+
+  # Report only the index: stage names and options may contain sensitive data.
+  defp validate_stage!({name, module, opts}, index)
+       when is_binary(name) and is_atom(module) and module not in [nil, true, false] do
+    if Keyword.keyword?(opts), do: name, else: bad_stage!(index)
+  end
+
+  defp validate_stage!(_, index), do: bad_stage!(index)
+
+  defp bad_stage!(index) do
+    raise ArgumentError,
+          "Pipeline :stages entry #{index} must be {binary_name, module, keyword_opts}"
   end
 
   @impl true

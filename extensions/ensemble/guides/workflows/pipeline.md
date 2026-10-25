@@ -61,8 +61,16 @@ config :gen_agent_ensemble,
   ]
 ```
 
-Stage names must be distinct within the pipeline. Sub-agent
-namespacing handles isolation from other ensembles automatically.
+`:stages` must be a non-empty proper list of `{name, module, opts}` tuples.
+Stage names must be distinct binaries, including empty and non-UTF-8 binaries.
+Modules must be atoms other than `nil`, `true`, or `false`; stage options must
+be keyword lists. Pipeline validates these before any stage starts, raising
+`ArgumentError` with an entry index for invalid specs or duplicate names;
+missing `:stages` raises `KeyError`. The server contains these exceptions as
+`{:error, {:init_failed, :error, ArgumentError}}` (or `KeyError`) from
+`start_link`. Backend requirements and child startup errors still follow the
+server's start-spec validation. Sub-agent namespacing handles isolation from
+other ensembles automatically.
 
 ## Canonical workflow
 
