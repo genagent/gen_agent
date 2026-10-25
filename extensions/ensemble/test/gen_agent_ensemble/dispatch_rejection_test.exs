@@ -228,6 +228,24 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
     end
   end
 
+  defp await_member_idle(name, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+    remaining = max(deadline - System.monotonic_time(:millisecond), 1)
+
+    case GenAgent.status(name, remaining) do
+      %{state: :idle, current_request: nil, queued: 0} ->
+        :ok
+
+      status ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(1)
+          await_member_idle(name, deadline)
+        else
+          flunk("member #{inspect(name)} did not become idle: #{inspect(status)}")
+        end
+    end
+  end
+
   for {mode, expected} <- [
         reply: {:ok, :completed, "callback reply"},
         nested_start: {:ok, :completed, "start rejection reply"},
@@ -570,6 +588,11 @@ defmodule GenAgentEnsemble.DispatchRejectionTest do
     send(peer_task, {:result, "STALE"})
     send(external_task, {:result, "EXTERNAL"})
     assert {:ok, %{text: "EXTERNAL"}} = Task.await(external)
+
+    # Completing b's external request does not synchronize a's stale response.
+    for member <- ["a", "b"] do
+      await_member_idle(GenAgentEnsemble.member_name(name, member))
+    end
 
     later = ask_async(name, "later")
     assert_receive {:controlled_prompt, "a", "later", later_a}
