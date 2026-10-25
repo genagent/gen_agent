@@ -2,7 +2,6 @@ defmodule GenAgent.EventCaptureTest do
   use ExUnit.Case, async: true
 
   alias GenAgent.Event
-  import GenAgent.TestDownAssertions
 
   defmodule Agent do
     use GenAgent
