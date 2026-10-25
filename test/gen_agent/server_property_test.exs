@@ -291,7 +291,6 @@ defmodule GenAgent.ServerPropertyTest do
     assert status.queued == snapshot.pending_prompts
     assert snapshot.pending_notifications == length(model.notifications)
     assert snapshot.halted == model.halted
-    refute snapshot.halt_pending
     refute snapshot.self_chain_pending
     assert snapshot.phase == if(model.active, do: :processing, else: :idle)
     assert status.current_request == if(model.active, do: model.active.ref, else: nil)

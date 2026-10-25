@@ -209,8 +209,8 @@ A notification only starts a turn when `handle_event/2` returns
   Useful for multi-step work that the agent drives itself.
 - **Halting** -- `handle_response/3`, `handle_error/3`, `handle_event/2`,
   or `pre_turn/2` can return `{:halt, state}` to go idle but freeze the
-  mailbox. `GenAgent.halt/1` requests the same pause externally, after
-  any active turn completes. A halted agent ignores queued prompts until
+  mailbox. To halt from outside, send a `notify/2` event that
+  `handle_event/2` answers with `{:halt, state}`. A halted agent ignores queued prompts until
   `GenAgent.resume/1`
   is called.
 - **Watchdog** -- a `:state_timeout` kills any turn that runs longer than
@@ -425,7 +425,6 @@ For the tradeoffs between wrappers, GenAgent, and Oban workers, see
 | `interrupt/1` | Cancel an in-flight turn. |
 | `interrupt_request/3` | Acknowledge cancellation only if the active request ref matches. |
 | `cancel_request/3` | Remove a queued tell by its exact request ref. |
-| `halt/1` | Pause dispatch after the active turn, without stopping the agent. |
 | `resume/1` | Unhalt an agent and drain its mailbox. |
 | `reset_session/2` | Clear supported backend conversation context between turns while retaining agent state. |
 | `status/2` | Read the agent's current state. |
@@ -442,8 +441,7 @@ started explicitly, and its previous state is not restored.
 Callbacks can use `GenAgent.current_name()` in both the agent process and
 the prompt task; no duplicate `agent_name` option is needed.
 
-`runtime_snapshot/2` reports the coordinator's current phase, halted and pending-halt
-flags, queued prompt and buffered notification counts, pending self-chain,
+`runtime_snapshot/2` reports the coordinator's current phase, halted flag, queued prompt and buffered notification counts, pending self-chain,
 and active request ref, origin and elapsed/watchdog time. It contains no
 prompt, callback state, backend session or event payload. It is a
 point-in-time observation, not durable state or permission to dispatch.
