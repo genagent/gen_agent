@@ -12,7 +12,7 @@ mix deps.get
 
 This repository requires **Elixir 1.19 or later**. Check your version with `elixir --version`.
 
-## Six-package layout
+## Package layout
 
 GenAgent is a monorepo with six independently published Hex packages:
 
@@ -27,7 +27,18 @@ GenAgent is a monorepo with six independently published Hex packages:
 
 **Dependencies between packages.** By default, sibling packages use local path dependencies (e.g., `integrations/claude/mix.exs` depends on the root `gen_agent` at `path: "../.."`). This lets you develop across multiple packages.
 
-When publishing to Hex, set `GEN_AGENT_HEX=1` to switch dependencies to version constraints. This is handled automatically by the publishing workflow.
+For the six published packages, `GEN_AGENT_HEX=1` switches dependencies to version
+constraints during publishing. The publishing workflow handles this automatically.
+
+Two additional packages are source-only and are not included in that release pipeline:
+
+| Source package | Directory and guide | Purpose |
+| --- | --- | --- |
+| `gen_agent_structured` | [integrations/structured](integrations/structured/README.md) | Structured IO contracts and profiles |
+| `gen_agent_delegation` | [extensions/delegation](extensions/delegation/README.md) | Delegate manager, MCP tools and local plugin export |
+
+Use local path dependencies as described in their guides. Delegate's local export
+is available; Hex publication for these two packages has not been prepared.
 
 ## Running checks
 
@@ -44,7 +55,7 @@ mix dialyzer
 
 These four commands match the [Testing section](README.md#testing) in the README.
 
-### Full checks (all six packages)
+### Full checks (six published and two source packages)
 
 Before pushing, run the full validation across all packages:
 
@@ -52,11 +63,25 @@ Before pushing, run the full validation across all packages:
 scripts/quality.sh
 ```
 
-This script:
-- Verifies dependencies are up-to-date (`mix deps.unlock --check-unused`)
-- Audits dependencies for vulnerabilities (`mix hex.audit`)
-- Compiles with warnings treated as errors
-- Runs formatting, linting, tests, docs, and type checking for each package
+For the six published packages, the script retains dependency lock checks and
+audits, warnings-as-errors compilation, formatting, Credo, tests, ExDoc and
+Dialyzer. For the two source packages, it checks dependency locks, audits Hex
+dependencies after `mix deps.get --check-locked` rejects lockfile drift,
+compiles with warnings as errors, and runs formatting and
+provider-free tests, then validates Structured's example profiles
+or builds Delegate's production plugin export in a temporary directory. It does
+not require development tools those packages do not declare, or attempt to build
+Hex archives for them. Delegate export includes the native runtime and requires
+the build toolchain and provisioned dependencies; no provider call is made.
+
+To check just the source packages:
+
+```bash
+scripts/quality.sh integrations/structured extensions/delegation
+```
+
+PR CI runs these source gates on Elixir 1.19 / OTP 27 and Elixir 1.20 / OTP 29
+in a separate matrix alongside the unchanged published-package gates.
 
 ## Pull requests
 
@@ -78,7 +103,11 @@ The type is a word (e.g., `fix`, `feat`, `docs`, `chore`, `refactor`). The scope
 
 ### Conventional commits and release notes
 
-When squash-merging a PR, preserve its Conventional Commit title in the merge
+For source-first package delivery, preserve separate implementation, root docs
+and CI/configuration commits with an allowed rebase merge as described in
+[RELEASING.md](RELEASING.md); avoid attributing a mixed `feat:` commit to core.
+
+When squash-merging other PRs, preserve the Conventional Commit title in the merge
 commit message. [Release Please](https://github.com/googleapis/release-please)
 uses commit messages to categorize changes and determine release notes and
 version bumps. The release configuration uses changed paths to decide which
@@ -86,9 +115,9 @@ packages receive release PRs; the commit scope does not select a package.
 
 ## Releases
 
-GenAgent packages are released independently using [Release Please](https://github.com/googleapis/release-please).
+The six published GenAgent packages are released independently using [Release Please](https://github.com/googleapis/release-please).
 
-Each package gets its own release pull request when commits affect it. Merge the intended release PRs, and the publishing workflow publishes them to Hex and tags them on GitHub.
+Each published package gets its own release pull request when commits affect it. Merge the intended release PRs, and the publishing workflow publishes them to Hex and tags them on GitHub.
 
 For details on version coordination, dependency constraints, and manual publishing, see [RELEASING.md](RELEASING.md).
 

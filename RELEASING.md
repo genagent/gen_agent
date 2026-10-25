@@ -14,12 +14,39 @@ repositories and release workflows.
 | `gen_agent_openai` | `integrations/openai` | `gen_agent_openai-vX.Y.Z` |
 | `gen_agent_ensemble` | `extensions/ensemble` | `gen_agent_ensemble-vX.Y.Z` |
 
+Two optional packages are available only as local source and have no independent
+release component in this six-package process:
+
+| Source package | Directory and guide |
+| --- | --- |
+| `gen_agent_structured` | [integrations/structured](integrations/structured/README.md) |
+| `gen_agent_delegation` | [extensions/delegation](extensions/delegation/README.md) |
+
+Delegate supports local plugin export with a bundled runtime. Neither source
+package has been prepared for Hex publication: their local path dependencies do
+not become Hex requirements through `GEN_AGENT_HEX=1`. Their quality/PR checks
+validate local compilation, tests and source-package delivery separately; they
+are not inputs to the archive, published-consumer or release jobs below.
+
 Release Please uses the path-based manifest in
 `release-please-config.json` and `.release-please-manifest.json`. Each
 component keeps its own version and release pull request. Core excludes the
-subproject paths from its changelog. The initial manifest records the versions
-last released from the separate repositories. Baseline component tags for the
-five moved packages point to the consolidation commit; earlier tags and issues
+five published sibling paths, both optional source-package paths, and root
+`CONTRIBUTING.md` and `RELEASING.md` through `exclude-paths`. Core's `README.md`
+remains included so genuine core README changes remain visible. A commit confined
+to an excluded source directory is not attributed to core; a mixed `feat:` commit
+that also touches an included root file can still trigger a core release.
+
+For source-first delivery, preserve separate commits with an allowed rebase merge:
+keep each source implementation commit confined to its excluded directory, put
+root documentation changes (including README and CONTRIBUTING) in a `docs:`
+commit, and put root CI/configuration changes in a `chore:` commit. Do not squash
+these into a mixed `feat:` commit. Review the resulting commit paths and types
+before merging.
+
+The initial manifest records the versions last released from the separate
+repositories. Baseline component tags for the five moved packages point to the
+consolidation commit; earlier tags and issues
 remain in the original repositories.
 
 Merge only the release pull requests intended for that release. When existing
@@ -58,7 +85,8 @@ consumer's declared range admits the candidate root version even when that
 version is not yet on Hex; this metadata gate does not replace candidate
 runtime tests or the post-publication exact-version consumer check.
 
-Inside this repository, sibling packages use local path dependencies. Set
+Inside this repository, sibling packages use local path dependencies. For the
+five published siblings, set
 `GEN_AGENT_HEX=1` for each sibling's `mix hex.build` or `mix hex.publish` so
 its archive contains ordinary Hex requirements. `scripts/package-check.sh`
 builds all six archives in that mode and checks their dependency metadata for
