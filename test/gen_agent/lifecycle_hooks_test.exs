@@ -14,7 +14,7 @@ defmodule GenAgent.LifecycleHooksTest do
     %{task_sup: task_sup}
   end
 
-  defp start_server(task_sup, scripts, init_opts \\ []) do
+  defp start_server(task_sup, scripts, init_opts) do
     opts = [
       name: "lifecycle-test-#{System.unique_integer([:positive])}",
       backend: Mock,

@@ -1,5 +1,21 @@
 # Upgrading GenAgent
 
+## 0.11: removed public surface
+
+Core 0.11 removes public API that had no production caller in Ensemble, the
+backends, or gen_agent_server. Each removal is a breaking change.
+
+| Removed | Replacement |
+| --- | --- |
+| `GenAgent.drain` and the `:draining` error | `stop/1` or `stop/2`. |
+| `GenAgent.halt` and the `halt_pending` status field | Send a `notify/2` event that `handle_event/2` answers with `{:halt, state}`; `resume/1` is unchanged. |
+| `GenAgent.runtime_snapshot` | `status/2`. `phase` is `state`, `pending_prompts` is `queued`, `current_request` is the ref, and the rest of the old `current_request` map is `current_turn`. `pending_notifications` and `self_chain_pending` keep their names. |
+| `GenAgent.list` | `Registry.select(GenAgent.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}])` if needed. |
+| `GenAgent.Client.poll` | Completion messages from `submit_with_completion/4`, or `GenAgent.poll/3` by name. |
+| `Response.prompt` | Record the prompt in `pre_turn/2` if a transcript needs it. |
+| `event_retention:` option, `:lossless` mode and `{:event_capture_overflow, diagnostics}` | Compact retention is the only mode. Retain events in `handle_stream_event/2` when every event is required. |
+| `[:gen_agent, :prompt, :start \| :stop \| :error]` and `[:gen_agent, :event, :received]` telemetry | `[:gen_agent, :turn, *]` for turn lifecycle and latency. `pre_turn/2` rewrites are no longer reported in telemetry. |
+
 ## Unreleased: correlated local PID submission
 
 `GenAgent.Client.submit_with_completion/4` is an additive API for a captured
@@ -14,7 +30,7 @@ admission or `:DOWN`. Monitor the captured PID before sending and consume
 child messages and `:DOWN` in mailbox order. Dead-PID submission still
 returns `:submitted`, with no fabricated acknowledgement or completion.
 
-Use `GenAgent.Client.poll/3`, `cancel_request/3` and `interrupt_request/3`
+Use `GenAgent.Client.cancel_request/3` and `interrupt_request/3`
 for the same incarnation. These controls default to 5 seconds, propagate
 native call exits and still block behind callbacks. Timeout is uncertainty;
 it does not confirm cancellation or justify a replacement submission. Keep
@@ -115,11 +131,10 @@ case GenAgent.ask("worker", "Inspect the project") do
 end
 ```
 
-For callers that require the previous fail-on-truncation behavior, set
-`event_retention: :lossless` when starting the agent and handle
-`{:error, {:event_capture_overflow, diagnostics}}`. If a full log must be
-stored, raise the limits to suit the workload or persist events as they
-arrive in `handle_stream_event/2`; neither mode makes provider output or
+From 0.6.0 through 0.10, callers could set `event_retention: :lossless` for
+the previous fail-on-truncation behavior; 0.11 removes that mode. If a full
+log must be stored, raise the limits to suit the workload or persist events
+as they arrive in `handle_stream_event/2`; neither approach makes provider output or
 callback state unbounded-memory safe. See [Event capture bounds](README.md#event-capture-bounds)
 for the precise retention and callback contract.
 
