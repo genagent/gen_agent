@@ -4,6 +4,13 @@
 
 * **deps:** admit GenAgent core 0.10.x while retaining existing supported core ranges.
 
+## [0.5.3](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.5.2...gen_agent_openai-v0.5.3) (2026-10-26)
+
+
+### Bug Fixes
+
+* **openai:** admit core 0.11 ([0c57cb7](https://github.com/genagent/gen_agent/commit/0c57cb7c5bc68d289ef900a2790787d32607d452))
+
 ## [0.5.2](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.5.1...gen_agent_openai-v0.5.2) (2026-10-24)
 
 
