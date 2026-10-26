@@ -454,6 +454,13 @@ defmodule GenAgentEnsemble do
   @doc """
   Send an asynchronous event to the strategy (`handle_notify/2`). Ignored once
   the ensemble has halted.
+
+  What happens next is the strategy's choice. Among the built-in strategies,
+  only `GenAgentEnsemble.Strategies.Solo` forwards the event to its agent.
+  Pipeline, Pool, Switchboard, Debate, Consensus and Supervisor ignore it. To
+  reach one member directly, call `GenAgent.notify/2` with
+  `member_name/2`, for example
+  `GenAgent.notify(GenAgentEnsemble.member_name(name, "reviewer"), event)`.
   """
   defdelegate notify(name, event), to: GenAgentEnsemble.Server
 
