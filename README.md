@@ -230,11 +230,12 @@ caller-owned agent. Calling `stop/1` or `stop/2` for that same agent from one
 of its callbacks, including `handle_stream_event/2` in the prompt task,
 returns `{:error, :self_stop}` because waiting for its exit would block
 cleanup. If final state and cached results are not needed, a
-`post_run/1` callback can spawn a separate process to stop a global agent:
+`post_run/1` callback can spawn a separate process to stop a global agent.
+This example keeps the agent's registered name in its state, for example from
+an `agent_name:` start option read in `init_agent/1`:
 
 ```elixir
-def post_run(_state) do
-  name = GenAgent.current_name()
+def post_run(%{agent_name: name}) do
   spawn(fn -> GenAgent.stop(name) end)
   :ok
 end
@@ -410,7 +411,6 @@ For the tradeoffs between wrappers, GenAgent, and Oban workers, see
 | Function | What it does |
 |---|---|
 | `start_agent/2` | Start an agent under the supervision tree. |
-| `current_name/0` | Read the registered name from an agent callback. |
 | `ask/3` | Synchronous prompt. Blocks until the turn finishes. |
 | `tell/3` | Async prompt. Returns a ref for `poll/3`. |
 | `tell_with_completion/4` | Async prompt with a request-scoped completion message. |
@@ -435,8 +435,6 @@ The `GenAgent` functions resolve names through a `Registry` (any term,
 including a PID-valued name). `GenAgent.Client` explicitly targets a local
 PID. Agents use `restart: :temporary`: a crashed or stopped agent must be
 started explicitly, and its previous state is not restored.
-Callbacks can use `GenAgent.current_name()` in both the agent process and
-the prompt task; no duplicate `agent_name` option is needed.
 
 `status/2` reports the agent's state, halted flag, queued prompt and
 buffered notification counts, pending self-chain, and the active request
