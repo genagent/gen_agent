@@ -41,6 +41,11 @@ defmodule GenAgent.Backends.Claude do
   turns pass that id through Claude's `--resume` flag, without forwarding
   the first turn's `:session_id` or `:continue_session` options.
 
+  `reset_session/1` (called by `GenAgent.reset_session/2` while the agent is
+  idle) clears the captured id and drops `:session_id`, `:continue_session`
+  and `:resume` from the session options, so the next turn starts a new
+  Claude conversation. Earlier conversations remain in Claude's own history.
+
   `terminate_session/1` has no native process to close. GenAgent cancels
   its prompt task on interrupt, watchdog, stop, or agent death, but the
   default Port runner closes pipes without guaranteeing that the CLI and
@@ -133,6 +138,14 @@ defmodule GenAgent.Backends.Claude do
     do: @impl(GenAgent.Backend)
 
   def checkpoint_session(%__MODULE__{} = session, sid), do: %{session | session_id: sid}
+
+  if {:reset_session, 1} in GenAgent.Backend.behaviour_info(:callbacks),
+    do: @impl(GenAgent.Backend)
+
+  def reset_session(%__MODULE__{} = session) do
+    opts = Keyword.drop(session.opts, [:session_id, :continue_session, :resume])
+    {:ok, %{session | session_id: nil, opts: opts}}
+  end
 
   @impl GenAgent.Backend
   def resume_session(session_id, opts) when is_binary(session_id) do
