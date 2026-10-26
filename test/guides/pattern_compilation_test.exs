@@ -10,23 +10,7 @@ defmodule GenAgent.PatternCompilationTest do
           String.starts_with?(code, "defmodule "),
           do: {guide, code}
 
-    # The supervisor example calls Fanout.Watcher.start/2 from its
-    # coordinator; compile that sibling before checking the coordinator.
-    blocks =
-      blocks
-      |> Enum.with_index()
-      |> Enum.sort_by(fn {{guide, code}, index} ->
-        priority =
-          if Path.basename(guide) == "supervisor.md" and
-               String.starts_with?(code, "defmodule Fanout.Watcher do"),
-             do: 0,
-             else: 1
-
-        {guide, priority, index}
-      end)
-      |> Enum.map(&elem(&1, 0))
-
-    assert length(blocks) >= 16
+    assert length(blocks) >= 7
 
     original = Code.get_compiler_option(:ignore_module_conflict)
     Code.put_compiler_option(:ignore_module_conflict, true)

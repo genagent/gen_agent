@@ -274,8 +274,9 @@ end
   wants and take all of them.
 - **Parallel answering.** Replace the sequential answer loop with
   a `Supervisor`-shaped fan-out: spawn one worker agent per
-  sub-question, collect answers via notify. See the
-  [Supervisor](supervisor.md) pattern.
+  sub-question, collect answers via notify. The Ensemble
+  [`Supervisor`](https://hexdocs.pm/gen_agent_ensemble/GenAgentEnsemble.Strategies.Supervisor.html)
+  strategy implements this shape.
 - **Per-phase model selection.** Different phases might deserve
   different models -- cheap model for listing, expensive model
   for synthesis. Swap sessions mid-run, or have the backend take
