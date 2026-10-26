@@ -212,7 +212,10 @@ unchanged. Re-evaluate cost and latency for your workload before upgrading.
   then uses `"disabled"`. `"auto"` drops older conversation items to fit
   the context window.
 - `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults
-  to `180_000`. Increase this for long reasoning turns; this is a receive timeout, not a total turn deadline.
+  to `180_000`. Requests are not streamed, so the response arrives only
+  when the turn finishes: a turn slower than this fails with an HTTP timeout
+  even though the agent watchdog (`:watchdog_ms`, default 10 minutes) has
+  not fired. Raise both together for slow or long reasoning turns.
 - `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults
   to `nil` (Req's default). Configure it when starting a named Finch pool;
   `:connect_timeout` cannot be combined with `finch: [name: MyFinch]`.
