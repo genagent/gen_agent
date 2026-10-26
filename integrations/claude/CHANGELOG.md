@@ -4,6 +4,18 @@
 
 * **deps:** admit GenAgent core 0.10.x while retaining existing supported core ranges.
 
+## [0.4.0](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.3.2...gen_agent_claude-v0.4.0) (2026-10-26)
+
+
+### Features
+
+* **claude:** implement reset_session/1 ([21eaa5a](https://github.com/genagent/gen_agent/commit/21eaa5a906e45fc728d7866437e9d634c3472312))
+
+
+### Bug Fixes
+
+* **claude:** admit claude_wrapper 0.17 and core 0.11 ([2052c5f](https://github.com/genagent/gen_agent/commit/2052c5fc824f07a0e7c4c30e5f5628c1c660ee09))
+
 ## [0.3.2](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.3.1...gen_agent_claude-v0.3.2) (2026-10-24)
 
 
