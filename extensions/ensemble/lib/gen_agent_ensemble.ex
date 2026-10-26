@@ -159,7 +159,7 @@ defmodule GenAgentEnsemble do
 
   Use this key with public core APIs such as `GenAgent.whereis/1`,
   `GenAgent.status/1`, `GenAgent.ask/3`, `GenAgent.resume/1` and
-  `GenAgent.interrupt/1`. Core telemetry, messages and `list/0`
+  `GenAgent.interrupt/1`. Core telemetry and messages
   expose this tuple; Ensemble strategy callbacks and stream envelopes still use
   bare members. Session references and PIDs identify exact terms, not durable
   identities across restarts.
