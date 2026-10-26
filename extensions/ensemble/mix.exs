@@ -54,10 +54,10 @@ defmodule GenAgentEnsemble.MixProject do
   # dependencies when building a publishable archive.
   defp backend_deps do
     backends = [
-      {:gen_agent_anthropic, "anthropic", "~> 0.4.2 or ~> 0.5.0"},
-      {:gen_agent_claude, "claude", "~> 0.2.7 or ~> 0.3.0"},
-      {:gen_agent_openai, "openai", "~> 0.4.1 or ~> 0.5.0"},
-      {:gen_agent_codex, "codex", "~> 0.5.0 or ~> 0.6.0"}
+      {:gen_agent_anthropic, "anthropic", "~> 0.5.3"},
+      {:gen_agent_claude, "claude", "~> 0.4.0"},
+      {:gen_agent_openai, "openai", "~> 0.5.3"},
+      {:gen_agent_codex, "codex", "~> 0.7.0"}
     ]
 
     for {app, path, hex_constraint} <- backends do
