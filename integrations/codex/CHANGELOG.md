@@ -4,6 +4,18 @@
 
 * **deps:** admit GenAgent core 0.10.x while retaining existing supported core ranges.
 
+## [0.7.0](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.6.2...gen_agent_codex-v0.7.0) (2026-10-26)
+
+
+### Features
+
+* **codex:** implement reset_session/1 ([f9b12b8](https://github.com/genagent/gen_agent/commit/f9b12b89c55661bccf7c5084d14291e0a8eacadc))
+
+
+### Bug Fixes
+
+* **codex:** admit codex_wrapper 0.8 and core 0.11 ([7e111c2](https://github.com/genagent/gen_agent/commit/7e111c20730067770bda554c6b67f6efcb5eda7b))
+
 ## [0.6.2](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.6.1...gen_agent_codex-v0.6.2) (2026-10-24)
 
 
