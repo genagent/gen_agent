@@ -138,8 +138,8 @@ can see which stage is currently executing.
 - **Stages are stateful across runs.** Like Solo workers, each
   stage agent retains its own conversation history. A second
   `ask!` on the same pipeline replays all stage turns with
-  accumulated context. Restart the ensemble if you want clean stages
-  for the next run.
+  accumulated context. Start the ensemble with
+  `member_sessions: :per_run` for clean stages on each run.
 
 ## Usage accounting
 
@@ -189,7 +189,7 @@ additional history cache.
 
 For live capture (including turns before an aborted run), a custom agent's
 `handle_response/3` or `post_turn/3` callback can inspect each full response;
-a custom strategy is unnecessary. Prompt-stop telemetry does not carry text.
+a custom strategy is unnecessary. Turn telemetry does not carry text.
 
 ## Custom callbacks
 

@@ -197,8 +197,9 @@ iex> E.start_link(
   names.
 - **Agents accumulate conversation state across runs.** A second
   `ask!` on the same ensemble continues with both agents'
-  conversation history intact. If you want a fresh debate, restart
-  the ensemble (`E.stop("name")` then `start_link` again).
+  conversation history intact. Start the ensemble with
+  `member_sessions: :per_run` for a fresh debate on each run; turns
+  within one run still share context.
 - **Round cap is turns, not exchanges.** `rounds: 6` means 6 agent
   responses total, which is 3 exchanges per side. Set it to 4 if
   you want a shorter back-and-forth.

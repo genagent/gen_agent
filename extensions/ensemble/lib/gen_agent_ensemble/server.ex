@@ -12,7 +12,17 @@ defmodule GenAgentEnsemble.Server do
   @default_max_completed_results 100
   @default_max_pending_prompts 1_000
   @default_max_pending_prompt_bytes 1_048_576
+  @member_reset_timeout 5_000
+  # Members of these strategies can be busy when a new run starts.
+  @shared_session_strategies [
+    GenAgentEnsemble.Strategies.Solo,
+    GenAgentEnsemble.Strategies.Switchboard,
+    GenAgentEnsemble.Strategies.Supervisor
+  ]
 
+  # Session state spans ownership, admission, retention and cancellation
+  # bookkeeping that each needs its own field.
+  # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
   defstruct [
     :owner,
     :strategy_mod,
@@ -54,6 +64,10 @@ defmodule GenAgentEnsemble.Server do
     :in_flight,
     # %{gen_agent_ref => {started_at, ordinal, captured_pid, admission}}
     :dispatch_contexts,
+    # :shared | :per_run, see GenAgentEnsemble.start_link/1
+    member_sessions: :shared,
+    # %{bare_name => {pid, token}}: the run each member incarnation last served
+    member_runs: %{},
     # Minimal ownership retained after an uncertain logical cancellation.
     # %{ref => {token, captured_pid, monitor_ref}}
     cancelled_refs: %{},
@@ -239,6 +253,7 @@ defmodule GenAgentEnsemble.Server do
            validate_limit(opts, :max_pending_prompts, @default_max_pending_prompts),
          {:ok, max_pending_prompt_bytes} <-
            validate_limit(opts, :max_pending_prompt_bytes, @default_max_pending_prompt_bytes),
+         {:ok, member_sessions} <- validate_member_sessions(opts, strategy_mod),
          {:ok, strategy_state, start_specs} <- strategy_mod.init(strategy_opts),
          {:ok, agent_tree} <- GenAgentEnsemble.AgentTree.start_link(session_name) do
       # Older releases left this handler behind after abrupt server death.
@@ -264,6 +279,7 @@ defmodule GenAgentEnsemble.Server do
         pending_prompt_bytes: 0,
         max_pending_prompts: max_pending_prompts,
         max_pending_prompt_bytes: max_pending_prompt_bytes,
+        member_sessions: member_sessions,
         stream_recipients: %{},
         completed: %{},
         completed_order: :queue.new(),
@@ -294,6 +310,22 @@ defmodule GenAgentEnsemble.Server do
       :infinity -> {:ok, :infinity}
       value when is_integer(value) and value >= 0 -> {:ok, value}
       value -> {:error, {:invalid_option, :max_completed_results, value}}
+    end
+  end
+
+  defp validate_member_sessions(opts, strategy_mod) do
+    case Keyword.get(opts, :member_sessions, :shared) do
+      :shared ->
+        {:ok, :shared}
+
+      :per_run when strategy_mod in @shared_session_strategies ->
+        {:error, {:unsupported_option, :member_sessions, :per_run}}
+
+      :per_run ->
+        {:ok, :per_run}
+
+      value ->
+        {:error, {:invalid_option, :member_sessions, value}}
     end
   end
 
@@ -1513,7 +1545,8 @@ defmodule GenAgentEnsemble.Server do
         else: [on_halt: :fail]
 
     result =
-      with {:ok, pid} <- owned_member(state, name) do
+      with {:ok, pid} <- owned_member(state, name),
+           :ok <- reset_for_run(state, name, pid, token) do
         {:submitted, ref} = GenAgent.Client.submit_with_completion(pid, prompt, self(), opts)
         {:submitted, ref, pid}
       end
@@ -1531,7 +1564,8 @@ defmodule GenAgentEnsemble.Server do
            | in_flight: Map.put(state.in_flight, ref, {name, token}),
              dispatch_contexts:
                Map.put(state.dispatch_contexts, ref, {started_at, ordinal, pid, :submitted})
-         }}
+         }
+         |> record_member_run(name, pid, token)}
 
       {:error, reason} ->
         emit(
@@ -1546,6 +1580,35 @@ defmodule GenAgentEnsemble.Server do
         {:error, reason}
     end
   end
+
+  # A member incarnation that last served another run starts this one with a
+  # fresh backend session. New and restarted members already have one, and
+  # rounds within one run keep their shared context. Reset targets the owned
+  # PID so a replacement registered under the same name is never touched.
+  defp reset_for_run(%{member_sessions: :per_run} = state, name, pid, token)
+       when is_binary(token) do
+    case Map.get(state.member_runs, name) do
+      {^pid, previous} when previous != token -> reset_member(pid)
+      _ -> :ok
+    end
+  end
+
+  defp reset_for_run(_state, _name, _pid, _token), do: :ok
+
+  defp reset_member(pid) do
+    case GenAgent.Client.reset_session(pid, @member_reset_timeout) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:session_reset_failed, reason}}
+    end
+  catch
+    :exit, _ -> {:error, {:session_reset_failed, :unconfirmed}}
+  end
+
+  defp record_member_run(%{member_sessions: :per_run} = state, name, pid, token)
+       when is_binary(token),
+       do: %{state | member_runs: Map.put(state.member_runs, name, {pid, token})}
+
+  defp record_member_run(state, _name, _pid, _token), do: state
 
   # Drain events and completions in arrival order across ALL refs:
   # Solo/Switchboard correlate responses with their per-agent FIFO. Selecting
@@ -2116,6 +2179,7 @@ defmodule GenAgentEnsemble.Server do
   defp reason_kind({:start_exception, _}), do: :start_exception
   defp reason_kind({:duplicate_sub_agent, _}), do: :duplicate_sub_agent
   defp reason_kind({:member_name_conflict, _}), do: :member_name_conflict
+  defp reason_kind({:session_reset_failed, _}), do: :session_reset_failed
   defp reason_kind(_reason), do: :backend_or_strategy_error
 
   # The offending field or exception kind of a contained start failure. Both

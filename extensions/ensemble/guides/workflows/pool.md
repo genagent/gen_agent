@@ -115,8 +115,9 @@ Uses whichever worker is free. If all are busy, queues behind them.
 - **Workers retain per-worker conversation history.** The Pool
   recycles workers across turns, and each worker's backend session
   persists. Sequential requests rotate among idle workers, then
-  return to each worker's existing conversation. Use a fresh-session
-  callback module if you need isolated single turns.
+  return to each worker's existing conversation. Start the ensemble
+  with `member_sessions: :per_run` to give each request a fresh worker
+  session.
 - **`status` races against fast turns.** If you call `E.status` in a
   separate iex line after firing tells, a sub-second turn may have
   already completed, showing `busy: 0`. Capture status right after

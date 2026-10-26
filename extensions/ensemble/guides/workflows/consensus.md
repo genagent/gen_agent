@@ -274,7 +274,10 @@ iex> E.await("arch-review", tok, 600_000) |> E.puts()
   rationales into each agent's next prompt. The agent's own
   previous response stays in its backend's conversation memory.
   This means each round's re-prompt is heavy -- expect larger
-  token counts on round 2+ than round 1.
+  token counts on round 2+ than round 1. That memory also carries
+  into later runs unless the ensemble starts with
+  `member_sessions: :per_run`, which resets each agent before a new run
+  while keeping context across its rounds.
 - **One consensus at a time.** Concurrent `tell`/`ask` calls
   queue. For parallel review panels, start multiple Consensus
   ensembles.
