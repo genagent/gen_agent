@@ -101,6 +101,10 @@ defmodule GenAgent.Backends.OpenAI do
       `"auto"` drops older conversation items when the context window fills.
     * `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults to
       `180_000`; increase it for long-context or slow reasoning turns.
+      Requests are not streamed, so the response arrives only when the turn
+      finishes: a turn slower than this fails with an HTTP timeout even
+      though the agent watchdog (`:watchdog_ms`, default 10 minutes) has not
+      fired. Raise both together for slow turns.
     * `:connect_timeout` -- HTTP connect timeout in milliseconds. Defaults to
       Req's default when unset. With a named Finch pool, configure this when
       starting Finch instead; the two session options cannot be combined.
