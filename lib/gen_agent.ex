@@ -23,7 +23,7 @@ defmodule GenAgent do
 
       def deps do
         [
-          {:gen_agent, "~> 0.10.0"} # x-release-please-version
+          {:gen_agent, "~> 0.11.0"} # x-release-please-version
         ]
       end
 

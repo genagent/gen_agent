@@ -6,6 +6,32 @@
 
 * **core:** add `GenAgent.Client.notify/2` for best-effort notification to a captured local PID, rejecting an already dead PID without Registry lookup or replacement delivery.
 
+## [0.11.0](https://github.com/genagent/gen_agent/compare/v0.10.0...v0.11.0) (2026-10-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core:** GenAgent.current_name/0 is removed. Keep the agent's registered name in its state, for example from a start option read in init_agent/1.
+* **core:** GenAgent.runtime_snapshot/2 is removed. Use status/2: phase is state, pending_prompts is queued, current_request is the ref, and the rest of the old current_request map is current_turn.
+* **core:** GenAgent.list/0, GenAgent.Client.poll/3, the Response.prompt field, the :event_retention option and the
+* **core:** the prompt.* and event.received telemetry events are no longer emitted. Use [:gen_agent, :turn, *] for turn lifecycle and latency. pre_turn/2 rewrites are no longer reported in telemetry.
+* **core:** GenAgent.halt/1 is removed, and the halt_pending field no longer appears in status/2 or runtime_snapshot/2.
+* **core:** GenAgent.drain/2 is removed, and the :draining error reason and the draining fields in status/2 and runtime_snapshot/2 no longer exist. Use stop/1 or stop/2 to end an agent.
+
+### Features
+
+* **core:** add GenAgent.Client.reset_session/2 ([d4a5766](https://github.com/genagent/gen_agent/commit/d4a576692db78f4f60234f8bc4bcf198ea32d4e6))
+
+
+### Code Refactoring
+
+* **core:** fold runtime_snapshot/2 into status/2 ([569be7a](https://github.com/genagent/gen_agent/commit/569be7a06a347c9486299e6cbbb0e6f1bbaba4a9))
+* **core:** remove current_name/0 ([e18de24](https://github.com/genagent/gen_agent/commit/e18de24d616a92c444b126918f4254badac0c4ae))
+* **core:** remove drain/2 ([bde2e7a](https://github.com/genagent/gen_agent/commit/bde2e7a5c5e61c018936f2b1a669b99b7e31d66d))
+* **core:** remove external halt/1 ([dcac8a3](https://github.com/genagent/gen_agent/commit/dcac8a38656e71ef5afb0567d32fd796fbeee720))
+* **core:** remove list/0, Client.poll/3, Response.prompt and lossless retention ([30b5e29](https://github.com/genagent/gen_agent/commit/30b5e29aca522239bc8c2bd52950ab0a7a3dbe6f))
+* **core:** remove prompt and event.received telemetry ([30a92f5](https://github.com/genagent/gen_agent/commit/30a92f597c1418f63c23b23a47edb30d4dee459f))
+
 ## [0.10.0](https://github.com/genagent/gen_agent/compare/v0.9.0...v0.10.0) (2026-10-24)
 
 
