@@ -419,7 +419,7 @@ For the tradeoffs between wrappers, GenAgent, and Oban workers, see
 | `poll/3` | Check on a previously-issued `tell/3`. |
 | `GenAgent.Client.submit_with_completion/4` | Send to a captured local PID; return a ref without waiting for admission. |
 | `GenAgent.Client.notify/2` | Best-effort event cast to a captured local PID; rejects an already dead PID. |
-| `GenAgent.Client.cancel_request/3`, `interrupt_request/3` | Synchronous exact-PID request controls. |
+| `GenAgent.Client.cancel_request/3`, `interrupt_request/3`, `reset_session/2` | Synchronous exact-PID request controls and session reset. |
 | `notify/2` | Push an external event into `handle_event/2`. |
 | `notify_ack/3` | Wait for an in-memory notification admission result. |
 | `interrupt/1` | Cancel an in-flight turn. |

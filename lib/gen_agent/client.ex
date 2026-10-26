@@ -1,6 +1,6 @@
 defmodule GenAgent.Client do
   @moduledoc """
-  Notifications, correlated submission and exact-request controls for a captured local agent PID.
+  Notifications, correlated submission, exact-request controls and session reset for a captured local agent PID.
 
   `submit_with_completion/4` creates a request ref and sends once without
   waiting for the agent's callbacks or admission decision. `{:submitted, ref}`
@@ -146,6 +146,21 @@ defmodule GenAgent.Client do
           {:ok, :accepted} | {:error, :not_current | :idle}
   def interrupt_request(pid, ref, timeout \\ 5_000),
     do: call(pid, ref, :interrupt_request, timeout)
+
+  @doc """
+  Reset the backend conversation of the captured PID.
+
+  Uses `GenAgent.reset_session/2` semantics and a 5 second default timeout:
+  `:ok`, `{:error, :busy}` while a turn is active, or `{:error, :unsupported}`
+  when the backend has no `c:GenAgent.Backend.reset_session/1`. Native
+  timeout/death exits propagate, and a held callback delays this call. There
+  is no Registry lookup or retargeting to a replacement.
+  """
+  @spec reset_session(pid(), timeout()) :: :ok | {:error, term()}
+  def reset_session(pid, timeout \\ 5_000) do
+    validate_target!(pid)
+    :gen_statem.call(pid, :reset_session, timeout)
+  end
 
   defp call(pid, ref, operation, timeout) do
     validate_target!(pid)
