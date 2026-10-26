@@ -10,6 +10,10 @@ defmodule GenAgentEnsemble.Strategies.Switchboard do
   when you want an explicit routed fleet ("the code review team")
   rather than an implicit pool or a decomposing coordinator.
 
+  `GenAgentEnsemble.notify/2` is not routed to sub-agents; this strategy
+  ignores it. Notify one member with
+  `GenAgent.notify(GenAgentEnsemble.member_name(name, agent), event)`.
+
   ## Options
 
     * `:agents` (required) -- list of `{name, module, opts}` specs,
