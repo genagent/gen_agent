@@ -17,6 +17,11 @@ defmodule GenAgent.Backends.Codex do
   successful result on the session struct, and the
   next turn is dispatched via `ExecResume` with that id.
 
+  `reset_session/1` (called by `GenAgent.reset_session/2` while the agent is
+  idle) clears the thread id and usage baseline, so the next turn starts a
+  new Codex thread with `Exec`. Earlier threads remain in Codex's own
+  history.
+
   ## Usage
 
   Codex reports `turn.completed.usage` as the thread's running total,
@@ -247,6 +252,13 @@ defmodule GenAgent.Backends.Codex do
     do: @impl(GenAgent.Backend)
 
   def checkpoint_session(%__MODULE__{} = session, sid), do: %{session | thread_id: sid}
+
+  if {:reset_session, 1} in GenAgent.Backend.behaviour_info(:callbacks),
+    do: @impl(GenAgent.Backend)
+
+  def reset_session(%__MODULE__{} = session) do
+    {:ok, %{session | thread_id: nil, usage_total: EventTranslator.zero_usage_total()}}
+  end
 
   @impl GenAgent.Backend
   def resume_session(session_id, opts) when is_binary(session_id) do
