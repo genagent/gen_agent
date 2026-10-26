@@ -126,8 +126,7 @@ defmodule GenAgentEnsemble.MemberNamesTest do
     handler = {__MODULE__, make_ref()}
 
     events =
-      for prefix <- [:gen_agent, :gen_agent_ensemble],
-          scope <- [:prompt, :dispatch],
+      for {prefix, scope} <- [gen_agent: :turn, gen_agent_ensemble: :dispatch],
           event <- [:start, :stop, :error, :rejected],
           do: [prefix, scope, event]
 
@@ -239,7 +238,7 @@ defmodule GenAgentEnsemble.MemberNamesTest do
     assert_receive {:member_telemetry, [:gen_agent_ensemble, :dispatch, :start], _,
                     %{session: ^name, agent: "w", member_name: ^key, ref: ref}}
 
-    assert_receive {:member_telemetry, [:gen_agent, :prompt, :start], _,
+    assert_receive {:member_telemetry, [:gen_agent, :turn, :start], _,
                     %{agent: ^key, ref: ^ref}}
 
     assert_receive {:member_telemetry, [:gen_agent_ensemble, :dispatch, :stop], _,
