@@ -281,9 +281,7 @@ agent.
 
 **Events.** An event handled while idle runs immediately. During a turn it
 is buffered and delivered in arrival order after the decision callback and
-`post_turn/3`, using the resulting state. See the keyless
-[log-triage example](examples/log_triage/README.md) for an OTP Logger handler
-that forwards crash reports and batches deferred notifications into agent turns.
+`post_turn/3`, using the resulting state.
 
 **Stream events.** `handle_stream_event/2` runs in the prompt task. Its
 state starts as the agent state at dispatch and is threaded through the
@@ -661,8 +659,6 @@ the agent supervisor. On ordinary shutdown, the agent supervisor stops
 first so its agents can cancel in-flight tasks while their task supervisor
 is still running. An application must reconstruct state and consumed work
 from its own durable records; supervision alone does not provide recovery.
-The [Chaos Lab](https://github.com/genagent/gen_agent/tree/main/examples/chaos_lab) example is a keyless, executable check of
-the supervision contract.
 
 Each prompt turn runs as a Task under its selected `Task.Supervisor`. A
 crashed task delivers `:DOWN` to the owning agent, which turns it into an

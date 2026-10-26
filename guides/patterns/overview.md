@@ -12,7 +12,7 @@ guide-level tests exercise their behavior with local stub backends. They
 do not require a Claude or Codex account to run.
 
 An Ensemble session owns its sub-agents under one strategy. Add
-`{:gen_agent_ensemble, "~> 0.1.4"}` to your dependencies and start a
+`{:gen_agent_ensemble, "~> 0.7"}` to your dependencies and start a
 session with `GenAgentEnsemble.start_link(name: ..., strategy: ...,
 opts: ...)`. Submit with `ask` for a synchronous result or `tell`
 followed by `poll` or `inbox`. An agent spec chooses its callback module
@@ -26,21 +26,16 @@ and optional scheduling around these strategies.
 
 | Strategy | Shape | When it fits |
 | --- | --- | --- |
-| [`GenAgentEnsemble.Strategies.Solo`](solo.md) | One agent | A single session behind the Ensemble API. |
-| `GenAgentEnsemble.Strategies.Switchboard` | Caller-routed named agents | A human or client chooses `agent:` on each call. |
-| `GenAgentEnsemble.Strategies.Pipeline` | Ordered stages | Each stage's response text becomes the next prompt. |
-| `GenAgentEnsemble.Strategies.Supervisor` | Coordinator and temporary workers | Decompose one request, run independent sub-tasks, collect replies. |
-| `GenAgentEnsemble.Strategies.Pool` | Fixed reusable workers | Dispatch to the next free worker; queue requests FIFO when all are busy. |
-| `GenAgentEnsemble.Strategies.Debate` | Two alternating agents | Continue until a convergence rule or round cap ends the exchange. |
-| [`GenAgentEnsemble.Strategies.Consensus`](consensus.md) | N agents with parsed verdicts | Compare decisions against a threshold and report divergence at the round cap. |
+| [`Solo`](https://hexdocs.pm/gen_agent_ensemble/GenAgentEnsemble.Strategies.Solo.html) | One agent | A single session behind the Ensemble API. |
+| [`Switchboard`](https://hexdocs.pm/gen_agent_ensemble/GenAgentEnsemble.Strategies.Switchboard.html) | Caller-routed named agents | A human or client chooses `agent:` on each call. |
+| [`Pipeline`](https://hexdocs.pm/gen_agent_ensemble/GenAgentEnsemble.Strategies.Pipeline.html) | Ordered stages | Each stage's response text becomes the next prompt. |
+| [`Supervisor`](https://hexdocs.pm/gen_agent_ensemble/GenAgentEnsemble.Strategies.Supervisor.html) | Coordinator and temporary workers | Decompose one request, run independent sub-tasks, collect replies. |
+| [`Pool`](https://hexdocs.pm/gen_agent_ensemble/GenAgentEnsemble.Strategies.Pool.html) | Fixed reusable workers | Dispatch to the next free worker; queue requests FIFO when all are busy. |
+| [`Debate`](https://hexdocs.pm/gen_agent_ensemble/GenAgentEnsemble.Strategies.Debate.html) | Two alternating agents | Continue until a convergence rule or round cap ends the exchange. |
+| [`Consensus`](https://hexdocs.pm/gen_agent_ensemble/GenAgentEnsemble.Strategies.Consensus.html) | N agents with parsed verdicts | Compare decisions against a threshold and report divergence at the round cap. |
 
-The [Switchboard](switchboard.md), [Pipeline](pipeline.md),
-[Supervisor](supervisor.md), [Pool](pool.md), and [Debate](debate.md)
-pages predate the packaged strategies. Their callback modules are
-alternative examples, not the implementations behind those strategies.
-Use each strategy's module documentation for its exact options and
-failure semantics. These guide pages include a short example of
-starting the packaged strategy before the older callback recipe.
+Each strategy's module documentation and the Ensemble workflow guides give
+its exact options and failure semantics.
 
 ## Single-agent callback patterns
 
@@ -67,8 +62,7 @@ Use **Switchboard** when the caller knows which named agent should
 receive each request. Use **Pipeline** when roles have a fixed order,
 and **Supervisor** when one request can be decomposed into temporary,
 independent workers. Use **Pool** for a stream of independent requests
-that should reuse a bounded set of workers. **Debate** and
-**[Consensus](consensus.md)**
+that should reuse a bounded set of workers. **Debate** and **Consensus**
 add explicit convergence rules; the latter parses categorical verdicts
 from two or more agents.
 
