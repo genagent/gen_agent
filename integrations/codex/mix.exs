@@ -33,7 +33,7 @@ defmodule GenAgentCodex.MixProject do
   defp deps do
     [
       gen_agent_dep(),
-      {:codex_wrapper, "~> 0.6.0"},
+      {:codex_wrapper, "~> 0.6.0 or ~> 0.7.0 or ~> 0.8.0"},
       {:ex_doc, "~> 0.35", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
@@ -53,7 +53,7 @@ defmodule GenAgentCodex.MixProject do
 
   defp gen_agent_dep do
     if System.get_env("GEN_AGENT_HEX") == "1" do
-      {:gen_agent, "~> 0.6.0 or ~> 0.7.0 or ~> 0.8.0 or ~> 0.9.0 or ~> 0.10.0"}
+      {:gen_agent, "~> 0.6.0 or ~> 0.7.0 or ~> 0.8.0 or ~> 0.9.0 or ~> 0.10.0 or ~> 0.11.0"}
     else
       {:gen_agent, path: "../.."}
     end
