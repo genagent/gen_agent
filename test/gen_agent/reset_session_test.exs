@@ -58,6 +58,18 @@ defmodule GenAgent.ResetSessionTest do
     assert_receive {:gen_agent, :completion, ^name, ^ref, {:ok, %{text: "done"}}}
   end
 
+  test "Client.reset_session/2 resets the exact PID", %{name: name} do
+    assert {:ok, pid} = GenAgent.start_agent(TestAgent, name: name, backend: ResetBackend)
+
+    assert {:ok, %{text: "0"}} = GenAgent.ask(name, "one")
+    assert :ok = GenAgent.Client.reset_session(pid)
+    assert {:ok, %{text: "0"}} = GenAgent.ask(name, "two")
+
+    assert_raise ArgumentError, fn -> GenAgent.Client.reset_session(name) end
+    :ok = GenAgent.stop(name)
+    assert {:noproc, _} = catch_exit(GenAgent.Client.reset_session(pid))
+  end
+
   test "missing agents return not_found" do
     assert {:error, :not_found} = GenAgent.reset_session("missing-reset-agent")
   end
