@@ -208,6 +208,21 @@ defmodule GenAgentEnsemble do
   values return `{:error, {:invalid_option, key, value}}` before strategy
   initialization or owned tree startup. See "Admission limits" below.
 
+  Top-level `:member_sessions` chooses whether sub-agents keep one backend
+  conversation for the life of the ensemble (`:shared`, the default) or start
+  each run with a fresh one (`:per_run`). With `:per_run`, a member that last
+  served another run token is reset with `GenAgent.Client.reset_session/2`
+  before its first dispatch for the new run; turns within one run, such as
+  Debate or Consensus rounds, keep their shared context. New and restarted
+  members already have a fresh session. Each member's backend must implement
+  `c:GenAgent.Backend.reset_session/1`; a failed or unsupported reset rejects
+  that dispatch with `{:session_reset_failed, reason}`. The reset is a
+  synchronous call to an idle member, bounded by 5 seconds. Solo, Switchboard
+  and Supervisor reject `:per_run` with
+  `{:error, {:unsupported_option, :member_sessions, :per_run}}`, because their
+  members can still be working when a new run starts; other values return
+  `{:error, {:invalid_option, :member_sessions, value}}`.
+
   The session is linked to its caller and stops when that caller exits,
   including normally; this applies to a halted session as well, which
   otherwise stays alive (see "Halt" in the module documentation).
