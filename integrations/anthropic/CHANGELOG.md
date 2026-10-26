@@ -4,6 +4,13 @@
 
 * **deps:** admit GenAgent core 0.10.x while retaining existing supported core ranges.
 
+## [0.5.3](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.5.2...gen_agent_anthropic-v0.5.3) (2026-10-26)
+
+
+### Bug Fixes
+
+* **anthropic:** admit core 0.11 ([b38f43f](https://github.com/genagent/gen_agent/commit/b38f43f0d077999f4de9677d5bda1a6f5320675c))
+
 ## [0.5.2](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.5.1...gen_agent_anthropic-v0.5.2) (2026-10-24)
 
 
