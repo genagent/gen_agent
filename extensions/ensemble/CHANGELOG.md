@@ -103,6 +103,19 @@ Submission reserves a per-token ordinal even when the child rejects it; the
 `:dispatch, :rejected` event carries that ordinal and ref. Guard-time rejection
 has neither. Accepted dispatch ordinals can therefore have gaps.
 
+## [0.8.0](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.7.5...gen_agent_ensemble-v0.8.0) (2026-10-26)
+
+
+### Features
+
+* **ensemble:** add opt-in per-run member sessions ([6fe8e75](https://github.com/genagent/gen_agent/commit/6fe8e752deb468cec4ab6685e91ca37cc5590a64))
+
+
+### Bug Fixes
+
+* **ensemble:** admit core 0.11 ([f6601b9](https://github.com/genagent/gen_agent/commit/f6601b9ae2f56d7ef765853120cba4edbb649f0e))
+* **ensemble:** validate Pipeline stages before startup ([#535](https://github.com/genagent/gen_agent/issues/535)) ([4d7c0cd](https://github.com/genagent/gen_agent/commit/4d7c0cd4835a9e45071f132756fb3a1139289b59))
+
 ## [0.7.5](https://github.com/genagent/gen_agent/compare/gen_agent_ensemble-v0.7.4...gen_agent_ensemble-v0.7.5) (2026-10-25)
 
 
