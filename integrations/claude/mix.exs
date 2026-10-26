@@ -33,8 +33,8 @@ defmodule GenAgentClaude.MixProject do
   defp deps do
     [
       gen_agent_dep(),
-      {:claude_wrapper, "~> 0.15.2"},
-      {:forcola, "~> 0.6.0", only: :test},
+      {:claude_wrapper, "~> 0.15.2 or ~> 0.16.0 or ~> 0.17.0"},
+      {:forcola, "~> 0.7.0", only: :test},
       {:ex_doc, "~> 0.35", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
@@ -54,7 +54,7 @@ defmodule GenAgentClaude.MixProject do
 
   defp gen_agent_dep do
     if System.get_env("GEN_AGENT_HEX") == "1" do
-      {:gen_agent, "~> 0.6.0 or ~> 0.7.0 or ~> 0.8.0 or ~> 0.9.0 or ~> 0.10.0"}
+      {:gen_agent, "~> 0.6.0 or ~> 0.7.0 or ~> 0.8.0 or ~> 0.9.0 or ~> 0.10.0 or ~> 0.11.0"}
     else
       {:gen_agent, path: "../.."}
     end
