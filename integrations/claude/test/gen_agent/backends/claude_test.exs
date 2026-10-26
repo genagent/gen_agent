@@ -290,6 +290,30 @@ defmodule GenAgent.Backends.ClaudeTest do
     end
   end
 
+  describe "reset_session/1" do
+    test "starts a new conversation on the next turn" do
+      ref = make_ref()
+      events = [stream_event("result", %{"result" => "ok", "session_id" => "sess-42"})]
+
+      {:ok, session} =
+        Claude.start_session(
+          stream_fn: recording_stream(ref, events),
+          session_id: "first-turn-id",
+          continue_session: true
+        )
+
+      session = Claude.update_session(session, %{session_id: "sess-42"})
+      assert {:ok, reset} = Claude.reset_session(session)
+      assert reset.session_id == nil
+
+      {:ok, _stream, _session} = Claude.prompt(reset, "fresh")
+      assert_receive {^ref, "fresh", opts}
+      refute Keyword.has_key?(opts, :resume)
+      refute Keyword.has_key?(opts, :session_id)
+      refute Keyword.has_key?(opts, :continue_session)
+    end
+  end
+
   describe "resume_session/2" do
     test "builds a session pre-loaded with the given session_id" do
       {:ok, session} =
