@@ -3,6 +3,7 @@ defmodule GenAgent.Backends.CodexTest do
 
   alias CodexWrapper.JsonLineEvent
   alias GenAgent.Backends.Codex
+  alias GenAgent.Backends.Codex.EventTranslator
 
   defp event(type, data), do: %JsonLineEvent{event_type: type, data: data, raw: ""}
 
@@ -327,6 +328,23 @@ defmodule GenAgent.Backends.CodexTest do
 
       session = Codex.update_session(session, %{text: "irrelevant"})
       assert session.thread_id == nil
+    end
+  end
+
+  describe "reset_session/1" do
+    test "starts a new thread with a zero usage baseline on the next turn" do
+      ref = make_ref()
+      {:ok, session} = Codex.start_session(exec_fn: recording_exec(ref, []))
+
+      session =
+        Codex.update_session(session, %{session_id: "thread-1", usage_total: %{input_tokens: 9}})
+
+      assert {:ok, reset} = Codex.reset_session(session)
+      assert reset.thread_id == nil
+      assert reset.usage_total == EventTranslator.zero_usage_total()
+
+      {:ok, _stream, _session} = Codex.prompt(reset, "fresh")
+      assert_receive {^ref, "fresh", nil}
     end
   end
 
