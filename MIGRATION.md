@@ -10,6 +10,7 @@ backends, or gen_agent_server. Each removal is a breaking change.
 | `GenAgent.drain` and the `:draining` error | `stop/1` or `stop/2`. |
 | `GenAgent.halt` and the `halt_pending` status field | Send a `notify/2` event that `handle_event/2` answers with `{:halt, state}`; `resume/1` is unchanged. |
 | `GenAgent.runtime_snapshot` | `status/2`. `phase` is `state`, `pending_prompts` is `queued`, `current_request` is the ref, and the rest of the old `current_request` map is `current_turn`. `pending_notifications` and `self_chain_pending` keep their names. |
+| `GenAgent.current_name` | Keep the name in agent state, for example from an `agent_name:` start option read in `init_agent/1`. |
 | `GenAgent.list` | `Registry.select(GenAgent.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}])` if needed. |
 | `GenAgent.Client.poll` | Completion messages from `submit_with_completion/4`, or `GenAgent.poll/3` by name. |
 | `Response.prompt` | Record the prompt in `pre_turn/2` if a transcript needs it. |
