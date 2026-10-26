@@ -77,7 +77,10 @@ defmodule GenAgent.Backends.Anthropic do
       prior turns. Older pairs are dropped after each successful turn.
     * `:receive_timeout` -- HTTP receive timeout in milliseconds.
       Defaults to `180_000`; increase it for long-context or slow reasoning
-      turns. This is a receive timeout, not a total turn deadline.
+      turns. Requests are not streamed, so the response arrives only when
+      the turn finishes: a turn slower than this fails with an HTTP timeout
+      even though the agent watchdog (`:watchdog_ms`, default 10 minutes)
+      has not fired. Raise both together for slow turns.
     * `:connect_timeout` -- HTTP connect timeout in milliseconds.
       Defaults to Req's default when unset. With a named Finch pool,
       configure this when starting Finch; the two session options cannot
