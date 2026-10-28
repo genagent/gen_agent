@@ -144,10 +144,10 @@ defmodule GenAgent.Backends.CodexTest do
       {:ok, session} = Codex.start_session(exec_fn: fake_exec([]))
 
       {session, first} = run_turn(session, completed_turn(14_956, 5))
-      assert first == %{input_tokens: 14_956, output_tokens: 5}
+      assert first == %{input_tokens: 14_956, output_tokens: 5, context_tokens: 14_956}
 
       {session, second} = run_turn(session, completed_turn(29_938, 15))
-      assert second == %{input_tokens: 14_982, output_tokens: 10}
+      assert second == %{input_tokens: 14_982, output_tokens: 10, context_tokens: 14_982}
 
       {_session, third} = run_turn(session, completed_turn(29_938, 15))
       assert third == %{input_tokens: 0, output_tokens: 0}
@@ -161,7 +161,7 @@ defmodule GenAgent.Backends.CodexTest do
       assert session.usage_total == %{input_tokens: 31_279, output_tokens: 11}
 
       {_session, second} = run_turn(session, completed_turn(40_000, 20))
-      assert second == %{input_tokens: 8721, output_tokens: 9}
+      assert second == %{input_tokens: 8721, output_tokens: 9, context_tokens: 8721}
     end
 
     test "a failed turn keeps the baseline so the next delta includes it" do
@@ -177,7 +177,7 @@ defmodule GenAgent.Backends.CodexTest do
       assert session.usage_total.input_tokens == 100
 
       {_session, usage} = run_turn(session, completed_turn(180, 16))
-      assert usage == %{input_tokens: 80, output_tokens: 6}
+      assert usage == %{input_tokens: 80, output_tokens: 6, context_tokens: 80}
     end
 
     test "checkpoint_session keeps the usage baseline" do
@@ -186,7 +186,7 @@ defmodule GenAgent.Backends.CodexTest do
       session = Codex.checkpoint_session(session, "thread-u")
 
       {_session, usage} = run_turn(session, completed_turn(130, 12))
-      assert usage == %{input_tokens: 30, output_tokens: 2}
+      assert usage == %{input_tokens: 30, output_tokens: 2, context_tokens: 30}
     end
 
     test "a reset total suppresses the delta and rebaselines" do
@@ -198,7 +198,7 @@ defmodule GenAgent.Backends.CodexTest do
       assert session.usage_total == %{input_tokens: 50, output_tokens: 5}
 
       {_session, usage} = run_turn(session, completed_turn(70, 9))
-      assert usage == %{input_tokens: 20, output_tokens: 4}
+      assert usage == %{input_tokens: 20, output_tokens: 4, context_tokens: 20}
     end
 
     test "a turn without usage clears the baseline instead of leaving it stale" do

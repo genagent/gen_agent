@@ -327,6 +327,13 @@ then. All five counters Codex emits are kept: `input_tokens`, `output_tokens`,
     are included in the next successful turn's delta, because completion
     totals cannot separate them.
 
+`response.usage.context_tokens` repeats a positive `input_tokens` increase.
+Codex input counts include cached tokens, so for a turn with one model call
+it is the conversation size sent to the model. A turn with several calls
+(tool use) sums their prompts, so it is then an upper bound. Codex exec
+reports no context window; supply it from configuration when deciding to roll
+a session over with `GenAgent.reset_session/2`.
+
 ## Testing
 
 ```bash

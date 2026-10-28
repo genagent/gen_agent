@@ -392,13 +392,15 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
         reasoning_output_tokens: 799
       }
 
+      usage = Map.put(total, :context_tokens, 626_594)
+
       assert [
-               %Event{kind: :usage, data: ^total},
+               %Event{kind: :usage, data: ^usage},
                %Event{kind: :result, data: %{usage_total: ^total}}
              ] = EventTranslator.translate(completed(@all_fields))
 
       events = EventTranslator.translate(completed(@all_fields))
-      assert Response.from_events(events, []).usage == total
+      assert Response.from_events(events, []).usage == usage
     end
 
     test "resumed turn reports the delta from the previous completed total" do
@@ -426,7 +428,8 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
                cached_input_tokens: 12_160,
                cache_write_input_tokens: 0,
                output_tokens: 5,
-               reasoning_output_tokens: 0
+               reasoning_output_tokens: 0,
+               context_tokens: 14_982
              }
 
       assert result.usage_total.input_tokens == 29_938
@@ -446,7 +449,7 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
                  usage_baseline: baseline
                )
 
-      assert data == %{input_tokens: 15}
+      assert data == %{input_tokens: 15, context_tokens: 15}
     end
 
     test "maps with only optional counters are kept, including zeros" do
@@ -531,7 +534,7 @@ defmodule GenAgent.Backends.Codex.EventTranslatorTest do
       response = Response.from_events(translated)
       assert response.text == @final_json
       assert Jason.decode!(response.text) == %{"answer" => 42, "source" => "lib/foo.ex"}
-      assert response.usage == %{input_tokens: 7, output_tokens: 3}
+      assert response.usage == %{input_tokens: 7, output_tokens: 3, context_tokens: 7}
       assert response.session_id == nil
     end
 
