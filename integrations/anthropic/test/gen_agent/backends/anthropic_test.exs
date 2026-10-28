@@ -596,7 +596,8 @@ defmodule GenAgent.Backends.AnthropicTest do
                input_tokens: 10,
                output_tokens: 5,
                cache_creation_input_tokens: 3,
-               cache_read_input_tokens: 7
+               cache_read_input_tokens: 7,
+               context_tokens: 20
              }
     end
 

@@ -170,7 +170,11 @@ timeouts pass through unchanged.
   `false` because single turns and idle conversations can incur cache-write
   cost without a later hit. `Response.usage` includes
   `:cache_creation_input_tokens` and `:cache_read_input_tokens` when the API
-  reports them; total input is their sum plus `:input_tokens`.
+  reports them; total input is their sum plus `:input_tokens`, and
+  `Response.usage.context_tokens` reports that total: the retained
+  conversation size sent with the turn. The API reports no context window;
+  supply it from configuration when deciding to roll a session over with
+  `GenAgent.reset_session/2`.
 - `:max_history_turns` -- completed user/assistant pairs retained between
   turns. Defaults to `:infinity`; `0` retains none.
 - `:receive_timeout` -- HTTP receive timeout in milliseconds. Defaults

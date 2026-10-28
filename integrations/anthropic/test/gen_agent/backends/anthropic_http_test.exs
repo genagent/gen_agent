@@ -32,7 +32,7 @@ defmodule GenAgent.Backends.AnthropicHTTPTest do
     {:ok, session} = Anthropic.start_session(api_key: "test-key", model: "claude-test")
     assert {:ok, [usage, result], _session} = Anthropic.prompt(session, "ping")
     assert usage.kind == :usage
-    assert usage.data == %{input_tokens: 3, output_tokens: 2}
+    assert usage.data == %{input_tokens: 3, output_tokens: 2, context_tokens: 3}
     assert result.kind == :result
     assert result.data.text == "hello"
 

@@ -72,6 +72,10 @@ defmodule GenAgent.Backends.Anthropic do
     * `:cache` -- opt in to automatic 5-minute prompt caching with
       top-level `cache_control: %{type: "ephemeral"}`. Defaults to `false`.
       Usage reports cache-write and cache-read tokens when present.
+      Usage also reports `:context_tokens`, the request's prompt size
+      (`input_tokens` plus cache read and write tokens), which is the
+      retained conversation size for the turn. The API reports no context
+      window; supply it from configuration.
     * `:max_history_turns` -- retain at most this many completed user/assistant
       pairs in subsequent requests. Defaults to `:infinity`; `0` keeps no
       prior turns. Older pairs are dropped after each successful turn.
@@ -618,11 +622,24 @@ defmodule GenAgent.Backends.Anthropic do
         cache_read_input_tokens: usage["cache_read_input_tokens"]
       }
       |> drop_nil_values()
+      |> put_context_tokens()
 
     if map_size(values) == 0, do: nil, else: values
   end
 
   defp extract_usage(_), do: nil
+
+  # One request per turn carries the whole retained conversation, so its
+  # prompt tokens (uncached plus cache read and write) are the context size.
+  defp put_context_tokens(%{input_tokens: input} = values) when is_integer(input) do
+    cached =
+      Map.get(values, :cache_read_input_tokens, 0) +
+        Map.get(values, :cache_creation_input_tokens, 0)
+
+    Map.put(values, :context_tokens, input + cached)
+  end
+
+  defp put_context_tokens(values), do: values
 
   defp maybe_cache(body, true), do: Map.put(body, :cache_control, %{type: "ephemeral"})
   defp maybe_cache(body, false), do: body
