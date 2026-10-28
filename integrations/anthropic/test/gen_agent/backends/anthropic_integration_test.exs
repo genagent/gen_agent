@@ -127,7 +127,7 @@ defmodule GenAgent.Backends.AnthropicIntegrationTest do
 
       assert {:ok, response} = GenAgent.ask(name, "hi")
       assert response.text == "hello from the API"
-      assert response.usage == %{input_tokens: 10, output_tokens: 5}
+      assert response.usage == %{input_tokens: 10, output_tokens: 5, context_tokens: 10}
       assert is_binary(response.session_id)
       assert String.starts_with?(response.session_id, "anthropic-")
     end
