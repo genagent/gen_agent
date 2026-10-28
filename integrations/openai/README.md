@@ -241,6 +241,12 @@ When the API includes `usage.input_tokens_details.cached_tokens`, the
 normalized `Response.usage.cached_input_tokens` reports that subset of
 `input_tokens`. It is not added to the total a second time.
 
+`Response.usage.context_tokens` repeats a positive `input_tokens`. Each turn
+is one request that carries the whole conversation, directly or through
+`previous_response_id`, so it is the context size. The API reports no context
+window; supply it from configuration when deciding to roll a session over with
+`GenAgent.reset_session/2`.
+
 ## Why no tool use?
 
 This backend is deliberately minimal: text in, text out. The

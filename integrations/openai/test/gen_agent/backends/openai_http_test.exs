@@ -32,7 +32,7 @@ defmodule GenAgent.Backends.OpenAIHTTPTest do
     {:ok, session} = OpenAI.start_session(api_key: "test-key", model: "gpt-test")
     assert {:ok, [usage, result], _session} = OpenAI.prompt(session, "ping")
     assert usage.kind == :usage
-    assert usage.data == %{input_tokens: 3, output_tokens: 2, total_tokens: 5}
+    assert usage.data == %{input_tokens: 3, output_tokens: 2, total_tokens: 5, context_tokens: 3}
     assert result.kind == :result
     assert result.data.text == "hello"
     assert result.data.response_id == "resp_test"
