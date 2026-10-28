@@ -9,8 +9,20 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
   `:result`, `:error`).
 
   `translate/1` maps a single raw event. `translate_stream/1` additionally
-  carries the model reported by session init through to the terminal event
-  and deduplicates streamed text and tool calls.
+  carries the model reported by session init through to the terminal event,
+  deduplicates streamed text and tool calls, and adds context measurements to
+  the turn's `:usage` event:
+
+    * `:context_tokens` -- the prompt size of the turn's last top-level model
+      call: its `input_tokens + cache_read_input_tokens +
+      cache_creation_input_tokens`. The terminal `usage` sums every call in
+      the turn, so it overstates the context on tool-using turns. Subagent
+      calls (with a `parent_tool_use_id`) have their own context and are not
+      counted.
+    * `:context_window` -- `contextWindow` from the terminal `modelUsage`
+      entry for that call's model, or from the only entry when there is one.
+
+  Either key is omitted when the CLI does not report it.
 
   When an envelope has a `parent_tool_use_id`, normalized text and tool
   events carry it as `:parent_tool_use_id` in their data. This lets callers
@@ -167,11 +179,17 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
   """
   @spec translate_stream(Enumerable.t()) :: Enumerable.t()
   def translate_stream(stream) do
-    initial = %{partial_text_by_parent: %{}, seen_calls: MapSet.new(), model: nil}
+    initial = %{
+      partial_text_by_parent: %{},
+      seen_calls: MapSet.new(),
+      model: nil,
+      last_call: nil
+    }
 
     Stream.transform(stream, initial, fn raw, state ->
       model = model_for(raw, state.model)
-      events = translate_with_model(raw, model)
+      last_call = last_call_for(raw, state.last_call)
+      events = raw |> translate_with_model(model) |> put_context(raw, last_call)
 
       parent = parent_tool_use_id(raw.data)
       partial_text = Map.get(state.partial_text_by_parent, parent, "")
@@ -198,9 +216,78 @@ defmodule GenAgent.Backends.Claude.EventTranslator do
         end
 
       {events,
-       %{partial_text_by_parent: partial_text_by_parent, seen_calls: seen_calls, model: model}}
+       %{
+         partial_text_by_parent: partial_text_by_parent,
+         seen_calls: seen_calls,
+         model: model,
+         last_call: last_call
+       }}
     end)
   end
+
+  # The last top-level assistant message carries the usage of the turn's most
+  # recent model call, which is the current conversation size.
+  defp last_call_for(%StreamEvent{type: "assistant", data: data}, previous) do
+    with nil <- parent_tool_use_id(data),
+         %{"usage" => %{} = usage} = message <- data["message"],
+         tokens when is_integer(tokens) <- prompt_tokens(usage) do
+      %{tokens: tokens, model: nonempty_string(message["model"])}
+    else
+      _ -> previous
+    end
+  end
+
+  defp last_call_for(_raw, previous), do: previous
+
+  defp prompt_tokens(usage) do
+    counts =
+      for key <- ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"],
+          is_integer(usage[key]),
+          do: usage[key]
+
+    if counts == [], do: nil, else: Enum.sum(counts)
+  end
+
+  defp put_context(events, %StreamEvent{type: "result", data: data}, last_call) do
+    context =
+      %{
+        context_tokens: last_call && last_call.tokens,
+        context_window: context_window(data["modelUsage"], last_call && last_call.model)
+      }
+      |> drop_nil_values()
+
+    cond do
+      context == %{} ->
+        events
+
+      Enum.any?(events, &(&1.kind == :usage)) ->
+        Enum.map(events, fn
+          %Event{kind: :usage} = event -> %{event | data: Map.merge(event.data, context)}
+          event -> event
+        end)
+
+      true ->
+        [Event.new(:usage, context) | events]
+    end
+  end
+
+  defp put_context(events, _raw, _last_call), do: events
+
+  defp context_window(%{} = model_usage, model) do
+    entry =
+      case {Map.get(model_usage, model), Map.values(model_usage)} do
+        {%{} = entry, _} -> entry
+        {_, [%{} = only]} -> only
+        _ -> nil
+      end
+
+    case entry do
+      %{"contextWindow" => window} when is_integer(window) and window > 0 -> window
+      _ -> nil
+    end
+  end
+
+  defp context_window(_model_usage, _model), do: nil
 
   # ---------------------------------------------------------------------------
   # Helpers
