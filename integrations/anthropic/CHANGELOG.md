@@ -4,6 +4,13 @@
 
 * **deps:** admit GenAgent core 0.10.x while retaining existing supported core ranges.
 
+## [0.6.0](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.5.3...gen_agent_anthropic-v0.6.0) (2026-10-28)
+
+
+### Features
+
+* **anthropic:** report per-turn context tokens in usage ([7ffb2a2](https://github.com/genagent/gen_agent/commit/7ffb2a25a8d126a9f339b89c8ab8e986fd9921ad))
+
 ## [0.5.3](https://github.com/genagent/gen_agent/compare/gen_agent_anthropic-v0.5.2...gen_agent_anthropic-v0.5.3) (2026-10-26)
 
 
