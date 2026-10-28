@@ -69,13 +69,19 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
       assert Enum.join(texts) == Enum.join(expected_texts)
       assert_scenario(context.scenario, parsed, events, texts)
 
-      # Normalized usage omits the recorded cache token fields.
+      # Normalized usage omits the recorded cache token fields and adds the
+      # last call's context size and the model window.
       usage = %{
         input_tokens: result.data["usage"]["input_tokens"],
         output_tokens: result.data["usage"]["output_tokens"]
       }
 
-      assert Enum.at(events, -2).data == usage
+      usage_event = Enum.at(events, -2).data
+      assert Map.take(usage_event, [:input_tokens, :output_tokens]) == usage
+      assert is_integer(usage_event.context_tokens) and usage_event.context_tokens > 0
+
+      windows = for {_model, entry} <- result.data["modelUsage"], do: entry["contextWindow"]
+      assert usage_event.context_window in windows
       assert is_integer(result.data["usage"]["cache_read_input_tokens"])
       assert is_integer(result.data["usage"]["cache_creation_input_tokens"])
       assert_terminal(List.last(events), result.data, usage, init.data["model"])
@@ -153,4 +159,25 @@ defmodule GenAgent.Backends.Claude.RecordingReplayTest do
   end
 
   defp assert_scenario("error-max-turns", _parsed, _events, texts), do: assert(texts == [])
+
+  test "a multi-call turn reports the last call's context and the model window" do
+    events =
+      Path.join(@directory, "tool-partial.jsonl")
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(fn line ->
+        {:ok, event} = StreamEvent.parse(line)
+        event
+      end)
+      |> EventTranslator.translate_stream()
+      |> Enum.to_list()
+
+    usage = Enum.find(events, &(&1.kind == :usage)).data
+
+    # The terminal usage sums both calls (cache read 26,400 + 30,304); the
+    # context is the second call's 8 + 30,304 + 191 prompt tokens.
+    assert usage.context_tokens == 30_503
+    assert usage.context_window == 200_000
+    assert usage.input_tokens == 18
+  end
 end

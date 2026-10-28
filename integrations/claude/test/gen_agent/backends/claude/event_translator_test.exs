@@ -333,6 +333,89 @@ defmodule GenAgent.Backends.Claude.EventTranslatorTest do
     end
   end
 
+  describe "translate_stream/1 context measurements" do
+    defp assistant(model, usage, extra \\ %{}) do
+      stream_event(
+        "assistant",
+        Map.merge(
+          %{"message" => %{"model" => model, "usage" => usage, "content" => []}},
+          extra
+        )
+      )
+    end
+
+    defp context_usage(raw) do
+      raw
+      |> EventTranslator.translate_stream()
+      |> Enum.find(&(&1.kind == :usage))
+      |> Map.fetch!(:data)
+    end
+
+    test "uses the last top-level call and ignores subagent calls" do
+      usage =
+        context_usage([
+          assistant("main", %{"input_tokens" => 5, "cache_read_input_tokens" => 100}),
+          assistant(
+            "sub",
+            %{"input_tokens" => 900, "cache_read_input_tokens" => 9_000},
+            %{"parent_tool_use_id" => "call-1"}
+          ),
+          assistant("main", %{
+            "input_tokens" => 7,
+            "cache_read_input_tokens" => 200,
+            "cache_creation_input_tokens" => 30
+          }),
+          stream_event("result", %{
+            "result" => "ok",
+            "usage" => %{"input_tokens" => 12, "output_tokens" => 4},
+            "modelUsage" => %{
+              "main" => %{"contextWindow" => 1_000_000},
+              "sub" => %{"contextWindow" => 200_000}
+            }
+          })
+        ])
+
+      assert usage == %{
+               input_tokens: 12,
+               output_tokens: 4,
+               context_tokens: 237,
+               context_window: 1_000_000
+             }
+    end
+
+    test "falls back to a single modelUsage entry and omits unknown values" do
+      only =
+        context_usage([
+          assistant("alias", %{"input_tokens" => 3}),
+          stream_event("result", %{
+            "usage" => %{"input_tokens" => 3, "output_tokens" => 1},
+            "modelUsage" => %{"full-model-id" => %{"contextWindow" => 200_000}}
+          })
+        ])
+
+      assert only.context_window == 200_000
+
+      none =
+        context_usage([
+          stream_event("result", %{"usage" => %{"input_tokens" => 3, "output_tokens" => 1}})
+        ])
+
+      assert none == %{input_tokens: 3, output_tokens: 1}
+    end
+
+    test "reports context without terminal token counts" do
+      events =
+        [
+          assistant("main", %{"input_tokens" => 4}),
+          stream_event("result", %{"result" => "ok"})
+        ]
+        |> EventTranslator.translate_stream()
+        |> Enum.to_list()
+
+      assert [%{kind: :usage, data: %{context_tokens: 4}}, %{kind: :result}] = events
+    end
+  end
+
   describe "translate_stream/1" do
     test "recorded CLI init model reaches terminal response" do
       fixture = Path.expand("../../../fixtures/claude/2.1.284/json-schema.jsonl", __DIR__)

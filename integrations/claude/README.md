@@ -383,8 +383,14 @@ so one turn's events mix both key types.
   `%{"type" => "tool_result", "tool_use_id" => "toolu_...", "content" => "..."}`.
   `"content"` is a string or a list of content blocks. `"is_error"` is
   present only when the CLI includes it.
-- `:usage` -- `%{input_tokens: integer, output_tokens: integer}`. A count
-  the CLI omits is omitted. Cache token counts are not included.
+- `:usage` -- `%{input_tokens: integer, output_tokens: integer, context_tokens: integer, context_window: integer}`.
+  A count the CLI omits is omitted. Cache token counts are not included in the
+  input and output counts, which sum every model call in the turn.
+  `:context_tokens` is the prompt size of the turn's last top-level model call
+  (input plus cache read plus cache creation tokens), the current conversation
+  size; subagent calls are not counted. `:context_window` is that model's
+  `contextWindow` from the result's `modelUsage`. Compare the two to decide
+  when to roll a session over with `GenAgent.reset_session/2`.
 - `:result` -- `%{text: String.t(), session_id: String.t(), model: String.t(), cost_usd: number, duration_ms: integer, num_turns: integer, is_error: false, raw: map}`.
   The reported init model is also available as `Response.model`, even with compact event retention.
   Fields the CLI omits are omitted, except `:is_error`. `:raw` is the string-keyed result event, so
