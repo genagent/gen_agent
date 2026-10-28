@@ -4,6 +4,13 @@
 
 * **deps:** admit GenAgent core 0.10.x while retaining existing supported core ranges.
 
+## [0.8.0](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.7.0...gen_agent_codex-v0.8.0) (2026-10-28)
+
+
+### Features
+
+* **codex:** report per-turn context tokens in usage ([dba49f1](https://github.com/genagent/gen_agent/commit/dba49f1e9d51c41894b391feede945fc8edffe38))
+
 ## [0.7.0](https://github.com/genagent/gen_agent/compare/gen_agent_codex-v0.6.2...gen_agent_codex-v0.7.0) (2026-10-26)
 
 
