@@ -4,6 +4,13 @@
 
 * **deps:** admit GenAgent core 0.10.x while retaining existing supported core ranges.
 
+## [0.5.0](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.4.0...gen_agent_claude-v0.5.0) (2026-10-28)
+
+
+### Features
+
+* **claude:** report per-turn context tokens and window in usage ([d51ec28](https://github.com/genagent/gen_agent/commit/d51ec284a7ef5a46043dc5ea984c8d3d489e4ece))
+
 ## [0.4.0](https://github.com/genagent/gen_agent/compare/gen_agent_claude-v0.3.2...gen_agent_claude-v0.4.0) (2026-10-26)
 
 
