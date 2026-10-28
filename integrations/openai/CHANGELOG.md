@@ -4,6 +4,13 @@
 
 * **deps:** admit GenAgent core 0.10.x while retaining existing supported core ranges.
 
+## [0.6.0](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.5.3...gen_agent_openai-v0.6.0) (2026-10-28)
+
+
+### Features
+
+* **openai:** report per-turn context tokens in usage ([3b9ad34](https://github.com/genagent/gen_agent/commit/3b9ad34a3bda6719525224b347eddbdca18a3e54))
+
 ## [0.5.3](https://github.com/genagent/gen_agent/compare/gen_agent_openai-v0.5.2...gen_agent_openai-v0.5.3) (2026-10-26)
 
 
