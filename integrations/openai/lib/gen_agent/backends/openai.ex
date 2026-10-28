@@ -59,6 +59,10 @@ defmodule GenAgent.Backends.OpenAI do
   event when present, so patterns can reason about cost.
   When present, `usage.input_tokens_details.cached_tokens` is also
   included as `:cached_input_tokens`; it is a subset of `:input_tokens`.
+  `:context_tokens` repeats a positive `:input_tokens`: one request per turn
+  sends the whole conversation (directly, or through `previous_response_id`),
+  so it is the context size. The API reports no context window; supply it
+  from configuration.
 
   Set `:reasoning_effort` to request a specific effort level, for
   example `:low`, `:medium`, or `:high`; leave it `nil` for the model
@@ -710,7 +714,8 @@ defmodule GenAgent.Backends.OpenAI do
           output_tokens: output,
           total_tokens: total,
           reasoning_tokens: reasoning,
-          cached_input_tokens: cached
+          cached_input_tokens: cached,
+          context_tokens: if(is_integer(input) and input > 0, do: input)
         }
         |> drop_nil_values()
     end
