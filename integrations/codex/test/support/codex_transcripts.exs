@@ -56,7 +56,10 @@ defmodule GenAgent.CodexTranscripts do
     }
 
     messages(name) ++
-      [{:usage, usage}, {:result, %{session_id: thread_id(name), usage_total: usage}}]
+      [
+        {:usage, Map.put(usage, :context_tokens, input)},
+        {:result, %{session_id: thread_id(name), usage_total: usage}}
+      ]
   end
 
   def expected_error(raw) do
@@ -85,11 +88,17 @@ defmodule GenAgent.CodexTranscripts do
 
   defp messages(name), do: [{:text, %{text: text(name), message_boundary: true}}]
 
+  # The :usage event mirrors a known input increase as :context_tokens.
+  def with_context(%{input_tokens: input} = usage) when input > 0,
+    do: Map.put_new(usage, :context_tokens, input)
+
+  def with_context(usage), do: usage
+
   def assert_events(events, name, expected_usage \\ nil, expected_model \\ nil) do
     expected =
       case expected_usage do
         nil -> expected(name)
-        usage -> List.keyreplace(expected(name), :usage, 0, {:usage, usage})
+        usage -> List.keyreplace(expected(name), :usage, 0, {:usage, with_context(usage)})
       end
 
     expected =

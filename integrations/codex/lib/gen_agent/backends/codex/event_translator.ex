@@ -66,6 +66,13 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
   baseline is all zeros, which treats the stream as the first turn of a
   thread.
 
+  When the `input_tokens` increase is known and positive, the `:usage`
+  event also carries it as `:context_tokens`. Codex input counts include cached
+  tokens, so for a turn with one model call this is the conversation size
+  sent to the model. A turn with several model calls (tool use) sums their
+  prompts, so the value is then an upper bound. Codex exec reports no
+  context window; callers supply it from configuration.
+
   ## Response text
 
   The `:response_text` option selects what the terminal `:result` says
@@ -248,7 +255,7 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
     usage_events =
       case usage_delta(total, state.baseline) do
         delta when map_size(delta) == 0 -> []
-        delta -> [Event.new(:usage, delta)]
+        delta -> [Event.new(:usage, put_context_tokens(delta))]
       end
 
     # Codex's terminal event carries no assembled text -- the agent's
@@ -327,6 +334,14 @@ defmodule GenAgent.Backends.Codex.EventTranslator do
   end
 
   defp extract_total(_), do: %{}
+
+  # Codex input counts include cached tokens, so a one-call turn's input
+  # increase is the prompt it sent. Codex exec reports no context window.
+  # A zero increase means the total did not move, so the size is unknown.
+  defp put_context_tokens(%{input_tokens: input} = delta) when input > 0,
+    do: Map.put(delta, :context_tokens, input)
+
+  defp put_context_tokens(delta), do: delta
 
   defp usage_delta(total, baseline) do
     for {field, value} <- total,

@@ -254,7 +254,7 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
       assert response.text == @final_json
       assert Jason.decode!(response.text) == %{"module" => "Foo", "public_functions" => 2}
       assert response.session_id == "t-final"
-      assert response.usage == %{input_tokens: 20, output_tokens: 8}
+      assert response.usage == %{input_tokens: 20, output_tokens: 8, context_tokens: 20}
 
       # Every message still streams and is retained; only the terminal text differs.
       assert Enum.map(response.events, & &1.kind) == [
@@ -332,18 +332,18 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
       assert {:ok, first} = GenAgent.ask(name, "one")
       assert_receive {:exec_call, nil, :final_message}
       assert first.text == "first answer"
-      assert first.usage == %{input_tokens: 10, output_tokens: 2}
+      assert first.usage == %{input_tokens: 10, output_tokens: 2, context_tokens: 10}
 
       assert {:ok, second} = GenAgent.ask(name, "two")
       assert_receive {:exec_call, "t-resume", :final_message}
       assert second.text == ""
       assert second.session_id == "t-resume"
-      assert second.usage == %{input_tokens: 15, output_tokens: 3}
+      assert second.usage == %{input_tokens: 15, output_tokens: 3, context_tokens: 15}
 
       assert {:ok, third} = GenAgent.ask(name, "three")
       assert_receive {:exec_call, "t-resume", :final_message}
       assert third.text == "third answer"
-      assert third.usage == %{input_tokens: 15, output_tokens: 4}
+      assert third.usage == %{input_tokens: 15, output_tokens: 4, context_tokens: 15}
     end
 
     test ":final_message leaves failed turns as errors and keeps the thread checkpoint" do
@@ -428,7 +428,7 @@ defmodule GenAgent.Backends.CodexIntegrationTest do
       assert response.text == "pong"
       assert response.session_id == "thread-101"
       assert Enum.map(response.events, & &1.kind) == [:text, :usage, :result]
-      assert response.usage == %{input_tokens: 10, output_tokens: 2}
+      assert response.usage == %{input_tokens: 10, output_tokens: 2, context_tokens: 10}
     end
 
     test "threads thread_id across multiple turns" do
