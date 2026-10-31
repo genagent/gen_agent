@@ -16,6 +16,7 @@
         "design",
         "RELEASING.md",
         "CONTRIBUTING.md",
+        "SECURITY.md",
         "MIGRATION.md"
       ],
       "extra-files": ["README.md", "lib/gen_agent.ex"]
