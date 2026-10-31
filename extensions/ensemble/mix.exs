@@ -13,6 +13,18 @@ defmodule GenAgentEnsemble.MixProject do
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
+      test_coverage: [
+        summary: [threshold: 94],
+        # Compiled from test/support; not part of the package.
+        ignore_modules: [
+          GenAgentEnsemble.ControlledAgent,
+          GenAgentEnsemble.ControlledBackend,
+          GenAgentEnsemble.ForwardBoundary,
+          GenAgentEnsemble.HaltSupport,
+          GenAgentEnsemble.StreamingBackend,
+          GenAgentEnsemble.TestAgent
+        ]
+      ],
       description: description(),
       package: package(),
       docs: docs(),
