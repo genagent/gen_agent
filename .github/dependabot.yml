@@ -1,34 +1,19 @@
 version: 2
 updates:
+  # One entry for every Mix project so a dependency shared across packages,
+  # such as Credo, gets one pull request instead of one per directory.
   - package-ecosystem: mix
-    directory: /
+    directories:
+      - /
+      - /integrations/*
+      - /extensions/ensemble
     schedule:
       interval: weekly
-
-  - package-ecosystem: mix
-    directory: /integrations/claude
-    schedule:
-      interval: weekly
-
-  - package-ecosystem: mix
-    directory: /integrations/codex
-    schedule:
-      interval: weekly
-
-  - package-ecosystem: mix
-    directory: /integrations/anthropic
-    schedule:
-      interval: weekly
-
-  - package-ecosystem: mix
-    directory: /integrations/openai
-    schedule:
-      interval: weekly
-
-  - package-ecosystem: mix
-    directory: /extensions/ensemble
-    schedule:
-      interval: weekly
+    groups:
+      mix:
+        group-by: dependency-name
+        patterns:
+          - "*"
 
   - package-ecosystem: github-actions
     directory: /
