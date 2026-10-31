@@ -30,15 +30,8 @@ GenAgent is a monorepo with six independently published Hex packages:
 For the six published packages, `GEN_AGENT_HEX=1` switches dependencies to version
 constraints during publishing. The publishing workflow handles this automatically.
 
-Two additional packages are source-only and are not included in that release pipeline:
-
-| Source package | Directory and guide | Purpose |
-| --- | --- | --- |
-| `gen_agent_structured` | [integrations/structured](integrations/structured/README.md) | Structured IO contracts and profiles |
-| `gen_agent_delegation` | [extensions/delegation](extensions/delegation/README.md) | Delegate manager, MCP tools and local plugin export |
-
-Use local path dependencies as described in their guides. Delegate's local export
-is available; Hex publication for these two packages has not been prepared.
+Local task delegation and the structured IO contracts it uses live in
+[genagent/gen_agent_delegate](https://github.com/genagent/gen_agent_delegate).
 
 ## Running checks
 
@@ -55,7 +48,7 @@ mix dialyzer
 
 These four commands match the [Testing section](README.md#testing) in the README.
 
-### Full checks (six published and two source packages)
+### Full checks (six published packages)
 
 Before pushing, run the full validation across all packages:
 
@@ -63,25 +56,8 @@ Before pushing, run the full validation across all packages:
 scripts/quality.sh
 ```
 
-For the six published packages, the script retains dependency lock checks and
-audits, warnings-as-errors compilation, formatting, Credo, tests, ExDoc and
-Dialyzer. For the two source packages, it checks dependency locks, audits Hex
-dependencies after `mix deps.get --check-locked` rejects lockfile drift,
-compiles with warnings as errors, and runs formatting and
-provider-free tests, then validates Structured's example profiles
-or builds Delegate's production plugin export in a temporary directory. It does
-not require development tools those packages do not declare, or attempt to build
-Hex archives for them. Delegate export includes the native runtime and requires
-the build toolchain and provisioned dependencies; no provider call is made.
-
-To check just the source packages:
-
-```bash
-scripts/quality.sh integrations/structured extensions/delegation
-```
-
-PR CI runs these source gates on Elixir 1.19 / OTP 27 and Elixir 1.20 / OTP 29
-in a separate matrix alongside the unchanged published-package gates.
+For each package, the script runs dependency lock checks and audits,
+warnings-as-errors compilation, formatting, Credo, tests, ExDoc and Dialyzer.
 
 ## Pull requests
 

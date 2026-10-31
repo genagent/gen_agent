@@ -209,46 +209,6 @@ jobs:
       - name: Run package quality gates
         run: bash "$GITHUB_WORKSPACE/scripts/quality.sh" "${{ matrix.package }}"
 
-  source-packages:
-    name: Source package / ${{ matrix.package }} / Elixir ${{ matrix.toolchain.elixir }} / OTP ${{ matrix.toolchain.otp }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        toolchain:
-          - elixir: "1.19"
-            otp: "27"
-          - elixir: "1.20"
-            otp: "29"
-        package:
-          - integrations/structured
-          - extensions/delegation
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Rust for Forcola source builds
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          toolchain: stable
-
-      - uses: erlef/setup-beam@v1
-        with:
-          elixir-version: ${{ matrix.toolchain.elixir }}
-          otp-version: ${{ matrix.toolchain.otp }}
-
-      # Cache downloads only; always compile current local sibling sources.
-      - name: Restore source-package deps cache
-        uses: actions/cache@v6
-        with:
-          path: ${{ matrix.package }}/deps
-          key: mix-source-deps-v1-${{ matrix.package }}-${{ matrix.toolchain.elixir }}-${{ matrix.toolchain.otp }}-${{ hashFiles(format('{0}/mix.lock', matrix.package), format('{0}/mix.exs', matrix.package)) }}
-          restore-keys: |
-            mix-source-deps-v1-${{ matrix.package }}-${{ matrix.toolchain.elixir }}-${{ matrix.toolchain.otp }}-
-
-      - name: Compile, format, test and check local package delivery
-        run: bash scripts/quality.sh "${{ matrix.package }}"
-
   publish-toolchain:
     name: ${{ matrix.package }} / Elixir 1.19 / OTP 27
     runs-on: ubuntu-latest
