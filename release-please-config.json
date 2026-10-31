@@ -11,8 +11,6 @@
         "integrations/anthropic",
         "integrations/openai",
         "extensions/ensemble",
-        "integrations/structured",
-        "extensions/delegation",
         ".github",
         "scripts",
         "design",

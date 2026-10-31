@@ -7,8 +7,8 @@
 A behaviour and supervision framework for long-running LLM agent processes,
 modeled as OTP state machines.
 
-This repository contains six independently versioned published Hex packages
-and two optional source packages. Install
+This repository contains six independently versioned published Hex packages.
+Install
 only the packages an application needs; core has no dependency on a CLI
 wrapper or HTTP client.
 
@@ -21,22 +21,8 @@ wrapper or HTTP client.
 | [`gen_agent_openai`](https://hex.pm/packages/gen_agent_openai) | [`integrations/openai`](https://github.com/genagent/gen_agent/tree/main/integrations/openai) | OpenAI HTTP backend |
 | [`gen_agent_ensemble`](https://hex.pm/packages/gen_agent_ensemble) | [`extensions/ensemble`](https://github.com/genagent/gen_agent/tree/main/extensions/ensemble) | Multi-agent strategies |
 
-The optional source packages are available from this checkout:
-
-| Source package | Directory and guide | Purpose |
-| --- | --- | --- |
-| `gen_agent_structured` | [integrations/structured](integrations/structured/README.md) | Validated structured requests, responses and profiles |
-| `gen_agent_delegation` | [extensions/delegation](extensions/delegation/README.md) | Local task delegation, MCP tools and plugin export |
-
-For example, add a local dependency to a consumer's `mix.exs`:
-
-```elixir
-{:gen_agent_delegation, path: "/absolute/path/to/gen_agent/extensions/delegation"}
-```
-
-These packages use local sibling dependencies. Delegate can export a local plugin
-with a bundled runtime; Hex publication of these two packages has not been
-prepared, and they are outside the six-package release pipeline.
+Local task delegation and the structured IO contracts it uses live in
+[genagent/gen_agent_delegate](https://github.com/genagent/gen_agent_delegate).
 
 The [`claude_wrapper`](https://github.com/genagent/claude_wrapper_ex) and
 [`codex_wrapper`](https://github.com/genagent/codex_wrapper_ex) repositories
@@ -758,7 +744,7 @@ mix dialyzer
 ```
 
 These commands check the root package. Run `scripts/quality.sh` to validate
-the six published packages and both optional source packages; see the [contributor guide](https://github.com/genagent/gen_agent/blob/main/CONTRIBUTING.md)
+the six published packages; see the [contributor guide](https://github.com/genagent/gen_agent/blob/main/CONTRIBUTING.md)
 for setup and release conventions.
 
 `GenAgent.Backends.Mock` ships with the core package so applications can

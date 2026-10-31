@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "gen-agent-delegate": {
-      "type": "stdio",
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/gen-agent-delegate",
-      "args": []
-    }
-  }
-}
