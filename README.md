@@ -430,6 +430,7 @@ For the tradeoffs between wrappers, GenAgent, and Oban workers, see
 | `child_spec/2` | Build an agent child spec for a caller-owned supervisor. |
 | `stop/2` | Terminate an agent under a caller-owned supervisor. |
 | `whereis/1` | Look up an agent's pid. |
+| `list/0` | List running agents as `{name, pid}` pairs. |
 
 The `GenAgent` functions resolve names through a `Registry` (any term,
 including a PID-valued name). `GenAgent.Client` explicitly targets a local
