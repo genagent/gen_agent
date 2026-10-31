@@ -1330,6 +1330,25 @@ defmodule GenAgent do
     end
   end
 
+  @doc """
+  List the agents registered in `GenAgent.Registry` as `{name, pid}` pairs.
+
+  This includes agents started with `start_agent/2` and with `child_spec/2`
+  under a caller-owned supervisor. The order is unspecified. Pass a name,
+  not its pid, to public client functions; the pid is for monitoring.
+
+  The result contains only names and pids, no agent state. It is a
+  point-in-time view of this BEAM node: an agent can start or exit right
+  after the call returns. Like `whereis/1`, it omits a pid that is no
+  longer alive even if the Registry has not removed its entry yet.
+  """
+  @spec list() :: [{name(), pid()}]
+  def list do
+    GenAgent.Registry
+    |> Registry.select([{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+    |> Enum.filter(fn {_name, pid} -> Process.alive?(pid) end)
+  end
+
   defp call(name, request, timeout) do
     case whereis(name) do
       nil -> {:error, :not_found}
