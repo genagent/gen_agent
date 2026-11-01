@@ -13,6 +13,7 @@ defmodule GenAgentCodex.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
+      test_coverage: [summary: [threshold: 89]],
       docs: docs(),
       package: package(),
       name: "GenAgentCodex",

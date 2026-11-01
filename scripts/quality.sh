@@ -25,7 +25,7 @@ for package in "${packages[@]}"; do
     mix compile --warnings-as-errors
     mix format --check-formatted
     mix credo --strict
-    mix test
+    mix test --cover
     mix docs --warnings-as-errors
     mix dialyzer
   )

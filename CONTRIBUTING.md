@@ -57,7 +57,9 @@ scripts/quality.sh
 ```
 
 For each package, the script runs dependency lock checks and audits,
-warnings-as-errors compilation, formatting, Credo, tests, ExDoc and Dialyzer.
+warnings-as-errors compilation, formatting, Credo, tests with `--cover`, ExDoc
+and Dialyzer. Each package's `mix.exs` sets a `test_coverage` threshold, and
+the test step fails when total coverage falls below it.
 
 ## Pull requests
 

@@ -257,7 +257,9 @@ defmodule GenAgent.WorkspaceGuideTest do
       """
 
       assert {_, 0} =
-               System.cmd("elixir", ["-pa", Path.dirname(:code.which(GenAgent)), "-e", script],
+               System.cmd(
+                 "elixir",
+                 ["-pa", Application.app_dir(:gen_agent, "ebin"), "-e", script],
                  stderr_to_stdout: true
                )
 
