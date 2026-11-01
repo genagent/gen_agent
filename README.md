@@ -45,7 +45,7 @@ semantics of turns.
 ```elixir
 def deps do
   [
-    {:gen_agent, "~> 0.11.0"} # x-release-please-version
+    {:gen_agent, "~> 0.12.0"} # x-release-please-version
   ]
 end
 ```
