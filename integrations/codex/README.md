@@ -349,7 +349,7 @@ default. They burn real tokens -- keep them cheap.
 
 ## Core compatibility
 
-The Hex dependency supports GenAgent core 0.6.x through 0.10.x. Source
+The Hex dependency supports GenAgent core 0.6.x through 0.12.x. Source
 checkouts continue to use the local core path.
 
 
