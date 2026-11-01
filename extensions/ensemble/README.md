@@ -56,9 +56,11 @@ Add a backend from its own installation guide when using Ensemble:
 [Anthropic](https://github.com/genagent/gen_agent/tree/main/integrations/anthropic),
 or [OpenAI](https://github.com/genagent/gen_agent/tree/main/integrations/openai).
 
-Ensemble requires GenAgent core `>= 0.10.0 and < 0.11.0` (`~> 0.10.0`).
-Forward operations use `GenAgent.Client.notify/2`, introduced in core 0.10.0;
-earlier cores cannot supply that function and are incompatible with this code.
+Ensemble requires GenAgent core `>= 0.11.0 and < 0.13.0`
+(`~> 0.11.0 or ~> 0.12.0`). Forward operations use
+`GenAgent.Client.notify/2`, introduced in core 0.10.0, and
+`member_sessions: :per_run` uses `GenAgent.Client.reset_session/2`,
+introduced in core 0.11.0; earlier cores are incompatible with this code.
 The older synchronous child-admission implementation admitted core 0.7, 0.8,
 and 0.9.
 

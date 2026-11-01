@@ -260,7 +260,7 @@ mix test --only live
 
 ## Core compatibility
 
-The Hex dependency supports GenAgent core 0.2.x through 0.10.x. Source
+The Hex dependency supports GenAgent core 0.2.x through 0.12.x. Source
 checkouts continue to use the local core path.
 
 
