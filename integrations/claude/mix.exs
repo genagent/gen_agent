@@ -55,7 +55,8 @@ defmodule GenAgentClaude.MixProject do
 
   defp gen_agent_dep do
     if System.get_env("GEN_AGENT_HEX") == "1" do
-      {:gen_agent, "~> 0.6.0 or ~> 0.7.0 or ~> 0.8.0 or ~> 0.9.0 or ~> 0.10.0 or ~> 0.11.0"}
+      {:gen_agent,
+       "~> 0.6.0 or ~> 0.7.0 or ~> 0.8.0 or ~> 0.9.0 or ~> 0.10.0 or ~> 0.11.0 or ~> 0.12.0"}
     else
       {:gen_agent, path: "../.."}
     end
