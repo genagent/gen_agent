@@ -34,7 +34,7 @@ defmodule GenAgentCodex.MixProject do
   defp deps do
     [
       gen_agent_dep(),
-      {:codex_wrapper, "~> 0.6.0 or ~> 0.7.0 or ~> 0.8.0"},
+      {:codex_wrapper, "~> 0.6.0 or ~> 0.7.0 or ~> 0.8.0 or ~> 0.9.0"},
       {:ex_doc, "~> 0.35", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
